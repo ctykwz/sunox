@@ -54,8 +54,7 @@ pub struct CreateArgs {
     #[arg(long, conflicts_with = "no_captcha")]
     pub captcha: bool,
 
-    /// Skip the built-in challenge solver. This is the default unless
-    /// `--captcha` is supplied.
+    /// Do not force the built-in challenge solver; challenge preflight still runs.
     #[arg(long)]
     pub no_captcha: bool,
 
@@ -114,8 +113,7 @@ pub struct GenerateArgs {
     #[arg(long, conflicts_with = "no_captcha")]
     pub captcha: bool,
 
-    /// Skip the built-in challenge solver. Useful when you supply --token from
-    /// an external solver.
+    /// Do not force the built-in challenge solver; challenge preflight still runs.
     #[arg(long)]
     pub no_captcha: bool,
 
@@ -158,6 +156,10 @@ pub struct DescribeArgs {
     #[arg(long)]
     pub instrumental: bool,
 
+    /// Challenge token (overrides the built-in solver)
+    #[arg(long)]
+    pub token: Option<String>,
+
     /// Force the built-in browser challenge solver before submitting.
     #[arg(long, conflicts_with = "no_captcha")]
     pub captcha: bool,
@@ -195,6 +197,18 @@ pub struct ExtendArgs {
     /// Style tags
     #[arg(long)]
     pub tags: Option<String>,
+
+    /// Challenge token (overrides the built-in solver)
+    #[arg(long)]
+    pub token: Option<String>,
+
+    /// Force the built-in browser challenge solver before submitting.
+    #[arg(long, conflicts_with = "no_captcha")]
+    pub captcha: bool,
+
+    /// Do not force the built-in challenge solver; challenge preflight still runs.
+    #[arg(long)]
+    pub no_captcha: bool,
 }
 
 #[derive(clap::Args)]
@@ -215,6 +229,18 @@ pub struct CoverArgs {
     /// Model version for the cover
     #[arg(short, long)]
     pub model: Option<ModelVersion>,
+
+    /// Challenge token (overrides the built-in solver)
+    #[arg(long)]
+    pub token: Option<String>,
+
+    /// Force the built-in browser challenge solver before submitting.
+    #[arg(long, conflicts_with = "no_captcha")]
+    pub captcha: bool,
+
+    /// Do not force the built-in challenge solver; challenge preflight still runs.
+    #[arg(long)]
+    pub no_captcha: bool,
 }
 
 #[derive(clap::Args)]
@@ -231,6 +257,18 @@ pub struct RemasterArgs {
 pub struct StemsArgs {
     /// Clip ID to extract stems from
     pub clip_id: String,
+
+    /// Challenge token (overrides the built-in solver)
+    #[arg(long)]
+    pub token: Option<String>,
+
+    /// Force the built-in browser challenge solver before submitting.
+    #[arg(long, conflicts_with = "no_captcha")]
+    pub captcha: bool,
+
+    /// Do not force the built-in challenge solver; challenge preflight still runs.
+    #[arg(long)]
+    pub no_captcha: bool,
 }
 
 #[derive(clap::Args)]

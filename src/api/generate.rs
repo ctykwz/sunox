@@ -10,6 +10,19 @@ impl SunoClient {
     /// Wrapped in `with_auth_retry` so a single stale-JWT failure recovers
     /// transparently via Clerk refresh.
     pub async fn generate(&self, req: &GenerateRequest) -> Result<Vec<Clip>, CliError> {
+        if req.token.is_none() {
+            let challenge = self.generation_challenge().await?;
+            if challenge.required {
+                let version = challenge
+                    .captcha_version
+                    .map(|version| version.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                return Err(CliError::Config(format!(
+                    "Suno requires a generation challenge (captcha_version={version}). Complete a manual generation challenge in the Suno web app and retry, provide a valid challenge token with --token <token>, or force the browser-backed solver with --captcha."
+                )));
+            }
+        }
+
         self.with_auth_retry(|| async {
             let resp = self.post("/api/generate/v2-web/").json(req).send().await?;
             let resp = self.check_response(resp).await?;

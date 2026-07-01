@@ -4,11 +4,11 @@ use tokio::sync::oneshot;
 
 use super::SunoClient;
 use super::types::{
-    ClipReaction, CreateAudioUploadRequest, CreateAudioUploadSpec, CreatePersonaRequest,
-    EditPersonaRequest, FinishAudioUploadRequest, GenerateRequest, InitializeAudioClipRequest,
-    PersonaListScope, PlaylistReaction, SetMetadataRequest,
+    ClipReaction, CreateAudioUploadRequest, CreateAudioUploadSpec, CreateImageUploadRequest,
+    CreatePersonaRequest, EditPersonaRequest, FinishAudioUploadRequest, GenerateRequest,
+    InitializeAudioClipRequest, PersonaListScope, PlaylistReaction, SetMetadataRequest,
 };
-use crate::auth::AuthState;
+use crate::auth::{AuthState, BrowserEnvironment};
 
 struct CapturedRequest {
     method: String,
@@ -54,15 +54,15 @@ impl MockServer {
     }
 
     fn client(&self) -> SunoClient {
-        SunoClient::new_for_tests(
-            self.base_url.clone(),
-            AuthState {
-                jwt: Some("test-jwt".into()),
-                device_id: Some("device-1".into()),
-                ..AuthState::default()
-            },
-        )
-        .expect("test client")
+        self.client_with_auth(AuthState {
+            jwt: Some("test-jwt".into()),
+            device_id: Some("device-1".into()),
+            ..AuthState::default()
+        })
+    }
+
+    fn client_with_auth(&self, auth: AuthState) -> SunoClient {
+        SunoClient::new_for_tests(self.base_url.clone(), auth).expect("test client")
     }
 
     async fn captured(self) -> CapturedRequest {
@@ -150,6 +150,31 @@ async fn delete_clips_posts_current_web_trash_contract() {
             "clip_ids": ["clip-a", "clip-b"]
         })
     );
+}
+
+#[tokio::test]
+async fn requests_use_stored_browser_environment_headers_when_available() {
+    let server = MockServer::json(r#"{"required":false}"#).await;
+    let client = server.client_with_auth(AuthState {
+        jwt: Some("test-jwt".into()),
+        device_id: Some("device-1".into()),
+        browser_environment: Some(BrowserEnvironment {
+            browser_source: Some("interactive-browser".into()),
+            user_agent: Some("SunoxTestBrowser/1.0".into()),
+            accept_language: Some("en-US,en;q=0.9".into()),
+        }),
+        ..AuthState::default()
+    });
+
+    client
+        .generation_challenge()
+        .await
+        .expect("generation challenge");
+
+    let request = server.captured().await;
+    let headers = request.headers.to_ascii_lowercase();
+    assert!(headers.contains("user-agent: sunoxtestbrowser/1.0"));
+    assert!(headers.contains("accept-language: en-us,en;q=0.9"));
 }
 
 #[tokio::test]
@@ -360,7 +385,98 @@ async fn generate_posts_current_web_contract() {
 }
 
 #[tokio::test]
+async fn generation_challenge_posts_current_web_contract() {
+    let server = MockServer::json(r#"{"required":true,"captcha_version":1}"#).await;
+    let client = server.client();
+
+    let challenge = client
+        .generation_challenge()
+        .await
+        .expect("generation challenge");
+
+    assert!(challenge.required);
+    assert_eq!(challenge.captcha_version, Some(1));
+    let request = server.captured().await;
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/api/c/check");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&request.body).expect("request json"),
+        serde_json::json!({ "ctype": "generation" })
+    );
+}
+
+#[tokio::test]
+async fn generate_without_token_preflights_then_submits_when_challenge_is_not_required() {
+    let server = MockServer::json_sequence(&[
+        r#"{"required":false}"#,
+        r#"{"clips":[{"id":"clip-1","title":"Demo","status":"submitted","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z"}]}"#,
+    ])
+    .await;
+    let client = server.client();
+    let generate = GenerateRequest::new("chirp-fenix", "custom");
+
+    let clips = client.generate(&generate).await.expect("generate");
+
+    assert_eq!(clips[0].id, "clip-1");
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].path, "/api/c/check");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[0].body).expect("request json"),
+        serde_json::json!({ "ctype": "generation" })
+    );
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[1].path, "/api/generate/v2-web/");
+}
+
+#[tokio::test]
+async fn generate_without_token_stops_when_challenge_is_required() {
+    let server = MockServer::json(r#"{"required":true,"captcha_version":1}"#).await;
+    let client = server.client();
+    let generate = GenerateRequest::new("chirp-fenix", "custom");
+
+    let err = client
+        .generate(&generate)
+        .await
+        .expect_err("challenge error");
+
+    assert!(err.to_string().contains("generation challenge"));
+    let request = server.captured().await;
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/api/c/check");
+}
+
+#[tokio::test]
 async fn cover_posts_generate_v2_cover_contract() {
+    let server = MockServer::json_sequence(&[
+        r#"{"required":false}"#,
+        r#"{"clips":[{"id":"cover-1","title":"Cover","status":"submitted","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z"}]}"#,
+    ])
+    .await;
+    let client = server.client();
+
+    let clips = client
+        .cover("clip-a", "chirp-fenix", Some("pop"), None)
+        .await
+        .expect("cover");
+
+    assert_eq!(clips[0].id, "cover-1");
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].path, "/api/c/check");
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[1].path, "/api/generate/v2-web/");
+    let body = serde_json::from_str::<serde_json::Value>(&requests[1].body).expect("request json");
+    assert_eq!(body["mv"], "chirp-fenix");
+    assert_eq!(body["tags"], "pop");
+    assert_eq!(body["cover_clip_id"], "clip-a");
+    assert_eq!(body["metadata"]["create_mode"], "cover");
+}
+
+#[tokio::test]
+async fn cover_with_challenge_token_posts_generate_without_preflight_contract() {
     let server = MockServer::json(
         r#"{"clips":[{"id":"cover-1","title":"Cover","status":"submitted","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z"}]}"#,
     )
@@ -368,7 +484,12 @@ async fn cover_posts_generate_v2_cover_contract() {
     let client = server.client();
 
     let clips = client
-        .cover("clip-a", "chirp-fenix", Some("pop"))
+        .cover(
+            "clip-a",
+            "chirp-fenix",
+            Some("pop"),
+            Some("captcha-token".into()),
+        )
         .await
         .expect("cover");
 
@@ -377,10 +498,9 @@ async fn cover_posts_generate_v2_cover_contract() {
     assert_eq!(request.method, "POST");
     assert_eq!(request.path, "/api/generate/v2-web/");
     let body = serde_json::from_str::<serde_json::Value>(&request.body).expect("request json");
-    assert_eq!(body["mv"], "chirp-fenix");
-    assert_eq!(body["tags"], "pop");
     assert_eq!(body["cover_clip_id"], "clip-a");
-    assert_eq!(body["metadata"]["create_mode"], "cover");
+    assert_eq!(body["token"], "captcha-token");
+    assert_eq!(body["token_provider"], 1);
 }
 
 #[tokio::test]
@@ -462,22 +582,25 @@ async fn speed_adjust_posts_current_web_contract() {
 async fn stems_posts_current_web_contract() {
     let server = MockServer::json_sequence(&[
         r#"[{"id":"clip-a","title":"Source Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z"}]"#,
+        r#"{"required":false}"#,
         r#"{"clips":[{"id":"stem-1","title":"Source Song (Vocals)","status":"submitted","model_name":"chirp-stem","created_at":"2026-06-30T00:00:00Z"},{"id":"stem-2","title":"Source Song (Drums)","status":"submitted","model_name":"chirp-stem","created_at":"2026-06-30T00:00:00Z"}]}"#,
     ])
     .await;
     let client = server.client();
 
-    let clips = client.stems("clip-a").await.expect("stems");
+    let clips = client.stems("clip-a", None).await.expect("stems");
 
     assert_eq!(clips.len(), 2);
     assert_eq!(clips[0].id, "stem-1");
     let requests = server.captured_all().await;
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 3);
     assert_eq!(requests[0].method, "GET");
     assert_eq!(requests[0].path, "/api/feed/?ids=clip-a");
     assert_eq!(requests[1].method, "POST");
-    assert_eq!(requests[1].path, "/api/generate/v2-web/");
-    let body = serde_json::from_str::<serde_json::Value>(&requests[1].body).expect("request json");
+    assert_eq!(requests[1].path, "/api/c/check");
+    assert_eq!(requests[2].method, "POST");
+    assert_eq!(requests[2].path, "/api/generate/v2-web/");
+    let body = serde_json::from_str::<serde_json::Value>(&requests[2].body).expect("request json");
     assert_eq!(body["token"], serde_json::Value::Null);
     assert_eq!(body["token_provider"], serde_json::Value::Null);
     assert_eq!(body["task"], "gen_stem");
@@ -491,6 +614,33 @@ async fn stems_posts_current_web_contract() {
     assert_eq!(body["stem_task"], "twelve");
     assert_eq!(body["metadata"]["create_mode"], "custom");
     assert_eq!(body["metadata"]["is_remix"], true);
+}
+
+#[tokio::test]
+async fn stems_with_challenge_token_posts_generate_without_preflight_contract() {
+    let server = MockServer::json_sequence(&[
+        r#"[{"id":"clip-a","title":"Source Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z"}]"#,
+        r#"{"clips":[{"id":"stem-1","title":"Source Song (Vocals)","status":"submitted","model_name":"chirp-stem","created_at":"2026-06-30T00:00:00Z"}]}"#,
+    ])
+    .await;
+    let client = server.client();
+
+    let clips = client
+        .stems("clip-a", Some("captcha-token".into()))
+        .await
+        .expect("stems");
+
+    assert_eq!(clips[0].id, "stem-1");
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].path, "/api/feed/?ids=clip-a");
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[1].path, "/api/generate/v2-web/");
+    let body = serde_json::from_str::<serde_json::Value>(&requests[1].body).expect("request json");
+    assert_eq!(body["task"], "gen_stem");
+    assert_eq!(body["token"], "captcha-token");
+    assert_eq!(body["token_provider"], 1);
 }
 
 #[tokio::test]
@@ -583,6 +733,34 @@ async fn list_playlists_gets_me_page_contract() {
 }
 
 #[tokio::test]
+async fn playlist_detail_reads_v2_cover_metadata_contract() {
+    let server = MockServer::json(
+        r#"{"id":"playlist-1","metadata":{"name":"Road Trip","description":"Drive set","cover_url":"https://cdn2.suno.ai/image_upload-1.jpeg","cover_image_s3_id":"image_upload-1","cover_is_user_set":true,"is_public":true}}"#,
+    )
+    .await;
+    let client = server.client();
+
+    let playlist = client.get_playlist("playlist-1").await.expect("playlist");
+
+    assert_eq!(playlist.name, "Road Trip");
+    assert_eq!(playlist.description.as_deref(), Some("Drive set"));
+    assert_eq!(
+        playlist.image_url.as_deref(),
+        Some("https://cdn2.suno.ai/image_upload-1.jpeg")
+    );
+    assert_eq!(
+        playlist.cover_url.as_deref(),
+        Some("https://cdn2.suno.ai/image_upload-1.jpeg")
+    );
+    assert_eq!(
+        playlist.cover_image_s3_id.as_deref(),
+        Some("image_upload-1")
+    );
+    assert_eq!(playlist.cover_is_user_set, Some(true));
+    assert!(playlist.is_public);
+}
+
+#[tokio::test]
 async fn create_playlist_with_metadata_uses_create_set_metadata_then_detail_contract() {
     let server = MockServer::json_sequence(&[
         r#"{"id":"playlist-1","name":"Road Trip"}"#,
@@ -625,6 +803,80 @@ async fn create_playlist_with_metadata_uses_create_set_metadata_then_detail_cont
     assert_eq!(requests[2].method, "GET");
     assert_eq!(requests[2].path, "/api/playlist/v2/playlist-1");
     assert_eq!(requests[2].body, "");
+}
+
+#[tokio::test]
+async fn set_playlist_uploaded_cover_patches_v2_metadata_contract() {
+    let server = MockServer::json_sequence(&[
+        "{}",
+        r#"{"id":"playlist-1","metadata":{"name":"Road Trip","cover_url":"https://cdn2.suno.ai/image_upload-1.jpeg","cover_image_s3_id":"image_upload-1","cover_is_user_set":true}}"#,
+    ])
+    .await;
+    let client = server.client();
+
+    let playlist = client
+        .set_playlist_uploaded_cover("playlist-1", "upload-1")
+        .await
+        .expect("set cover");
+
+    assert_eq!(
+        playlist.image_url.as_deref(),
+        Some("https://cdn2.suno.ai/image_upload-1.jpeg")
+    );
+    assert_eq!(
+        playlist.cover_image_s3_id.as_deref(),
+        Some("image_upload-1")
+    );
+    let requests = server.captured_all().await;
+    assert_eq!(requests[0].method, "PATCH");
+    assert_eq!(requests[0].path, "/api/playlist/v2/playlist-1");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[0].body).expect("cover json"),
+        serde_json::json!({
+            "metadata": {
+                "cover_url": "https://cdn2.suno.ai/image_upload-1.jpeg",
+                "cover_image_s3_id": "image_upload-1",
+                "cover_is_user_set": true
+            }
+        })
+    );
+    assert_eq!(requests[1].method, "GET");
+    assert_eq!(requests[1].path, "/api/playlist/v2/playlist-1");
+}
+
+#[tokio::test]
+async fn set_playlist_metadata_with_suno_image_url_patches_v2_cover_contract() {
+    let server = MockServer::json_sequence(&[
+        "{}",
+        r#"{"id":"playlist-1","metadata":{"name":"Road Trip","cover_url":"https://cdn2.suno.ai/image_upload-1.jpeg","cover_image_s3_id":"image_upload-1","cover_is_user_set":true}}"#,
+    ])
+    .await;
+    let client = server.client();
+
+    client
+        .set_playlist_metadata(
+            "playlist-1",
+            None,
+            None,
+            Some("https://cdn2.suno.ai/image_upload-1.jpeg"),
+        )
+        .await
+        .expect("set cover");
+
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].method, "PATCH");
+    assert_eq!(requests[0].path, "/api/playlist/v2/playlist-1");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[0].body).expect("cover json"),
+        serde_json::json!({
+            "metadata": {
+                "cover_url": "https://cdn2.suno.ai/image_upload-1.jpeg",
+                "cover_image_s3_id": "image_upload-1",
+                "cover_is_user_set": true
+            }
+        })
+    );
 }
 
 #[tokio::test]
@@ -1179,6 +1431,58 @@ async fn initialize_audio_clip_posts_current_web_contract() {
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&request.body).expect("request json"),
         serde_json::json!({ "downbeats": [0.0, 1.25] })
+    );
+}
+
+#[tokio::test]
+async fn create_image_upload_posts_current_web_contract() {
+    let server = MockServer::json(
+        r#"{"id":"image-upload-1","url":"https://s3.example/upload","fields":{"key":"raw_uploads/image-upload-1.png","Content-Type":"image/png","policy":"policy-1"}}"#,
+    )
+    .await;
+    let client = server.client();
+
+    let upload = client
+        .create_image_upload(&CreateImageUploadRequest {
+            extension: "png".into(),
+        })
+        .await
+        .expect("create image upload");
+
+    assert_eq!(upload.id, "image-upload-1");
+    assert_eq!(
+        upload.fields.get("Content-Type").map(String::as_str),
+        Some("image/png")
+    );
+    let request = server.captured().await;
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/api/uploads/image/");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&request.body).expect("request json"),
+        serde_json::json!({ "extension": "png" })
+    );
+}
+
+#[tokio::test]
+async fn finish_image_upload_posts_current_web_contract() {
+    let server = MockServer::json(r#"{"moderation_status":"approved"}"#).await;
+    let client = server.client();
+
+    let response = client
+        .finish_image_upload("image-upload-1")
+        .await
+        .expect("finish image upload");
+
+    assert_eq!(response.moderation_status.as_deref(), Some("approved"));
+    let request = server.captured().await;
+    assert_eq!(request.method, "POST");
+    assert_eq!(
+        request.path,
+        "/api/uploads/image/image-upload-1/upload-finish/"
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&request.body).expect("request json"),
+        serde_json::json!({})
     );
 }
 

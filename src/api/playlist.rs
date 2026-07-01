@@ -3,8 +3,9 @@ use serde_json::Value;
 use super::SunoClient;
 use super::types::{
     CreatePlaylistRequest, PlaylistInfo, PlaylistListResponse, PlaylistReaction,
-    PlaylistReorderRequest, PlaylistTracksRequest, SetPlaylistMetadataRequest,
-    SetPlaylistReactionRequest, SetPlaylistVisibilityRequest, TrashPlaylistRequest,
+    PlaylistReorderRequest, PlaylistTracksRequest, SetPlaylistCoverRequest,
+    SetPlaylistMetadataRequest, SetPlaylistReactionRequest, SetPlaylistVisibilityRequest,
+    TrashPlaylistRequest,
 };
 use crate::core::CliError;
 
@@ -78,6 +79,29 @@ impl SunoClient {
         description: Option<&str>,
         image_url: Option<&str>,
     ) -> Result<PlaylistInfo, CliError> {
+        if let Some(upload_id) = image_url.and_then(upload_id_from_suno_image_url) {
+            if name.is_some() || description.is_some() {
+                self.post_playlist_metadata(playlist_id, name, description, None)
+                    .await?;
+            }
+            return self
+                .set_playlist_uploaded_cover(playlist_id, &upload_id)
+                .await;
+        }
+
+        self.post_playlist_metadata(playlist_id, name, description, image_url)
+            .await?;
+
+        self.get_playlist(playlist_id).await
+    }
+
+    async fn post_playlist_metadata(
+        &self,
+        playlist_id: &str,
+        name: Option<&str>,
+        description: Option<&str>,
+        image_url: Option<&str>,
+    ) -> Result<(), CliError> {
         let req = SetPlaylistMetadataRequest {
             playlist_id: playlist_id.to_string(),
             name: name.map(str::to_string),
@@ -97,6 +121,27 @@ impl SunoClient {
                 let body: Value = serde_json::from_str(&text)?;
                 reject_playlist_moderation_error(&body)?;
             }
+            Ok(())
+        })
+        .await
+    }
+
+    /// Set playlist cover to an image previously uploaded through Suno's image
+    /// upload flow.
+    /// PATCH /api/playlist/v2/{playlist_id}
+    pub async fn set_playlist_uploaded_cover(
+        &self,
+        playlist_id: &str,
+        upload_id: &str,
+    ) -> Result<PlaylistInfo, CliError> {
+        let req = SetPlaylistCoverRequest::from_upload_id(upload_id);
+        self.with_auth_retry(|| async {
+            let resp = self
+                .patch(&format!("/api/playlist/v2/{playlist_id}"))
+                .json(&req)
+                .send()
+                .await?;
+            self.check_response(resp).await?;
             Ok(())
         })
         .await?;
@@ -296,4 +341,46 @@ fn decode_playlist(body: Value) -> Result<PlaylistInfo, CliError> {
         code: "schema_drift",
         message: format!("playlist response did not match known Suno schema: {body}"),
     })
+}
+
+fn upload_id_from_suno_image_url(url: &str) -> Option<String> {
+    let url = url.trim().split(['?', '#']).next().unwrap_or_default();
+    if !url.starts_with("https://cdn1.suno.ai/") && !url.starts_with("https://cdn2.suno.ai/") {
+        return None;
+    }
+    let file = url
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or_default();
+    let id = file
+        .strip_prefix("image_")?
+        .strip_suffix(".jpeg")
+        .or_else(|| file.strip_prefix("image_")?.strip_suffix(".jpg"))?;
+    if id.is_empty() {
+        None
+    } else {
+        Some(id.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::upload_id_from_suno_image_url;
+
+    #[test]
+    fn suno_image_url_extracts_upload_id() {
+        assert_eq!(
+            upload_id_from_suno_image_url("https://cdn2.suno.ai/image_upload-1.jpeg"),
+            Some("upload-1".to_string())
+        );
+        assert_eq!(
+            upload_id_from_suno_image_url("https://cdn1.suno.ai/image_upload-2.jpg?x=1"),
+            Some("upload-2".to_string())
+        );
+        assert_eq!(
+            upload_id_from_suno_image_url("https://example.com/image_upload-1.jpeg"),
+            None
+        );
+    }
 }

@@ -54,14 +54,7 @@ pub async fn run(args: AuthArgs, _ctx: &AppContext) -> Result<(), CliError> {
         let (session_id, jwt) =
             auth::clerk_token_exchange(&http, &browser_auth.clerk_client_cookie).await?;
 
-        state.cookie = Some(browser_auth.cookie_header);
-        state.clerk_client_cookie = Some(browser_auth.clerk_client_cookie);
-        state.session_id = Some(session_id);
-        state.jwt = Some(jwt);
-        state.device_id = browser_auth
-            .device_id
-            .or(state.device_id)
-            .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
+        store_browser_auth_state(&mut state, browser_auth, session_id, jwt);
     } else if let Some(cookie) = args.cookie.as_deref() {
         let browser_auth = auth::normalize_cookie_input(cookie)?;
         let http = reqwest::Client::new();
@@ -69,16 +62,10 @@ pub async fn run(args: AuthArgs, _ctx: &AppContext) -> Result<(), CliError> {
         let (session_id, jwt) =
             auth::clerk_token_exchange(&http, &browser_auth.clerk_client_cookie).await?;
 
-        state.cookie = Some(browser_auth.cookie_header);
-        state.clerk_client_cookie = Some(browser_auth.clerk_client_cookie);
-        state.session_id = Some(session_id);
-        state.jwt = Some(jwt);
-        state.device_id = browser_auth
-            .device_id
-            .or(state.device_id)
-            .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
+        store_browser_auth_state(&mut state, browser_auth, session_id, jwt);
     } else if let Some(jwt) = args.jwt.clone() {
         state.jwt = Some(jwt);
+        state.browser_environment = None;
         if state.device_id.is_none() {
             state.device_id = Some(uuid::Uuid::new_v4().to_string());
         }
@@ -144,9 +131,28 @@ where
     }
 }
 
+fn store_browser_auth_state(
+    state: &mut AuthState,
+    browser_auth: BrowserAuth,
+    session_id: String,
+    jwt: String,
+) {
+    state.cookie = Some(browser_auth.cookie_header);
+    state.clerk_client_cookie = Some(browser_auth.clerk_client_cookie);
+    state.session_id = Some(session_id);
+    state.jwt = Some(jwt);
+    state.device_id = browser_auth
+        .device_id
+        .or_else(|| state.device_id.take())
+        .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
+    state.browser_environment = browser_auth.browser_environment;
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+
+    use crate::auth::BrowserEnvironment;
 
     use super::*;
 
@@ -155,6 +161,7 @@ mod tests {
             clerk_client_cookie: value.into(),
             cookie_header: format!("__client={value}"),
             device_id: None,
+            browser_environment: None,
         }
     }
 
@@ -177,6 +184,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn login_auth_preserves_browser_environment_from_cookie_probe() {
+        let auth = extract_browser_auth_with_fallback(
+            || {
+                Ok(BrowserAuth {
+                    clerk_client_cookie: "browser-cookie".into(),
+                    cookie_header: "__client=browser-cookie".into(),
+                    device_id: None,
+                    browser_environment: Some(BrowserEnvironment {
+                        browser_source: Some("chrome".into()),
+                        user_agent: None,
+                        accept_language: Some("zh-CN,zh;q=0.9".into()),
+                    }),
+                })
+            },
+            || async { Ok(auth_with_client("interactive")) },
+        )
+        .await
+        .expect("auth");
+
+        let environment = auth.browser_environment.expect("environment");
+        assert_eq!(environment.browser_source.as_deref(), Some("chrome"));
+        assert_eq!(
+            environment.accept_language.as_deref(),
+            Some("zh-CN,zh;q=0.9")
+        );
+    }
+
+    #[tokio::test]
     async fn login_auth_falls_back_to_interactive_browser_when_cookie_probe_fails() {
         let auth = extract_browser_auth_with_fallback(
             || Err(CliError::Config("cookie blocked".into())),
@@ -186,6 +221,93 @@ mod tests {
         .expect("auth");
 
         assert_eq!(auth.clerk_client_cookie, "interactive");
+    }
+
+    #[test]
+    fn browser_auth_state_uses_new_browser_environment() {
+        let mut state = AuthState {
+            device_id: Some("stored-device".into()),
+            browser_environment: Some(BrowserEnvironment {
+                browser_source: Some("interactive-browser".into()),
+                user_agent: Some("Mozilla/5.0 Test".into()),
+                accept_language: Some("en-US,en;q=0.9".into()),
+            }),
+            ..AuthState::default()
+        };
+
+        store_browser_auth_state(
+            &mut state,
+            BrowserAuth {
+                clerk_client_cookie: "client".into(),
+                cookie_header: "__client=client".into(),
+                device_id: None,
+                browser_environment: Some(BrowserEnvironment {
+                    browser_source: Some("edge".into()),
+                    user_agent: None,
+                    accept_language: None,
+                }),
+            },
+            "session".into(),
+            "jwt".into(),
+        );
+
+        let environment = state.browser_environment.expect("environment");
+        assert_eq!(environment.browser_source.as_deref(), Some("edge"));
+        assert_eq!(environment.user_agent, None);
+        assert_eq!(environment.accept_language, None);
+        assert_eq!(state.device_id.as_deref(), Some("stored-device"));
+    }
+
+    #[test]
+    fn browser_auth_state_clears_stored_environment_when_new_auth_has_none() {
+        let mut state = AuthState {
+            browser_environment: Some(BrowserEnvironment {
+                browser_source: Some("interactive-browser".into()),
+                user_agent: Some("Mozilla/5.0 Test".into()),
+                accept_language: Some("en-US,en;q=0.9".into()),
+            }),
+            ..AuthState::default()
+        };
+
+        store_browser_auth_state(
+            &mut state,
+            BrowserAuth {
+                clerk_client_cookie: "client".into(),
+                cookie_header: "__client=client".into(),
+                device_id: None,
+                browser_environment: None,
+            },
+            "session".into(),
+            "jwt".into(),
+        );
+
+        assert!(state.browser_environment.is_none());
+    }
+
+    #[test]
+    fn browser_auth_state_uses_new_device_id_when_available() {
+        let mut state = AuthState {
+            device_id: Some("stored-device".into()),
+            ..AuthState::default()
+        };
+
+        store_browser_auth_state(
+            &mut state,
+            BrowserAuth {
+                clerk_client_cookie: "client".into(),
+                cookie_header: "__client=client".into(),
+                device_id: Some("new-device".into()),
+                browser_environment: Some(BrowserEnvironment {
+                    browser_source: Some("edge".into()),
+                    user_agent: None,
+                    accept_language: None,
+                }),
+            },
+            "session".into(),
+            "jwt".into(),
+        );
+
+        assert_eq!(state.device_id.as_deref(), Some("new-device"));
     }
 
     #[test]

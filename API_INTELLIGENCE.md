@@ -159,10 +159,11 @@ Studio routes also appeared in the bundle, but they are excluded by scope.
 
 Agent-facing capability metadata should expose known non-implemented or
 unverified surfaces instead of advertising an empty gap list. As of this pass,
-`sunox agent-info --json` reports image upload, video upload,
-`update_feedback_state`, social/profile/project/video surfaces, and stale
-voice-verification routes, plus live-captured playlist-conditioned generation,
-fade, and Studio export surfaces under `unsupported_surfaces`.
+`sunox agent-info --json` reports video upload, `update_feedback_state`,
+social/profile/project/video surfaces, and stale voice-verification routes,
+plus live-captured playlist-conditioned generation, fade, and Studio export
+surfaces under `unsupported_surfaces`. Image upload is implemented for playlist
+cover replacement.
 
 Read-oriented surfaces worth capturing next:
 - Search: `/api/unified/search/omnisearch`,
@@ -308,11 +309,13 @@ is copied from `POST /api/prompts/upsample` and `override_fields` can be
 upsample response `request_id`.
 
 **Challenge handling**: The web calls `POST /api/c/check` with
-`{"ctype":"generation"}` before submit. If the response requires a challenge,
-the submit body carries a solved `token` and `token_provider: 1`; otherwise
-both are null. The Rust CLI defaults to `token: null`, accepts `--token` for
-externally supplied solutions, and only runs the browser-backed solver when
-`--captcha` is supplied.
+`{"ctype":"generation"}` before submit. Rust CLI commands that submit through
+`/api/generate/v2-web/` mirror that preflight: if the response does not require
+a challenge, the submit body uses `token: null` and `token_provider: null`; if
+it requires a challenge, the CLI stops before submit unless the user supplied
+`--token` or explicitly opted into `--captcha`. When a solved token is present,
+the submit body carries `token_provider: 1`. The user-facing create, cover,
+extend, and stems commands expose these challenge controls.
 
 **Two modes**:
 1. **Description mode** (`metadata.create_mode = "inspiration"`, `prompt` is the description) — Suno writes lyrics from description
@@ -530,6 +533,10 @@ Body: {"name": "Untitled"}
 
 POST /api/playlist/set_metadata
 Body: {"playlist_id": "...", "name": "...", "description": "...", "image_url": "..."}
+
+PATCH /api/playlist/v2/{playlist_id}
+Body for uploaded playlist covers:
+{"metadata":{"cover_url":"https://cdn2.suno.ai/image_<upload_id>.jpeg","cover_image_s3_id":"image_<upload_id>","cover_is_user_set":true}}
 
 POST /api/playlist/v2/{playlist_id}/tracks/add
 Body: {"clip_ids": ["..."]}
@@ -876,9 +883,16 @@ After the clip is initialized, the web UI calls clip metadata update with
 `is_audio_upload_tos_accepted: true`, `image_url`, `title`, and optional
 lyrics.
 
-Related image/video upload routes also appear in the current bundle:
-- `POST /api/uploads/image/`
-- `POST /api/uploads/image/{upload_id}/upload-finish/`
+Image upload was live-verified for playlist cover replacement: initialize with
+`POST /api/uploads/image/` and `{"extension":"png"}`, upload bytes to the
+returned presigned S3 form, finish with
+`POST /api/uploads/image/{upload_id}/upload-finish/` and `{}`, require
+`moderation_status: "approved"`, then use
+`https://cdn2.suno.ai/image_<upload_id>.jpeg` plus
+`cover_image_s3_id: "image_<upload_id>"` in the playlist v2 patch above. The
+legacy `POST /api/playlist/set_metadata` `image_url` path can return
+`Failed to upload image` for freshly uploaded Suno images.
+Related video upload routes also appear in the current bundle:
 - `POST /api/uploads/video/`
 
 ## Voices / Persona Creation Flow (older capture, out of scope)
@@ -941,12 +955,13 @@ processing is not.
 
 ## Key Insights for Rust CLI
 
-1. **Captcha/challenge is conditional** — `POST /api/c/check` with `{"ctype":"generation"}` decides whether generation needs a solved token. Captured submits use `token_provider: 1` only when a solved `token` is present; normal authenticated submits use `token: null` and `token_provider: null`.
+1. **Captcha/challenge is conditional** — `POST /api/c/check` with `{"ctype":"generation"}` decides whether generation needs a solved token. The CLI mirrors this preflight before `/api/generate/v2-web/` submits. Captured submits use `token_provider: 1` only when a solved `token` is present; normal authenticated submits use `token: null` and `token_provider: null`.
 2. **Lyrics generation is free and easy** — no captcha needed, just JWT auth
 3. **JWT refresh** — need Clerk cookie exchange or session keepalive
 4. **Browser-token header** — dynamically generated from current timestamp, base64-encoded
-5. **Cookie-based approach** — store Clerk session cookies, exchange for JWT via `auth.suno.com/v1/client/sessions/<session_id>/tokens`
-6. **`feed/v3` is cursor-based** — the current web request uses `cursor`, `limit`, and scenario-specific filters, not numeric pages
-7. **Two auth strategies**:
+5. **Browser environment** — browser-cookie extraction records a stable browser source id (`chrome`, `arc`, `brave`, `firefox`, or `edge`) and best-effort public profile settings such as `accept-language`; it does not fabricate a `user-agent` from that label. Interactive login captures stable runtime headers such as `user-agent` and `accept-language`. API calls reuse captured fields independently and fall back field-by-field when unavailable.
+6. **Cookie-based approach** — store Clerk session cookies, exchange for JWT via `auth.suno.com/v1/client/sessions/<session_id>/tokens`
+7. **`feed/v3` is cursor-based** — the current web request uses `cursor`, `limit`, and scenario-specific filters, not numeric pages
+8. **Two auth strategies**:
    a. Cookie-based: store the Clerk client cookie and auto-refresh JWTs
    b. Direct JWT: User pastes JWT, works for ~1 hour (simpler but expires)

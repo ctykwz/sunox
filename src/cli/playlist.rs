@@ -1,4 +1,5 @@
 use clap::Subcommand;
+use std::path::PathBuf;
 
 #[derive(clap::Args)]
 pub struct AddArgs {
@@ -85,8 +86,12 @@ pub struct PlaylistCreateArgs {
     pub description: Option<String>,
 
     /// Playlist cover image URL
-    #[arg(long)]
+    #[arg(long, conflicts_with = "image_file")]
     pub image_url: Option<String>,
+
+    /// Local image file to upload and use as playlist cover
+    #[arg(long)]
+    pub image_file: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -103,8 +108,12 @@ pub struct PlaylistSetArgs {
     pub description: Option<String>,
 
     /// New playlist cover image URL
-    #[arg(long)]
+    #[arg(long, conflicts_with = "image_file")]
     pub image_url: Option<String>,
+
+    /// Local image file to upload and use as playlist cover
+    #[arg(long)]
+    pub image_file: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]

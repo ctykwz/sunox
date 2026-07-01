@@ -24,6 +24,23 @@ pub struct AudioUploadInitResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct CreateImageUploadRequest {
+    pub extension: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ImageUploadInitResponse {
+    pub id: String,
+    pub url: String,
+    pub fields: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FinishImageUploadResponse {
+    pub moderation_status: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct FinishAudioUploadRequest {
     pub upload_type: String,
     pub upload_filename: String,

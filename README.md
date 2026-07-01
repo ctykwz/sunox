@@ -210,7 +210,7 @@ sunox update         Self-update from GitHub Releases (--check to peek first)
 sunox login    # Browser-cookie auth, with interactive Chrome/Edge fallback
 ```
 
-`sunox login` first tries to read the Clerk auth cookie from Chrome, Arc, Brave, Firefox, or Edge. If that fails, it opens a dedicated Sunox Chrome/Edge-compatible browser profile and waits for you to log into Suno there. The captured Clerk session is exchanged for a JWT, stored in a `0600` local auth file, and used to refresh stale JWTs automatically while the underlying session is still valid.
+`sunox login` first tries to read the Clerk auth cookie from Chrome, Arc, Brave, Firefox, or Edge. If that succeeds, Sunox records a stable browser source id for the extractor that produced the session and best-effort public profile settings such as accepted languages; it does not fabricate a user-agent from the browser label. If browser-cookie extraction fails, it opens a dedicated Sunox Chrome/Edge-compatible browser profile and waits for you to log into Suno there. The captured Clerk session is exchanged for a JWT, stored in a `0600` local auth file, and used to refresh stale JWTs automatically while the underlying session is still valid. When interactive login is used, stable browser runtime headers such as user-agent and accepted languages are saved and reused for later API calls.
 
 Auth methods (in order of convenience):
 1. `sunox login` — automatic browser extraction, with interactive Chrome/Edge fallback (recommended)
@@ -276,6 +276,7 @@ sunox playlist info <playlist_id>
 # Create and edit metadata
 sunox playlist create --name "Release candidates" --description "Tracks to review" --image-url <cover_url>
 sunox playlist set <playlist_id> --name "Final shortlist" --image-url <cover_url>
+sunox playlist set <playlist_id> --image-file ./cover.png
 
 # Manage songs in a playlist
 sunox playlist add <playlist_id> <clip_id_1> <clip_id_2>
@@ -472,13 +473,14 @@ After installation, your coding agent automatically picks up the skill on the ne
 | Persona trash/restore/purge | `PUT /api/persona/bulk-trash-personas/` | Bundle-confirmed modes: trash `{undo:false,hide:false}`, restore `{undo:true,hide:false}`, purge `{undo:false,hide:true}` |
 | Playlist list | `GET /api/playlist/me` | Bundle-confirmed |
 | Playlist detail | `GET /api/playlist/v2/{id}` | Bundle-confirmed |
-| Playlist mutation | `POST /api/playlist/create/`, `POST /api/playlist/set_metadata`, `PATCH /api/playlist/v2/{id}`, `POST/DELETE /api/playlist/v2/{id}/save`, `POST /api/playlist/v2/{id}/tracks/{add,remove}`, `POST /api/playlist/v2/{id}/tracks/reorder-by-index`, `POST /api/playlist/v2/{id}/trash`, `POST /api/playlist_reaction/{id}/update_reaction_type/` | Bundle-confirmed, not live-mutated by tests |
+| Playlist mutation | `POST /api/playlist/create/`, `POST /api/playlist/set_metadata`, `PATCH /api/playlist/v2/{id}`, `POST/DELETE /api/playlist/v2/{id}/save`, `POST /api/playlist/v2/{id}/tracks/{add,remove}`, `POST /api/playlist/v2/{id}/tracks/reorder-by-index`, `POST /api/playlist/v2/{id}/trash`, `POST /api/playlist_reaction/{id}/update_reaction_type/` | Bundle-confirmed; playlist cover upload live-verified through image upload + v2 metadata patch |
 | Persona love | `POST /api/persona/{id}/toggle_love/` | HAR-confirmed empty-body mutation |
 | Clip trash/restore | `POST /api/gen/trash` | Bundle-confirmed, not live-mutated by tests |
 | Clip reaction | `POST /api/gen/{id}/update_reaction_type/` | HAR-confirmed body with `recommendation_metadata` |
 | Audio upload | `POST /api/uploads/audio/`, presigned S3 form upload, `POST /api/uploads/audio/{id}/upload-finish/`, `GET /api/uploads/audio/{id}/`, `POST /api/uploads/audio/{id}/initialize-clip/` | CLI workflow implemented and live-verified for `file_upload` |
+| Image upload | `POST /api/uploads/image/`, presigned S3 form upload, `POST /api/uploads/image/{id}/upload-finish/` | CLI workflow implemented for playlist covers; final cover patch uses `PATCH /api/playlist/v2/{id}` with `cover_url`, `cover_image_s3_id`, `cover_is_user_set` |
 
-Generation tasks use `/api/generate/v2-web/`. The custom create payload was live-recaptured on June 30, 2026: custom lyrics are sent as `gpt_description_prompt` while `prompt` stays empty, and a solved challenge token uses `token_provider: 1`. Instrumental create also uses custom mode; when `sunox create --instrumental <prompt>` is used, the prompt is folded into style tags and the submitted `prompt` field stays empty, matching the live web request shape recaptured in `15suno-labs-nostudio-20260630.har`. `task: "playlist_condition"` was also captured and intentionally treated as a separate inspiration flow because it puts lyrics in `prompt`. Remaster uses the live-captured `/api/generate/upsample` route, and speed adjust uses `/api/clips/adjust-speed/`. Authenticated generation defaults to submitting without a challenge token; use `--token <solved>` to supply one or `--captcha` to force the browser solver. The audio upload workflow was live-verified for `file_upload`; cover, concat, and playlist mutation bodies still need live mutation captures.
+Generation tasks use `/api/generate/v2-web/`. The custom create payload was live-recaptured on June 30, 2026: custom lyrics are sent as `gpt_description_prompt` while `prompt` stays empty, and a solved challenge token uses `token_provider: 1`. Instrumental create also uses custom mode; when `sunox create --instrumental <prompt>` is used, the prompt is folded into style tags and the submitted `prompt` field stays empty, matching the live web request shape recaptured in `15suno-labs-nostudio-20260630.har`. `task: "playlist_condition"` was also captured and intentionally treated as a separate inspiration flow because it puts lyrics in `prompt`. Remaster uses the live-captured `/api/generate/upsample` route, and speed adjust uses `/api/clips/adjust-speed/`. Commands that submit through `/api/generate/v2-web/` preflight `/api/c/check` with `ctype=generation`; when no challenge is required they submit without a challenge token, and when a challenge is required you can use `--token <solved>` to supply one or `--captcha` to force the browser solver on create, cover, extend, and stems. The audio upload workflow was live-verified for `file_upload`, and playlist cover upload was live-verified through image upload plus v2 metadata patch; cover, concat, and other playlist mutation bodies still need live mutation captures.
 
 ## Contributing
 

@@ -1,6 +1,7 @@
 //! Suno web endpoint client, endpoint methods, auth retry, and response mapping.
 
 pub mod billing;
+pub mod challenge;
 pub mod concat;
 pub mod cover;
 pub mod delete;

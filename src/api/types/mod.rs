@@ -27,10 +27,12 @@ pub use persona::{
 pub use persona::{TogglePersonaLoveResponse, TrashPersonasRequest, TrashPersonasResponse};
 pub use playlist::{
     CreatePlaylistRequest, PlaylistInfo, PlaylistListResponse, PlaylistReaction,
-    PlaylistReorderRequest, PlaylistTracksRequest, SetPlaylistMetadataRequest,
-    SetPlaylistReactionRequest, SetPlaylistVisibilityRequest, TrashPlaylistRequest,
+    PlaylistReorderRequest, PlaylistTracksRequest, SetPlaylistCoverRequest,
+    SetPlaylistMetadataRequest, SetPlaylistReactionRequest, SetPlaylistVisibilityRequest,
+    TrashPlaylistRequest,
 };
 pub use upload::{
     AudioUploadInitResponse, AudioUploadStatus, CreateAudioUploadRequest, CreateAudioUploadSpec,
-    FinishAudioUploadRequest, InitializeAudioClipRequest, InitializeAudioClipResponse,
+    CreateImageUploadRequest, FinishAudioUploadRequest, FinishImageUploadResponse,
+    ImageUploadInitResponse, InitializeAudioClipRequest, InitializeAudioClipResponse,
 };

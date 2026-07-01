@@ -9,6 +9,7 @@ use crate::cli::{
 };
 use crate::core::{CliError, ensure_clip_ids};
 use crate::output::{self, OutputFormat};
+use crate::workflow::image_upload;
 
 pub async fn run(args: PlaylistArgs, ctx: &AppContext) -> Result<(), CliError> {
     match args.command {
@@ -54,15 +55,28 @@ async fn info(args: PlaylistInfoArgs, ctx: &AppContext) -> Result<(), CliError> 
 }
 
 async fn create(args: PlaylistCreateArgs, ctx: &AppContext) -> Result<(), CliError> {
-    let playlist = ctx
-        .client()
-        .await?
+    let client = ctx.client().await?;
+    let uploaded_cover = if let Some(image_file) = args.image_file.as_deref() {
+        if !ctx.quiet {
+            eprintln!("Uploading playlist cover image...");
+        }
+        Some(image_upload::run(&client, image_file).await?)
+    } else {
+        None
+    };
+
+    let mut playlist = client
         .create_playlist(
             &args.name,
             args.description.as_deref(),
             args.image_url.as_deref(),
         )
         .await?;
+    if let Some(uploaded) = uploaded_cover {
+        playlist = client
+            .set_playlist_uploaded_cover(&playlist.id, &uploaded.upload_id)
+            .await?;
+    }
     match ctx.fmt {
         OutputFormat::Json => output::json::success(&playlist),
         OutputFormat::Table => {
@@ -74,22 +88,40 @@ async fn create(args: PlaylistCreateArgs, ctx: &AppContext) -> Result<(), CliErr
 }
 
 async fn set(args: PlaylistSetArgs, ctx: &AppContext) -> Result<(), CliError> {
-    if args.name.is_none() && args.description.is_none() && args.image_url.is_none() {
+    if args.name.is_none()
+        && args.description.is_none()
+        && args.image_url.is_none()
+        && args.image_file.is_none()
+    {
         return Err(CliError::Config(
-            "provide at least one of --name, --description, or --image-url".into(),
+            "provide at least one of --name, --description, --image-url, or --image-file".into(),
         ));
     }
 
-    let playlist = ctx
-        .client()
-        .await?
-        .set_playlist_metadata(
-            &args.id,
-            args.name.as_deref(),
-            args.description.as_deref(),
-            args.image_url.as_deref(),
-        )
-        .await?;
+    let client = ctx.client().await?;
+    let mut playlist =
+        if args.name.is_some() || args.description.is_some() || args.image_url.is_some() {
+            client
+                .set_playlist_metadata(
+                    &args.id,
+                    args.name.as_deref(),
+                    args.description.as_deref(),
+                    args.image_url.as_deref(),
+                )
+                .await?
+        } else {
+            client.get_playlist(&args.id).await?
+        };
+
+    if let Some(image_file) = args.image_file.as_deref() {
+        if !ctx.quiet {
+            eprintln!("Uploading playlist cover image...");
+        }
+        let uploaded = image_upload::run(&client, image_file).await?;
+        playlist = client
+            .set_playlist_uploaded_cover(&args.id, &uploaded.upload_id)
+            .await?;
+    }
     match ctx.fmt {
         OutputFormat::Json => output::json::success(&playlist),
         OutputFormat::Table => {

@@ -3,7 +3,7 @@ use crate::cli::{ConcatArgs, CoverArgs, ModelVersion, RemasterArgs, SpeedArgs, S
 use crate::core::{AppConfig, CliError};
 use crate::output::{self, OutputFormat};
 
-use super::support::output_clips;
+use super::support::{generation_token, output_clips};
 
 pub async fn concat(args: ConcatArgs, ctx: &AppContext) -> Result<(), CliError> {
     let clip = ctx.client().await?.concat(&args.clip_id).await?;
@@ -22,9 +22,11 @@ pub async fn cover(args: CoverArgs, ctx: &AppContext) -> Result<(), CliError> {
             cover_model_label(args.model.as_ref(), &ctx.config)
         );
     }
+    let force_captcha = args.captcha && !args.no_captcha;
+    let challenge_token = generation_token(args.token.clone(), force_captcha, ctx).await?;
     let client = ctx.client().await?;
     let clips = client
-        .cover(&args.clip_id, model, args.tags.as_deref())
+        .cover(&args.clip_id, model, args.tags.as_deref(), challenge_token)
         .await?;
     output_clips(&clips, ctx);
     Ok(())
@@ -83,7 +85,13 @@ pub async fn speed(args: SpeedArgs, ctx: &AppContext) -> Result<(), CliError> {
 }
 
 pub async fn stems(args: StemsArgs, ctx: &AppContext) -> Result<(), CliError> {
-    let clips = ctx.client().await?.stems(&args.clip_id).await?;
+    let force_captcha = args.captcha && !args.no_captcha;
+    let challenge_token = generation_token(args.token.clone(), force_captcha, ctx).await?;
+    let clips = ctx
+        .client()
+        .await?
+        .stems(&args.clip_id, challenge_token)
+        .await?;
     output_clips(&clips, ctx);
     Ok(())
 }

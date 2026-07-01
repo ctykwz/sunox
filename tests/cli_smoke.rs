@@ -152,7 +152,8 @@ fn playlist_set_help_lists_image_url() {
     cmd.args(["playlist", "set", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("--image-url"));
+        .stdout(predicate::str::contains("--image-url"))
+        .stdout(predicate::str::contains("--image-file"));
 }
 
 #[test]
@@ -261,6 +262,23 @@ fn speed_help_exposes_live_adjust_speed_contract() {
         .stdout(predicate::str::contains("--multiplier"))
         .stdout(predicate::str::contains("--no-keep-pitch"))
         .stdout(predicate::str::contains("--title"));
+}
+
+#[test]
+fn generate_backed_clip_commands_expose_challenge_controls() {
+    for args in [
+        ["clip", "cover", "--help"],
+        ["clip", "extend", "--help"],
+        ["clip", "stems", "--help"],
+    ] {
+        let mut cmd = Command::cargo_bin("sunox").expect("binary");
+        cmd.args(args)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("--token"))
+            .stdout(predicate::str::contains("--captcha"))
+            .stdout(predicate::str::contains("--no-captcha"));
+    }
 }
 
 #[test]

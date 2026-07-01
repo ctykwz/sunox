@@ -11,8 +11,9 @@ use tokio::process::{Child, Command};
 use tokio::time::{sleep, timeout};
 use tokio_tungstenite::tungstenite::Message;
 
-use super::cookie::sanitize_device_id;
-use super::types::BrowserAuth;
+use super::cookie::{is_suno_auth_cookie_domain, is_suno_cookie_domain, sanitize_device_id};
+use super::environment::{accept_language_from_browser_languages, non_empty_header_value};
+use super::types::{BrowserAuth, BrowserEnvironment};
 use crate::browser::locate_chromium_browser;
 use crate::core::CliError;
 
@@ -20,6 +21,7 @@ const CDP_HOST: &str = "127.0.0.1";
 const LOGIN_URL: &str = "https://suno.com/create";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
+const INTERACTIVE_BROWSER_SOURCE: &str = "interactive-browser";
 
 #[derive(Debug, Clone, Deserialize)]
 struct CdpCookie {
@@ -35,6 +37,14 @@ struct CdpTarget {
     url: String,
     #[serde(rename = "webSocketDebuggerUrl")]
     web_socket_debugger_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserEnvironmentProbe {
+    #[serde(rename = "userAgent")]
+    user_agent: Option<String>,
+    #[serde(default)]
+    languages: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -113,9 +123,10 @@ pub async fn extract_interactive_browser_auth() -> Result<BrowserAuth, CliError>
 
     let result = async {
         wait_for_cdp(port).await?;
+        let version_environment = browser_environment_from_cdp_version(port).await;
         let ws_url = find_or_create_login_tab(port).await?;
         eprintln!("Complete Suno login in the opened browser window...");
-        wait_for_suno_auth(ws_url).await
+        wait_for_suno_auth(ws_url, version_environment).await
     }
     .await;
 
@@ -239,7 +250,10 @@ async fn cdp_list(port: u16) -> Result<Vec<CdpTarget>, CliError> {
         .map_err(|e| CliError::Config(format!("CDP json parse: {e}")))
 }
 
-async fn wait_for_suno_auth(ws_url: String) -> Result<BrowserAuth, CliError> {
+async fn wait_for_suno_auth(
+    ws_url: String,
+    fallback_environment: Option<BrowserEnvironment>,
+) -> Result<BrowserAuth, CliError> {
     let deadline = tokio::time::Instant::now() + LOGIN_TIMEOUT;
     let mut session = CdpSession::connect(&ws_url).await?;
     session
@@ -254,6 +268,11 @@ async fn wait_for_suno_auth(ws_url: String) -> Result<BrowserAuth, CliError> {
             }),
         )
         .await?;
+    let browser_environment = merge_browser_environments(
+        browser_environment_from_page(&mut session).await,
+        fallback_environment,
+    )
+    .or_else(|| Some(interactive_browser_environment()));
 
     loop {
         if tokio::time::Instant::now() >= deadline {
@@ -268,27 +287,110 @@ async fn wait_for_suno_auth(ws_url: String) -> Result<BrowserAuth, CliError> {
         let cookies: Vec<CdpCookie> =
             serde_json::from_value(result.get("cookies").cloned().unwrap_or_default())
                 .map_err(|e| CliError::Config(format!("CDP cookie parse: {e}")))?;
-        if let Some(auth) = browser_auth_from_cdp_cookies(cookies) {
+        if let Some(auth) = browser_auth_from_cdp_cookies(cookies, browser_environment.clone()) {
             return Ok(auth);
         }
         sleep(POLL_INTERVAL).await;
     }
 }
 
-fn browser_auth_from_cdp_cookies(cookies: Vec<CdpCookie>) -> Option<BrowserAuth> {
+async fn browser_environment_from_cdp_version(port: u16) -> Option<BrowserEnvironment> {
+    let value = cdp_version(port).await.ok()?;
+    browser_environment_from_cdp_version_value(&value)
+}
+
+fn browser_environment_from_cdp_version_value(
+    value: &serde_json::Value,
+) -> Option<BrowserEnvironment> {
+    let user_agent = non_empty_header_value(
+        value
+            .get("User-Agent")
+            .or_else(|| value.get("userAgent"))
+            .and_then(|user_agent| user_agent.as_str()),
+    );
+    if user_agent.is_none() {
+        None
+    } else {
+        Some(BrowserEnvironment {
+            browser_source: Some(INTERACTIVE_BROWSER_SOURCE.into()),
+            user_agent,
+            accept_language: None,
+        })
+    }
+}
+
+async fn browser_environment_from_page(session: &mut CdpSession) -> Option<BrowserEnvironment> {
+    let result = session
+        .call(
+            "Runtime.evaluate",
+            serde_json::json!({
+                "expression": "JSON.stringify({ userAgent: navigator.userAgent, languages: Array.from(navigator.languages || [navigator.language]).filter(Boolean) })",
+                "returnByValue": true
+            }),
+        )
+        .await
+        .ok()?;
+    let payload = result
+        .get("result")
+        .and_then(|result| result.get("value"))
+        .and_then(|value| value.as_str())?;
+    let probe: BrowserEnvironmentProbe = serde_json::from_str(payload).ok()?;
+    let user_agent = non_empty_header_value(probe.user_agent.as_deref());
+    let accept_language = accept_language_from_browser_languages(&probe.languages);
+
+    if user_agent.is_none() && accept_language.is_none() {
+        None
+    } else {
+        Some(BrowserEnvironment {
+            browser_source: Some(INTERACTIVE_BROWSER_SOURCE.into()),
+            user_agent,
+            accept_language,
+        })
+    }
+}
+
+fn merge_browser_environments(
+    primary: Option<BrowserEnvironment>,
+    fallback: Option<BrowserEnvironment>,
+) -> Option<BrowserEnvironment> {
+    match (primary, fallback) {
+        (Some(primary), Some(fallback)) => Some(BrowserEnvironment {
+            browser_source: primary.browser_source.or(fallback.browser_source),
+            user_agent: primary.user_agent.or(fallback.user_agent),
+            accept_language: primary.accept_language.or(fallback.accept_language),
+        }),
+        (Some(environment), None) | (None, Some(environment)) => Some(environment),
+        (None, None) => None,
+    }
+}
+
+fn interactive_browser_environment() -> BrowserEnvironment {
+    BrowserEnvironment {
+        browser_source: Some(INTERACTIVE_BROWSER_SOURCE.into()),
+        user_agent: None,
+        accept_language: None,
+    }
+}
+
+fn browser_auth_from_cdp_cookies(
+    cookies: Vec<CdpCookie>,
+    browser_environment: Option<BrowserEnvironment>,
+) -> Option<BrowserAuth> {
     let mut selected: HashMap<String, CdpCookie> = HashMap::new();
     let mut clerk_client_cookie: Option<String> = None;
     let mut auth_domain_clerk: Option<String> = None;
     let mut device_id: Option<String> = None;
 
     for cookie in cookies {
-        if !cookie.domain.contains("suno.com") || cookie.name.is_empty() || cookie.value.is_empty()
+        if !is_suno_cookie_domain(&cookie.domain)
+            || cookie.name.is_empty()
+            || cookie.value.is_empty()
         {
             continue;
         }
 
         if cookie.name == "__client" {
-            if cookie.domain.contains("auth.suno.com") {
+            if is_suno_auth_cookie_domain(&cookie.domain) {
                 auth_domain_clerk = Some(cookie.value.clone());
             } else if clerk_client_cookie.is_none() {
                 clerk_client_cookie = Some(cookie.value.clone());
@@ -300,8 +402,8 @@ fn browser_auth_from_cdp_cookies(cookies: Vec<CdpCookie>) -> Option<BrowserAuth>
 
         match selected.get(&cookie.name) {
             Some(existing)
-                if existing.domain.contains("auth.suno.com")
-                    || !cookie.domain.contains("auth.suno.com") => {}
+                if is_suno_auth_cookie_domain(&existing.domain)
+                    || !is_suno_auth_cookie_domain(&cookie.domain) => {}
             _ => {
                 selected.insert(cookie.name.clone(), cookie);
             }
@@ -330,6 +432,7 @@ fn browser_auth_from_cdp_cookies(cookies: Vec<CdpCookie>) -> Option<BrowserAuth>
         clerk_client_cookie,
         cookie_header: header_parts.join("; "),
         device_id,
+        browser_environment,
     })
 }
 
@@ -366,23 +469,30 @@ mod tests {
 
     #[test]
     fn cdp_cookies_prefer_auth_domain_clerk_cookie() {
-        let auth = browser_auth_from_cdp_cookies(vec![
-            CdpCookie {
-                name: "__client".into(),
-                value: "suno-client".into(),
-                domain: ".suno.com".into(),
-            },
-            CdpCookie {
-                name: "__client".into(),
-                value: "auth-client".into(),
-                domain: "auth.suno.com".into(),
-            },
-            CdpCookie {
-                name: "ajs_anonymous_id".into(),
-                value: "%22device-123%22".into(),
-                domain: ".suno.com".into(),
-            },
-        ])
+        let auth = browser_auth_from_cdp_cookies(
+            vec![
+                CdpCookie {
+                    name: "__client".into(),
+                    value: "suno-client".into(),
+                    domain: ".suno.com".into(),
+                },
+                CdpCookie {
+                    name: "__client".into(),
+                    value: "auth-client".into(),
+                    domain: "auth.suno.com".into(),
+                },
+                CdpCookie {
+                    name: "ajs_anonymous_id".into(),
+                    value: "%22device-123%22".into(),
+                    domain: ".suno.com".into(),
+                },
+            ],
+            Some(BrowserEnvironment {
+                browser_source: Some(INTERACTIVE_BROWSER_SOURCE.into()),
+                user_agent: Some("Mozilla/5.0 Test".into()),
+                accept_language: Some("en-US,en;q=0.9".into()),
+            }),
+        )
         .expect("auth");
 
         assert_eq!(auth.clerk_client_cookie, "auth-client");
@@ -393,24 +503,88 @@ mod tests {
             auth.cookie_header
                 .contains("ajs_anonymous_id=%22device-123%22")
         );
+        assert_eq!(
+            auth.browser_environment
+                .as_ref()
+                .and_then(|env| env.user_agent.as_deref()),
+            Some("Mozilla/5.0 Test")
+        );
     }
 
     #[test]
     fn cdp_cookies_ignore_non_suno_domains() {
-        let auth = browser_auth_from_cdp_cookies(vec![
-            CdpCookie {
-                name: "__client".into(),
-                value: "wrong-client".into(),
-                domain: "example.com".into(),
-            },
-            CdpCookie {
-                name: "sid".into(),
-                value: "session".into(),
-                domain: ".suno.com".into(),
-            },
-        ]);
+        let auth = browser_auth_from_cdp_cookies(
+            vec![
+                CdpCookie {
+                    name: "__client".into(),
+                    value: "wrong-client".into(),
+                    domain: "example.com".into(),
+                },
+                CdpCookie {
+                    name: "sid".into(),
+                    value: "session".into(),
+                    domain: ".suno.com".into(),
+                },
+            ],
+            None,
+        );
 
         assert!(auth.is_none());
+    }
+
+    #[test]
+    fn browser_languages_become_accept_language_header() {
+        assert_eq!(
+            accept_language_from_browser_languages(&[
+                "en-US".to_string(),
+                "en".to_string(),
+                "ja".to_string(),
+            ])
+            .as_deref(),
+            Some("en-US,en;q=0.9,ja;q=0.8")
+        );
+    }
+
+    #[test]
+    fn cdp_version_user_agent_becomes_browser_environment() {
+        let environment = browser_environment_from_cdp_version_value(&serde_json::json!({
+            "Browser": "Chrome/146.0.0.0",
+            "User-Agent": "Mozilla/5.0 RealBrowser"
+        }))
+        .expect("environment");
+
+        assert_eq!(
+            environment.browser_source.as_deref(),
+            Some(INTERACTIVE_BROWSER_SOURCE)
+        );
+        assert_eq!(
+            environment.user_agent.as_deref(),
+            Some("Mozilla/5.0 RealBrowser")
+        );
+        assert_eq!(environment.accept_language, None);
+    }
+
+    #[test]
+    fn browser_environment_merge_falls_back_by_field() {
+        let merged = merge_browser_environments(
+            Some(BrowserEnvironment {
+                browser_source: Some(INTERACTIVE_BROWSER_SOURCE.into()),
+                user_agent: None,
+                accept_language: Some("ja,en;q=0.9".into()),
+            }),
+            Some(BrowserEnvironment {
+                browser_source: Some(INTERACTIVE_BROWSER_SOURCE.into()),
+                user_agent: Some("Mozilla/5.0 VersionFallback".into()),
+                accept_language: None,
+            }),
+        )
+        .expect("environment");
+
+        assert_eq!(
+            merged.user_agent.as_deref(),
+            Some("Mozilla/5.0 VersionFallback")
+        );
+        assert_eq!(merged.accept_language.as_deref(), Some("ja,en;q=0.9"));
     }
 
     #[test]

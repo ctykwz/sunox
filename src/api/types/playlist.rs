@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::clip::Clip;
 
@@ -14,19 +14,57 @@ pub struct PlaylistListResponse {
     pub playlists: Vec<PlaylistInfo>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PlaylistInfo {
     pub id: String,
-    #[serde(default)]
     pub name: String,
+    pub description: Option<String>,
+    pub image_url: Option<String>,
+    pub cover_url: Option<String>,
+    pub cover_image_s3_id: Option<String>,
+    pub cover_is_user_set: Option<bool>,
+    pub is_public: bool,
+    pub is_trashed: bool,
+    pub song_count: Option<u64>,
+    pub num_total_results: Option<u64>,
+    pub clip_ids: Vec<String>,
+    pub playlist_clips: Vec<PlaylistClip>,
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct PlaylistMetadata {
+    #[serde(default)]
+    pub name: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
     pub image_url: Option<String>,
     #[serde(default)]
-    pub is_public: bool,
+    pub cover_url: Option<String>,
     #[serde(default)]
-    pub is_trashed: bool,
+    pub cover_image_s3_id: Option<String>,
+    #[serde(default)]
+    pub cover_is_user_set: Option<bool>,
+    #[serde(default)]
+    pub is_public: Option<bool>,
+    #[serde(default)]
+    pub is_trashed: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawPlaylistInfo {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub image_url: Option<String>,
+    #[serde(default)]
+    pub is_public: Option<bool>,
+    #[serde(default)]
+    pub is_trashed: Option<bool>,
     #[serde(default)]
     pub song_count: Option<u64>,
     #[serde(default, alias = "numTotalResults")]
@@ -35,8 +73,46 @@ pub struct PlaylistInfo {
     pub clip_ids: Vec<String>,
     #[serde(default)]
     pub playlist_clips: Vec<PlaylistClip>,
+    #[serde(default)]
+    pub metadata: Option<PlaylistMetadata>,
     #[serde(default, flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+impl<'de> Deserialize<'de> for PlaylistInfo {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut raw = RawPlaylistInfo::deserialize(deserializer)?;
+        let metadata = raw.metadata.take().unwrap_or_default();
+        let cover_url = metadata.cover_url.or_else(|| raw.image_url.clone());
+        let image_url = raw
+            .image_url
+            .or_else(|| cover_url.clone())
+            .or(metadata.image_url);
+
+        Ok(Self {
+            id: raw.id,
+            name: raw
+                .name
+                .filter(|name| !name.trim().is_empty())
+                .or(metadata.name)
+                .unwrap_or_default(),
+            description: raw.description.or(metadata.description),
+            image_url,
+            cover_url,
+            cover_image_s3_id: metadata.cover_image_s3_id,
+            cover_is_user_set: metadata.cover_is_user_set,
+            is_public: raw.is_public.or(metadata.is_public).unwrap_or(false),
+            is_trashed: raw.is_trashed.or(metadata.is_trashed).unwrap_or(false),
+            song_count: raw.song_count,
+            num_total_results: raw.num_total_results,
+            clip_ids: raw.clip_ids,
+            playlist_clips: raw.playlist_clips,
+            extra: raw.extra,
+        })
+    }
 }
 
 impl PlaylistInfo {
@@ -94,6 +170,31 @@ impl SetPlaylistVisibilityRequest {
 #[derive(Debug, Serialize)]
 pub struct PlaylistVisibilityMetadata {
     pub is_public: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SetPlaylistCoverRequest {
+    pub metadata: PlaylistCoverMetadata,
+}
+
+impl SetPlaylistCoverRequest {
+    pub fn from_upload_id(upload_id: &str) -> Self {
+        let cover_image_s3_id = format!("image_{upload_id}");
+        Self {
+            metadata: PlaylistCoverMetadata {
+                cover_url: format!("https://cdn2.suno.ai/{cover_image_s3_id}.jpeg"),
+                cover_image_s3_id,
+                cover_is_user_set: true,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlaylistCoverMetadata {
+    pub cover_url: String,
+    pub cover_image_s3_id: String,
+    pub cover_is_user_set: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -165,8 +266,8 @@ pub struct TrashPlaylistRequest {
 mod tests {
     use super::{
         CreatePlaylistRequest, PlaylistReorderRequest, PlaylistTracksRequest,
-        SetPlaylistMetadataRequest, SetPlaylistReactionRequest, SetPlaylistVisibilityRequest,
-        TrashPlaylistRequest,
+        SetPlaylistCoverRequest, SetPlaylistMetadataRequest, SetPlaylistReactionRequest,
+        SetPlaylistVisibilityRequest, TrashPlaylistRequest,
     };
 
     #[test]
@@ -241,6 +342,24 @@ mod tests {
         assert_eq!(
             json,
             serde_json::json!({ "metadata": { "is_public": false } })
+        );
+    }
+
+    #[test]
+    fn set_playlist_cover_uses_v2_metadata_shape() {
+        let req = SetPlaylistCoverRequest::from_upload_id("upload-1");
+
+        let json = serde_json::to_value(req).expect("serialize request");
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "metadata": {
+                    "cover_url": "https://cdn2.suno.ai/image_upload-1.jpeg",
+                    "cover_image_s3_id": "image_upload-1",
+                    "cover_is_user_set": true
+                }
+            })
         );
     }
 

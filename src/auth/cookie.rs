@@ -43,6 +43,20 @@ pub(super) fn sanitize_device_id(value: &str) -> Option<String> {
     }
 }
 
+pub(crate) fn is_suno_cookie_domain(domain: &str) -> bool {
+    let domain = normalize_cookie_domain(domain);
+    domain == "suno.com" || domain.ends_with(".suno.com")
+}
+
+pub(crate) fn is_suno_auth_cookie_domain(domain: &str) -> bool {
+    let domain = normalize_cookie_domain(domain);
+    domain == "auth.suno.com" || domain.ends_with(".auth.suno.com")
+}
+
+fn normalize_cookie_domain(domain: &str) -> String {
+    domain.trim().trim_start_matches('.').to_ascii_lowercase()
+}
+
 pub fn normalize_cookie_input(input: &str) -> Result<BrowserAuth, CliError> {
     let normalized = strip_cookie_header_prefix(input);
     let cookies = parse_cookie_header(normalized);
@@ -55,6 +69,7 @@ pub fn normalize_cookie_input(input: &str) -> Result<BrowserAuth, CliError> {
             clerk_client_cookie: clerk_client_cookie.clone(),
             cookie_header: normalized.to_string(),
             device_id,
+            browser_environment: None,
         });
     }
 
@@ -72,6 +87,7 @@ pub fn normalize_cookie_input(input: &str) -> Result<BrowserAuth, CliError> {
         cookie_header: format!("__client={clerk_client_cookie}"),
         clerk_client_cookie,
         device_id: None,
+        browser_environment: None,
     })
 }
 
@@ -102,5 +118,24 @@ mod tests {
     fn rejects_cookie_header_without_client() {
         let err = normalize_cookie_input("foo=bar; ajs_anonymous_id=device").unwrap_err();
         assert!(err.to_string().contains("__client"));
+    }
+
+    #[test]
+    fn suno_cookie_domain_matches_only_suno_hosts() {
+        assert!(is_suno_cookie_domain("suno.com"));
+        assert!(is_suno_cookie_domain(".suno.com"));
+        assert!(is_suno_cookie_domain("auth.suno.com"));
+        assert!(is_suno_cookie_domain(".auth.suno.com"));
+        assert!(!is_suno_cookie_domain("not-suno.com"));
+        assert!(!is_suno_cookie_domain("suno.com.example"));
+    }
+
+    #[test]
+    fn suno_auth_cookie_domain_matches_only_auth_hosts() {
+        assert!(is_suno_auth_cookie_domain("auth.suno.com"));
+        assert!(is_suno_auth_cookie_domain(".auth.suno.com"));
+        assert!(!is_suno_auth_cookie_domain("suno.com"));
+        assert!(!is_suno_auth_cookie_domain("not-auth.suno.com"));
+        assert!(!is_suno_auth_cookie_domain("auth.suno.com.example"));
     }
 }

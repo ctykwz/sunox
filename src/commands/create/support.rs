@@ -13,14 +13,15 @@ pub(super) async fn generation_token(
     if let Some(token) = token {
         return Ok(Some(token));
     }
-    if !force_captcha {
-        return Ok(None);
+    if force_captcha {
+        if !ctx.quiet {
+            eprintln!("Solving hCaptcha via piloted browser...");
+        }
+        let auth = AuthState::load()?;
+        return Ok(Some(captcha::solve(&auth).await?));
     }
-    if !ctx.quiet {
-        eprintln!("Solving hCaptcha via piloted browser...");
-    }
-    let auth = AuthState::load()?;
-    Ok(Some(captcha::solve(&auth).await?))
+
+    Ok(None)
 }
 
 pub(super) fn output_clips(clips: &[Clip], ctx: &AppContext) {

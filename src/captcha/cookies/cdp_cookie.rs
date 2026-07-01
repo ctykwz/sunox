@@ -2,6 +2,8 @@ use std::collections::HashSet;
 
 use serde::Serialize;
 
+use crate::auth::is_suno_auth_cookie_domain;
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(in crate::captcha) struct CdpCookie {
@@ -45,7 +47,7 @@ pub(super) fn add_minimal_cookie(
         return;
     }
 
-    let cookie_domain = if domain.contains("auth.suno.com") {
+    let cookie_domain = if is_suno_auth_cookie_domain(domain) {
         "auth.suno.com"
     } else {
         ".suno.com"
@@ -79,7 +81,8 @@ pub(super) fn push_cookie(
 fn is_captcha_cookie(name: &str) -> bool {
     matches!(
         name,
-        "__session"
+        "__client"
+            | "__session"
             | "clerk_active_context"
             | "ajs_anonymous_id"
             | "suno_device_id"
@@ -88,4 +91,38 @@ fn is_captcha_cookie(name: &str) -> bool {
             | "has_logged_in_before"
     ) || name.starts_with("__client_")
         || name.starts_with("__session_")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::add_minimal_cookie;
+
+    #[test]
+    fn bare_clerk_client_cookie_is_injected_for_auth_and_suno_domains() {
+        let mut cookies = Vec::new();
+        let mut seen = HashSet::new();
+
+        add_minimal_cookie(
+            "__client",
+            "client-token",
+            ".suno.com",
+            true,
+            &mut cookies,
+            &mut seen,
+        );
+
+        assert_eq!(cookies.len(), 2);
+        assert!(cookies.iter().any(|cookie| {
+            cookie.name == "__client"
+                && cookie.value == "client-token"
+                && cookie.domain == "auth.suno.com"
+        }));
+        assert!(cookies.iter().any(|cookie| {
+            cookie.name == "__client"
+                && cookie.value == "client-token"
+                && cookie.domain == ".suno.com"
+        }));
+    }
 }

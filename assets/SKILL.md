@@ -142,6 +142,7 @@ sunox clip search "rainy"
 # Manage playlists
 sunox playlist list
 sunox playlist create --name "Release candidates" --description "Tracks to review" --image-url <cover_url>
+sunox playlist set <playlist_id> --image-file ./cover.png
 sunox add <clip_id_1> <clip_id_2> --to <playlist_id>
 sunox playlist add <playlist_id> <clip_id_1> <clip_id_2>
 sunox playlist remove <playlist_id> <clip_id_1>
@@ -204,7 +205,7 @@ sunox config set output_dir ./songs
 | `--instrumental` | No vocals | flag |
 | `--token` | Externally supplied challenge token | only when Suno challenges the request |
 | `--captcha` | Force browser-backed challenge solver | optional; not the default |
-| `--no-captcha` | Explicitly keep token empty | default behavior |
+| `--no-captcha` | Do not force the browser-backed solver | challenge preflight still runs |
 
 ## Models
 
@@ -273,11 +274,11 @@ sunox clip download $ids --output ./archive/
 ## Notes
 
 - Auth refreshes automatically (~7-day session lifetime).
-- Authenticated generation defaults to submitting with `token=null`; do not invoke captcha solving unless Suno rejects the request or the user explicitly asks for `--captcha`.
+- Commands that submit through `/api/generate/v2-web/` preflight `POST /api/c/check` with `ctype=generation`; when no challenge is required, submit uses `token=null` and `token_provider=null`.
 - If Suno requires a challenge, prefer `--token <solved>` when available; use `--captcha` only to force the built-in browser-backed solver.
-- Generation paths (normal, describe, voice persona, cover, extend) use `/api/generate/v2-web/`; remaster, stems, and speed use their current web edit/generation routes. You usually only need the subcommands.
+- Generation paths (normal, describe, voice persona, cover, extend, stems) use `/api/generate/v2-web/`; create, cover, extend, and stems expose `--token`, `--captcha`, and `--no-captcha`. Remaster and speed use their current web edit/generation routes. You usually only need the subcommands.
 - Persona list/detail/clips/create/set/processed-clip/publish/unpublish/love/unlove/toggle-love/delete/restore/purge are available through `sunox persona ...`.
-- Playlist create/list/detail/metadata/add/remove/publish/reorder/save/unsave/like/dislike/restore/delete are available through `sunox playlist ...`.
+- Playlist create/list/detail/metadata/add/remove/publish/reorder/save/unsave/like/dislike/restore/delete are available through `sunox playlist ...`; use `playlist set <id> --image-file <path>` for local cover uploads.
 - Clip delete/restore and like/dislike are available through `sunox clip delete`, `sunox clip restore`, `sunox clip like`, and `sunox clip dislike`. `--clear` removes the selected reaction.
 - `sunox clip upload <file>` uploads local audio through Suno's presigned S3 flow, waits for processing, initializes a clip, and can set title/lyrics metadata.
 - `sunox config set <key> <value>` persists local defaults; `SUNO_*` environment variables override persisted config.

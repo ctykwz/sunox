@@ -11,26 +11,27 @@ pub async fn create(args: CreateArgs, ctx: &AppContext) -> Result<(), CliError> 
         return generate(build_generate_args_from_create(args), ctx).await;
     }
 
+    describe(build_describe_args_from_create(args)?, ctx).await
+}
+
+fn build_describe_args_from_create(args: CreateArgs) -> Result<DescribeArgs, CliError> {
     let prompt = args
         .prompt
         .ok_or_else(|| CliError::Config("provide a prompt or --lyrics/--lyrics-file".into()))?;
-    describe(
-        DescribeArgs {
-            title: args.title,
-            prompt,
-            tags: args.tags,
-            model: args.model,
-            vocal: args.vocal,
-            weirdness: args.weirdness,
-            style_influence: args.style_influence,
-            instrumental: args.instrumental,
-            captcha: args.captcha,
-            no_captcha: args.no_captcha,
-            persona: args.persona,
-        },
-        ctx,
-    )
-    .await
+    Ok(DescribeArgs {
+        title: args.title,
+        prompt,
+        tags: args.tags,
+        model: args.model,
+        vocal: args.vocal,
+        weirdness: args.weirdness,
+        style_influence: args.style_influence,
+        instrumental: args.instrumental,
+        token: args.token,
+        captcha: args.captcha,
+        no_captcha: args.no_captcha,
+        persona: args.persona,
+    })
 }
 
 fn build_generate_args_from_create(args: CreateArgs) -> GenerateArgs {
@@ -95,6 +96,7 @@ fn non_empty(value: String) -> Option<String> {
 async fn generate(args: GenerateArgs, ctx: &AppContext) -> Result<(), CliError> {
     let mut req = build_generate_request(&args, &ctx.config)?;
     let force_captcha = args.captcha && !args.no_captcha;
+    let client = ctx.client().await?;
     req.set_challenge_token(generation_token(args.token.clone(), force_captcha, ctx).await?);
 
     if !ctx.quiet {
@@ -108,7 +110,6 @@ async fn generate(args: GenerateArgs, ctx: &AppContext) -> Result<(), CliError> 
             model_label(args.model.as_ref(), &ctx.config)
         );
     }
-    let client = ctx.client().await?;
     let clips = client.generate(&req).await?;
     output_clips(&clips, ctx);
     Ok(())
@@ -148,7 +149,8 @@ fn build_generate_request(
 async fn describe(args: DescribeArgs, ctx: &AppContext) -> Result<(), CliError> {
     let mut req = build_describe_request(&args, &ctx.config);
     let force_captcha = args.captcha && !args.no_captcha;
-    req.set_challenge_token(generation_token(None, force_captcha, ctx).await?);
+    let client = ctx.client().await?;
+    req.set_challenge_token(generation_token(args.token.clone(), force_captcha, ctx).await?);
 
     if !ctx.quiet {
         eprintln!(
@@ -156,7 +158,6 @@ async fn describe(args: DescribeArgs, ctx: &AppContext) -> Result<(), CliError> 
             model_label(args.model.as_ref(), &ctx.config)
         );
     }
-    let client = ctx.client().await?;
     let clips = client.generate(&req).await?;
     output_clips(&clips, ctx);
     Ok(())
@@ -194,6 +195,8 @@ pub async fn extend(args: ExtendArgs, ctx: &AppContext) -> Result<(), CliError> 
     req.tags = args.tags;
     req.continue_clip_id = Some(args.clip_id);
     req.continue_at = Some(args.at);
+    let force_captcha = args.captcha && !args.no_captcha;
+    req.set_challenge_token(generation_token(args.token.clone(), force_captcha, ctx).await?);
 
     let client = ctx.client().await?;
     let clips = client.generate(&req).await?;
@@ -203,10 +206,13 @@ pub async fn extend(args: ExtendArgs, ctx: &AppContext) -> Result<(), CliError> 
 
 #[cfg(test)]
 mod tests {
-    use crate::cli::{DescribeArgs, ModelVersion};
+    use crate::cli::{CreateArgs, DescribeArgs, ModelVersion};
     use crate::core::AppConfig;
 
-    use super::{build_describe_request, build_generate_args_from_create, build_generate_request};
+    use super::{
+        build_describe_args_from_create, build_describe_request, build_generate_args_from_create,
+        build_generate_request,
+    };
 
     fn config_with_default_model(default_model: &str) -> AppConfig {
         AppConfig {
@@ -225,6 +231,7 @@ mod tests {
             weirdness: None,
             style_influence: None,
             instrumental: false,
+            token: None,
             captcha: false,
             no_captcha: false,
             persona: None,
@@ -263,6 +270,33 @@ mod tests {
 
         let body = serde_json::to_value(req).expect("request json");
         assert_eq!(body["mv"], "chirp-crow");
+    }
+
+    #[test]
+    fn description_create_preserves_challenge_controls() {
+        let args = CreateArgs {
+            prompt: Some("a warm ballad about starlight".into()),
+            title: Some("Starlight".into()),
+            tags: Some("pop ballad".into()),
+            exclude: None,
+            lyrics: None,
+            lyrics_file: None,
+            model: Some(ModelVersion::V55),
+            vocal: None,
+            weirdness: None,
+            style_influence: None,
+            instrumental: false,
+            token: Some("captcha-token".into()),
+            captcha: true,
+            no_captcha: false,
+            persona: None,
+        };
+
+        let describe_args = build_describe_args_from_create(args).expect("describe args");
+
+        assert_eq!(describe_args.token.as_deref(), Some("captcha-token"));
+        assert!(describe_args.captcha);
+        assert!(!describe_args.no_captcha);
     }
 
     #[test]

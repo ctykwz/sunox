@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use super::cdp_cookie::{CdpCookie, add_minimal_cookie};
+use crate::auth::is_suno_cookie_domain;
 
 pub(super) fn add_live_browser_cookies(
     out: &mut Vec<CdpCookie>,
@@ -23,7 +24,7 @@ pub(super) fn add_live_browser_cookies(
         Ok(cookies)
             if cookies
                 .iter()
-                .any(|cookie| cookie.domain.contains("suno.com")) =>
+                .any(|cookie| is_suno_cookie_domain(&cookie.domain)) =>
         {
             Some((browser_name, cookies))
         }
@@ -33,7 +34,7 @@ pub(super) fn add_live_browser_cookies(
     };
 
     for cookie in raw_cookies {
-        if !cookie.domain.contains("suno.com") {
+        if !is_suno_cookie_domain(&cookie.domain) {
             continue;
         }
         add_minimal_cookie(

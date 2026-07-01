@@ -2,6 +2,28 @@ use serde::{Deserialize, Serialize};
 
 use super::clip::Clip;
 
+const WEB_CLIENT_PATHNAME: &str = "/create";
+const GENERATION_TYPE_TEXT: &str = "TEXT";
+const CHALLENGE_TOKEN_PROVIDER: u8 = 1;
+
+/// Shared browser-facing generation fields that are common across create,
+/// cover, extend, stems, and other `/api/generate/v2-web/` submits.
+#[derive(Debug, Clone, Default)]
+pub struct GenerationWebContext {
+    pub user_tier: Option<String>,
+}
+
+impl GenerationWebContext {
+    fn user_tier_value(&self) -> String {
+        self.user_tier
+            .as_deref()
+            .map(str::trim)
+            .filter(|tier| !tier.is_empty())
+            .unwrap_or_default()
+            .to_string()
+    }
+}
+
 /// Schema used by Suno's web generation endpoint `/api/generate/v2-web/`.
 /// Placeholder fields must be present or Suno's server-side schema rejects
 /// the request.
@@ -50,10 +72,14 @@ pub struct GenerateRequest {
 
 impl GenerateRequest {
     pub fn new(mv: &str, create_mode: &str) -> Self {
+        Self::new_with_context(mv, create_mode, &GenerationWebContext::default())
+    }
+
+    pub fn new_with_context(mv: &str, create_mode: &str, context: &GenerationWebContext) -> Self {
         Self {
             token: None,
             task: None,
-            generation_type: "TEXT".to_string(),
+            generation_type: GENERATION_TYPE_TEXT.to_string(),
             title: None,
             tags: None,
             negative_tags: String::new(),
@@ -62,7 +88,7 @@ impl GenerateRequest {
             gpt_description_prompt: None,
             make_instrumental: false,
             user_uploaded_images_b64: None,
-            metadata: GenerateMetadata::new(create_mode),
+            metadata: GenerateMetadata::new_with_context(create_mode, context),
             override_fields: Vec::new(),
             cover_clip_id: None,
             cover_start_s: None,
@@ -84,7 +110,7 @@ impl GenerateRequest {
 
     pub fn set_challenge_token(&mut self, token: Option<String>) {
         self.token = token;
-        self.token_provider = self.token.as_ref().map(|_| 1);
+        self.token_provider = self.token.as_ref().map(|_| CHALLENGE_TOKEN_PROVIDER);
     }
 }
 
@@ -107,13 +133,13 @@ pub struct GenerateMetadata {
 }
 
 impl GenerateMetadata {
-    pub fn new(create_mode: &str) -> Self {
+    fn new_with_context(create_mode: &str, context: &GenerationWebContext) -> Self {
         Self {
-            web_client_pathname: "/create".to_string(),
+            web_client_pathname: WEB_CLIENT_PATHNAME.to_string(),
             is_max_mode: false,
             is_mumble: false,
             create_mode: create_mode.to_string(),
-            user_tier: String::new(),
+            user_tier: context.user_tier_value(),
             create_session_token: uuid::Uuid::new_v4().to_string(),
             disable_volume_normalization: false,
             control_sliders: None,
@@ -137,4 +163,36 @@ pub struct ControlSliders {
 pub struct GenerateResponse {
     #[serde(default)]
     pub clips: Vec<Clip>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generation_context_sets_shared_web_metadata() {
+        let context = GenerationWebContext {
+            user_tier: Some("tier-pro".into()),
+        };
+
+        let request = GenerateRequest::new_with_context("chirp-fenix", "custom", &context);
+        let body = serde_json::to_value(request).expect("request json");
+
+        assert_eq!(body["generation_type"], "TEXT");
+        assert_eq!(body["metadata"]["web_client_pathname"], "/create");
+        assert_eq!(body["metadata"]["user_tier"], "tier-pro");
+        assert!(body["metadata"]["create_session_token"].as_str().is_some());
+        assert!(body["transaction_uuid"].as_str().is_some());
+    }
+
+    #[test]
+    fn challenge_token_sets_web_token_provider() {
+        let mut request = GenerateRequest::new("chirp-fenix", "custom");
+
+        request.set_challenge_token(Some("challenge-token".into()));
+        let body = serde_json::to_value(request).expect("request json");
+
+        assert_eq!(body["token"], "challenge-token");
+        assert_eq!(body["token_provider"], 1);
+    }
 }

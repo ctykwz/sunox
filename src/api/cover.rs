@@ -12,10 +12,12 @@ impl SunoClient {
         clip_id: &str,
         model_key: &str,
         tags: Option<&str>,
+        challenge_token: Option<String>,
     ) -> Result<Vec<Clip>, CliError> {
         let mut req = GenerateRequest::new(model_key, "cover");
         req.tags = tags.map(String::from);
         req.cover_clip_id = Some(clip_id.to_string());
+        req.set_challenge_token(challenge_token);
         self.generate(&req).await
     }
 }

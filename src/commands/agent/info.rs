@@ -68,11 +68,11 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
         },
         "command_notes": {
             "create": {
-                "default_challenge": "submits with token=null and token_provider=null; does not run the browser solver unless --captcha is supplied",
+                "default_challenge": "preflights POST /api/c/check with ctype=generation; submits with token=null and token_provider=null only when no challenge is required; does not run the browser solver unless --captcha is supplied",
                 "challenge_flags": {
                     "--token": "use an externally supplied solved challenge token; submit body uses token_provider=1",
                     "--captcha": "force the browser-backed challenge solver; submit body uses token_provider=1 when a token is produced",
-                    "--no-captcha": "explicitly keep the default token=null behavior"
+                    "--no-captcha": "do not force the browser-backed solver; generation challenge preflight still runs"
                 },
                 "modes": "description mode when a non-instrumental prompt is provided; custom lyrics mode when --lyrics or --lyrics-file is provided; custom instrumental mode when --instrumental is provided, with the prompt folded into style tags",
                 "title": "optional; omitted title is sent as an empty string for description mode because Suno currently requires params.title to be a string"
@@ -94,6 +94,10 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                 "route": "POST /api/generate/v2-web/",
                 "body_constraints": "task=gen_stem, mv=chirp-v3-0, make_instrumental=true, stem_type_id=91, stem_type_group_name=Twelve, stem_task=twelve",
                 "response": "generation response with multiple chirp-stem clips"
+            },
+            "generate_backed_clip_edits": {
+                "commands": ["clip cover", "clip extend", "clip stems"],
+                "challenge_flags": "these commands expose --token, --captcha, and --no-captcha because they submit through /api/generate/v2-web/ and can hit the same generation challenge gate"
             },
             "clip speed": {
                 "route": "POST /api/clips/adjust-speed/",
@@ -124,13 +128,10 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "playlist_add_tracks", "playlist_remove_tracks",
             "playlist_save", "playlist_unsave",
             "playlist_like", "playlist_dislike",
-            "playlist_restore", "playlist_delete", "clip_info"
+            "playlist_restore", "playlist_delete", "playlist_cover_upload",
+            "image_upload", "clip_info"
         ],
         "unsupported_surfaces": {
-            "image_upload": {
-                "status": "bundle_discovered_unverified",
-                "reason": "Suno Web exposes image upload paths, but this CLI only live-verified audio upload"
-            },
             "video_upload": {
                 "status": "bundle_discovered_unverified",
                 "reason": "video upload paths are visible in the frontend bundle but are not exposed as CLI workflows"
@@ -202,7 +203,9 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                     "playlist save", "playlist unsave",
                     "playlist like", "playlist dislike",
                     "playlist delete"
-                ]
+                ],
+                "cover_status": "playlist set/create support --image-file for local image upload; uploaded covers use POST /api/uploads/image/, presigned S3 form upload, POST /api/uploads/image/{id}/upload-finish/, then PATCH /api/playlist/v2/{id} with metadata.cover_url, metadata.cover_image_s3_id, and metadata.cover_is_user_set=true",
+                "cover_url_status": "playlist set --image-url accepts existing Suno uploaded image URLs such as https://cdn2.suno.ai/image_<upload_id>.jpeg and maps them to the same v2 cover metadata patch; arbitrary external URLs still use the legacy set_metadata route"
             }
         },
         "exit_codes": {
@@ -227,7 +230,8 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             ],
             "login_fallback": "`sunox login` first probes existing browser cookies; if that fails, it opens a dedicated Sunox Chrome/Edge-compatible browser profile and captures the Clerk session after the user logs in.",
             "logout": "`sunox logout` removes stored auth and the dedicated interactive browser profile",
-            "generation_challenge": "Generation defaults to token=null/token_provider=null and does not run the browser solver. Use --token <solved> to supply a token or --captcha to force the browser-backed solver; solved-token submits use token_provider=1.",
+            "generation_challenge": "Commands that submit through /api/generate/v2-web/ preflight POST /api/c/check with ctype=generation. If no challenge is required, submit uses token=null/token_provider=null. Use --token <solved> to supply a token or --captcha to force the browser-backed solver; solved-token submits use token_provider=1.",
+            "browser_environment": "Browser-cookie login records a stable source browser id and best-effort public profile settings such as accept-language, but does not fabricate user-agent from that label. Interactive login captures runtime user-agent and accept-language via CDP. API calls reuse available fields independently and fall back field-by-field when unavailable.",
         },
         "provider": "direct_suno_unofficial",
         "auth_required": true,
