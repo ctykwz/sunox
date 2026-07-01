@@ -17,7 +17,7 @@ pub(super) async fn generation_token(
         return Ok(None);
     }
     if !ctx.quiet {
-        eprintln!("Solving hCaptcha via piloted Chrome...");
+        eprintln!("Solving hCaptcha via piloted browser...");
     }
     let auth = AuthState::load()?;
     Ok(Some(captcha::solve(&auth).await?))

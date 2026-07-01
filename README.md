@@ -109,7 +109,7 @@ sunox create [prompt]           Generate with title, tags, lyrics, model, person
 sunox download <clip_ids>       Download completed songs
 sunox add <clip_ids> --to <id>  Add songs to a playlist
 sunox login                     Set up authentication from browser
-sunox logout                    Remove stored auth
+sunox logout                    Remove stored auth and interactive login profile
 sunox doctor                    Diagnose config and auth
 ```
 
@@ -193,7 +193,7 @@ sunox clip timed-lyrics    Get word-level timestamped lyrics (--lrc for LRC form
 
 ```
 sunox login          Set up authentication from browser
-sunox logout         Remove stored auth
+sunox logout         Remove stored auth and interactive login profile
 sunox auth           Advanced auth: refresh, cookie, jwt
 sunox config         show | set | check
 sunox doctor         Diagnose config and auth
@@ -207,18 +207,18 @@ sunox update         Self-update from GitHub Releases (--check to peek first)
 ### Zero-Friction Auth
 
 ```bash
-sunox login    # Extracts session from your browser automatically
+sunox login    # Browser-cookie auth, with interactive Chrome/Edge fallback
 ```
 
-Reads the Clerk auth cookie from Chrome, Arc, Brave, Firefox, or Edge. Exchanges it for a JWT via Clerk token exchange, stores the refreshable session in a `0600` local auth file, and refreshes stale JWTs automatically when the underlying browser session is still valid.
+`sunox login` first tries to read the Clerk auth cookie from Chrome, Arc, Brave, Firefox, or Edge. If that fails, it opens a dedicated Sunox Chrome/Edge-compatible browser profile and waits for you to log into Suno there. The captured Clerk session is exchanged for a JWT, stored in a `0600` local auth file, and used to refresh stale JWTs automatically while the underlying session is still valid.
 
 Auth methods (in order of convenience):
-1. `sunox login` — automatic browser extraction (recommended)
+1. `sunox login` — automatic browser extraction, with interactive Chrome/Edge fallback (recommended)
 2. `sunox auth --cookie <cookie>` — manual paste for headless servers; accepts either raw `__client` or a full browser `Cookie` header
 3. `sunox auth --jwt <token>` — direct JWT, expires in ~1 hour
 4. `sunox auth --refresh` — force a fresh JWT from the stored Clerk session
 
-`sunox auth` with no flags checks the existing session, or starts browser login if no auth is configured. `sunox logout` removes stored credentials.
+`sunox auth` with no flags checks the existing session, or starts browser login if no auth is configured. `sunox logout` removes stored credentials and the dedicated interactive browser profile.
 
 ### Generation Parameters
 

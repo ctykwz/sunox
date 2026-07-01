@@ -1,0 +1,182 @@
+use std::path::{Path, PathBuf};
+
+use crate::core::CliError;
+
+const BROWSER_PATH_ENV: &str = "SUNO_BROWSER_PATH";
+const LEGACY_CHROME_PATH_ENV: &str = "SUNO_CHROME_PATH";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TargetOs {
+    Macos,
+    Linux,
+    Windows,
+}
+
+pub fn locate_chromium_browser() -> Result<String, CliError> {
+    if let Some(path) = configured_browser_path(|key| std::env::var(key).ok())? {
+        return Ok(path);
+    }
+
+    for candidate in chromium_browser_candidates(current_target_os(), |key| {
+        std::env::var_os(key).map(PathBuf::from)
+    }) {
+        if candidate.exists() {
+            return Ok(candidate.display().to_string());
+        }
+    }
+
+    Err(CliError::Config(
+        "Could not find a Chrome, Edge, or Chromium binary. Install a Chromium-based browser or set SUNO_BROWSER_PATH."
+            .into(),
+    ))
+}
+
+fn configured_browser_path<F>(env_var: F) -> Result<Option<String>, CliError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    for key in [BROWSER_PATH_ENV, LEGACY_CHROME_PATH_ENV] {
+        let Some(path) = env_var(key) else {
+            continue;
+        };
+        let path = path.trim();
+        if path.is_empty() {
+            continue;
+        }
+        if Path::new(path).exists() {
+            return Ok(Some(path.to_string()));
+        }
+        return Err(CliError::Config(format!(
+            "{key} points to a missing file: {path}"
+        )));
+    }
+
+    Ok(None)
+}
+
+fn current_target_os() -> TargetOs {
+    if cfg!(target_os = "macos") {
+        TargetOs::Macos
+    } else if cfg!(target_os = "linux") {
+        TargetOs::Linux
+    } else {
+        TargetOs::Windows
+    }
+}
+
+fn chromium_browser_candidates<F>(target_os: TargetOs, env_var: F) -> Vec<PathBuf>
+where
+    F: Fn(&str) -> Option<PathBuf>,
+{
+    match target_os {
+        TargetOs::Macos => [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect(),
+        TargetOs::Linux => [
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/microsoft-edge",
+            "/usr/bin/microsoft-edge-stable",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/snap/bin/chromium",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect(),
+        TargetOs::Windows => {
+            let mut candidates = Vec::new();
+            if let Some(local_app_data) = env_var("LOCALAPPDATA") {
+                candidates.push(PathBuf::from(format!(
+                    r"{}\Google\Chrome\Application\chrome.exe",
+                    local_app_data.display()
+                )));
+                candidates.push(PathBuf::from(format!(
+                    r"{}\Microsoft\Edge\Application\msedge.exe",
+                    local_app_data.display()
+                )));
+            }
+            candidates.extend([
+                PathBuf::from(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+                PathBuf::from(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
+                PathBuf::from(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
+                PathBuf::from(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+            ]);
+            candidates
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_path_env_takes_precedence_over_legacy_chrome_path() {
+        let browser_path =
+            std::env::temp_dir().join(format!("sunox-browser-path-test-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&browser_path, "").expect("browser stub");
+
+        let configured = configured_browser_path(|key| match key {
+            BROWSER_PATH_ENV => Some(browser_path.display().to_string()),
+            LEGACY_CHROME_PATH_ENV => Some("missing-legacy-browser".into()),
+            _ => None,
+        })
+        .expect("configured path")
+        .expect("path");
+
+        assert_eq!(configured, browser_path.display().to_string());
+        let _ = std::fs::remove_file(browser_path);
+    }
+
+    #[test]
+    fn windows_chrome_candidates_include_per_user_install_path() {
+        let candidates = chromium_browser_candidates(TargetOs::Windows, |key| match key {
+            "LOCALAPPDATA" => Some(PathBuf::from(r"C:\Users\alice\AppData\Local")),
+            _ => None,
+        });
+
+        assert!(candidates.contains(&PathBuf::from(
+            r"C:\Users\alice\AppData\Local\Google\Chrome\Application\chrome.exe"
+        )));
+        assert!(candidates.contains(&PathBuf::from(
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        )));
+    }
+
+    #[test]
+    fn windows_browser_candidates_include_edge_install_paths() {
+        let candidates = chromium_browser_candidates(TargetOs::Windows, |key| match key {
+            "LOCALAPPDATA" => Some(PathBuf::from(r"C:\Users\alice\AppData\Local")),
+            _ => None,
+        });
+
+        assert!(candidates.contains(&PathBuf::from(
+            r"C:\Users\alice\AppData\Local\Microsoft\Edge\Application\msedge.exe"
+        )));
+        assert!(candidates.contains(&PathBuf::from(
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"
+        )));
+        assert!(candidates.contains(&PathBuf::from(
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+        )));
+    }
+
+    #[test]
+    fn macos_and_linux_candidates_include_edge() {
+        let macos = chromium_browser_candidates(TargetOs::Macos, |_| None);
+        let linux = chromium_browser_candidates(TargetOs::Linux, |_| None);
+
+        assert!(macos.contains(&PathBuf::from(
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+        )));
+        assert!(linux.contains(&PathBuf::from("/usr/bin/microsoft-edge")));
+        assert!(linux.contains(&PathBuf::from("/usr/bin/microsoft-edge-stable")));
+    }
+}

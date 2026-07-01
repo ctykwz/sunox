@@ -1,6 +1,7 @@
 mod api;
 mod app;
 mod auth;
+mod browser;
 mod captcha;
 mod cli;
 mod commands;

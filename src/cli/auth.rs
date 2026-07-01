@@ -1,6 +1,6 @@
 #[derive(clap::Args)]
 pub struct AuthArgs {
-    /// Auto-extract from browser (recommended)
+    /// Auto-auth from browser cookies, falling back to an interactive Chrome/Edge login
     #[arg(long)]
     pub login: bool,
 
@@ -24,7 +24,7 @@ pub struct AuthArgs {
     #[arg(long)]
     pub device: Option<String>,
 
-    /// Remove stored authentication
+    /// Remove stored authentication and the interactive login profile
     #[arg(long)]
     pub logout: bool,
 }

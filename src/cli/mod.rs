@@ -104,10 +104,10 @@ pub enum Commands {
     /// Set up authentication
     Auth(AuthArgs),
 
-    /// Log in by extracting Suno credentials from your browser
+    /// Log in from browser cookies, falling back to an interactive Chrome/Edge window
     Login,
 
-    /// Remove stored authentication credentials
+    /// Remove stored authentication credentials and the interactive login profile
     Logout,
 
     /// Manage configuration

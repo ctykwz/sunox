@@ -3,6 +3,7 @@
 mod browser;
 mod clerk;
 mod cookie;
+mod interactive;
 mod state;
 mod token;
 mod types;
@@ -10,6 +11,7 @@ mod types;
 pub use browser::extract_browser_auth;
 pub use clerk::{clerk_refresh_jwt, clerk_token_exchange};
 pub use cookie::normalize_cookie_input;
+pub use interactive::{delete_interactive_browser_profile, extract_interactive_browser_auth};
 pub use state::AuthState;
 pub use token::browser_token;
 #[allow(unused_imports)]

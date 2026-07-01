@@ -104,7 +104,7 @@ sunox create [prompt]           Générer avec titre, tags, paroles, modèle, pe
 sunox download <clip_ids>       Télécharger les morceaux terminés
 sunox add <clip_ids> --to <id>  Ajouter des morceaux à une playlist
 sunox login                     Configurer l'authentification depuis le navigateur
-sunox logout                    Supprimer l'authentification locale
+sunox logout                    Supprimer l'auth locale et le profil login interactif
 sunox doctor                    Diagnostiquer la configuration et l'auth
 ```
 
@@ -185,14 +185,16 @@ sunox update
 sunox login
 ```
 
-`sunox` lit le cookie Clerk depuis Chrome, Arc, Brave, Firefox ou Edge, l'échange contre un JWT, stocke une session locale renouvelable et rafraîchit automatiquement les JWT expirés.
+`sunox login` essaie d'abord de lire le cookie Clerk depuis Chrome, Arc, Brave, Firefox ou Edge. Si cette extraction échoue, il ouvre un profil de navigateur dédié à Sunox et compatible Chrome/Edge, puis attend que vous vous connectiez à Suno dans cette fenêtre. La session Clerk capturée est ensuite échangée contre un JWT et stockée localement pour les rafraîchissements.
 
 Méthodes d'authentification :
 
-1. `sunox login` : extraction automatique depuis le navigateur, recommandée.
+1. `sunox login` : extraction automatique depuis le navigateur, avec fallback Chrome/Edge interactif, recommandée.
 2. `sunox auth --cookie <cookie>` : collage manuel d'un cookie sur serveur headless.
 3. `sunox auth --jwt <token>` : JWT direct, généralement valable environ 1 heure.
 4. `sunox auth --refresh` : force un nouveau JWT depuis la session Clerk sauvegardée.
+
+`sunox logout` supprime les identifiants locaux et le profil de navigateur dédié au login interactif.
 
 ### Paramètres de génération
 

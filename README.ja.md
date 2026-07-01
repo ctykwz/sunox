@@ -104,7 +104,7 @@ sunox create [prompt]           タイトル、タグ、歌詞、モデル、per
 sunox download <clip_ids>       完成した曲をダウンロード
 sunox add <clip_ids> --to <id>  曲をプレイリストに追加
 sunox login                     ブラウザから認証を設定
-sunox logout                    ローカル認証情報を削除
+sunox logout                    ローカル認証情報と対話型 login profile を削除
 sunox doctor                    設定と認証を診断
 ```
 
@@ -185,14 +185,16 @@ sunox update
 sunox login
 ```
 
-`sunox` は Chrome、Arc、Brave、Firefox、Edge から Clerk cookie を読み取り、JWT に交換し、更新可能なローカル session として保存します。JWT が古くなった場合は、保存済み session から自動更新します。
+`sunox login` はまず Chrome、Arc、Brave、Firefox、Edge から Clerk cookie を読み取ります。失敗した場合は Sunox 専用の Chrome/Edge 互換ブラウザ profile を開き、そこで Suno にログインすると Clerk session を取得します。その session を JWT に交換し、更新可能なローカル session として保存します。
 
 認証方式：
 
-1. `sunox login`：ブラウザから自動抽出。推奨。
+1. `sunox login`：ブラウザから自動抽出。失敗時は対話型 Chrome/Edge login に fallback。推奨。
 2. `sunox auth --cookie <cookie>`：ヘッドレス環境向けに cookie を手動指定。
 3. `sunox auth --jwt <token>`：JWT を直接指定。通常は約 1 時間有効。
 4. `sunox auth --refresh`：保存済み Clerk session から JWT を強制更新。
+
+`sunox logout` はローカル認証情報と対話型 login 用の専用ブラウザ profile を削除します。
 
 ### 生成パラメータ
 

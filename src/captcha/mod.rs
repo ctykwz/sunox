@@ -1,7 +1,7 @@
-//! hCaptcha solving via a piloted Chrome instance.
+//! hCaptcha solving via a piloted Chromium-family browser instance.
 
+mod browser;
 mod cdp;
-mod chrome;
 mod cookies;
 
 use crate::auth::AuthState;
@@ -14,7 +14,7 @@ pub(super) const CDP_HOST: &str = "127.0.0.1";
 /// Solve a fresh hCaptcha challenge and return the token to attach to a
 /// `/api/generate/v2-web/` request body.
 pub async fn solve(auth: &AuthState) -> Result<String, CliError> {
-    chrome::ensure_running().await?;
+    browser::ensure_running().await?;
     let target = cdp::find_or_create_suno_tab().await?;
     cdp::render_and_execute(&target.web_socket_debugger_url, auth).await
 }
