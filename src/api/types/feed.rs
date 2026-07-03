@@ -29,6 +29,12 @@ pub struct FeedFilters {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disliked: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub liked: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upload: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub trashed: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "fullSong")]
@@ -39,9 +45,15 @@ pub struct FeedFilters {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stem: Option<FilterPresence>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub cover: Option<FilterPresence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extend: Option<FilterPresence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<WorkspaceFilter>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<UserFilter>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort: Option<FeedSort>,
 }
 
 #[derive(Debug, Serialize)]
@@ -63,17 +75,31 @@ pub struct UserFilter {
     pub user_id: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct FeedSort {
+    #[serde(rename = "sortBy")]
+    pub sort_by: String,
+    #[serde(rename = "sortDirection")]
+    pub sort_direction: String,
+}
+
 impl FeedFilters {
     pub fn default_workspace() -> Self {
         Self {
             search_text: None,
             disliked: Some("False".to_string()),
+            liked: None,
+            public: None,
+            upload: None,
             trashed: Some("False".to_string()),
             full_song: None,
             from_studio_project: Some(FilterPresence::absent()),
             stem: Some(FilterPresence::absent()),
+            cover: None,
+            extend: None,
             workspace: Some(WorkspaceFilter::default_workspace()),
             user: None,
+            sort: None,
         }
     }
 
@@ -83,9 +109,46 @@ impl FeedFilters {
             ..Self::default_workspace()
         }
     }
+
+    pub fn with_public(mut self) -> Self {
+        self.public = Some("True".to_string());
+        self
+    }
+
+    pub fn with_liked(mut self) -> Self {
+        self.liked = Some("True".to_string());
+        self.disliked = None;
+        self
+    }
+
+    pub fn with_upload(mut self) -> Self {
+        self.upload = Some("True".to_string());
+        self
+    }
+
+    pub fn with_cover(mut self) -> Self {
+        self.cover = Some(FilterPresence::present());
+        self
+    }
+
+    pub fn with_extend(mut self) -> Self {
+        self.extend = Some(FilterPresence::present());
+        self
+    }
+
+    pub fn with_popular_sort(mut self) -> Self {
+        self.sort = Some(FeedSort::upvote_count_desc());
+        self
+    }
 }
 
 impl FilterPresence {
+    pub fn present() -> Self {
+        Self {
+            presence: "True".to_string(),
+        }
+    }
+
     pub fn absent() -> Self {
         Self {
             presence: "False".to_string(),
@@ -98,6 +161,15 @@ impl WorkspaceFilter {
         Self {
             presence: "True".to_string(),
             workspace_id: "default".to_string(),
+        }
+    }
+}
+
+impl FeedSort {
+    pub fn upvote_count_desc() -> Self {
+        Self {
+            sort_by: "upvote_count".to_string(),
+            sort_direction: "desc".to_string(),
         }
     }
 }
@@ -130,6 +202,11 @@ mod tests {
         assert_eq!(json["limit"], 20);
         assert_eq!(json["filters"]["disliked"], "False");
         assert_eq!(json["filters"]["trashed"], "False");
+        assert!(json["filters"].get("liked").is_none());
+        assert!(json["filters"].get("public").is_none());
+        assert!(json["filters"].get("upload").is_none());
+        assert!(json["filters"].get("cover").is_none());
+        assert!(json["filters"].get("extend").is_none());
         assert_eq!(json["filters"]["fromStudioProject"]["presence"], "False");
         assert_eq!(json["filters"]["stem"]["presence"], "False");
         assert_eq!(json["filters"]["workspace"]["presence"], "True");
@@ -153,5 +230,32 @@ mod tests {
         assert_eq!(json["filters"]["user"]["presence"], "True");
         assert_eq!(json["filters"]["user"]["userId"], "user-123");
         assert!(json["filters"].get("workspace").is_none());
+    }
+
+    #[test]
+    fn feed_filters_match_public_liked_upload_cover_extend_popular_web_shape() {
+        let filters = FeedFilters::default_workspace()
+            .with_public()
+            .with_liked()
+            .with_upload()
+            .with_cover()
+            .with_extend()
+            .with_popular_sort();
+
+        let json = serde_json::to_value(FeedV3Request {
+            cursor: None,
+            limit: Some(20),
+            filters: Some(filters),
+        })
+        .expect("serialize feed request");
+
+        assert_eq!(json["filters"]["liked"], "True");
+        assert_eq!(json["filters"]["public"], "True");
+        assert_eq!(json["filters"]["upload"], "True");
+        assert!(json["filters"].get("disliked").is_none());
+        assert_eq!(json["filters"]["cover"]["presence"], "True");
+        assert_eq!(json["filters"]["extend"]["presence"], "True");
+        assert_eq!(json["filters"]["sort"]["sortBy"], "upvote_count");
+        assert_eq!(json["filters"]["sort"]["sortDirection"], "desc");
     }
 }

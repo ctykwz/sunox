@@ -6,9 +6,10 @@ use tokio::time::{Duration, timeout};
 use super::SunoClient;
 use super::extend::ExtendClipOptions;
 use super::types::{
-    ClipReaction, CreateAudioUploadRequest, CreateAudioUploadSpec, CreateImageUploadRequest,
-    CreatePersonaRequest, EditPersonaRequest, FinishAudioUploadRequest, GenerateRequest,
-    InitializeAudioClipRequest, PersonaListScope, PlaylistReaction, SetMetadataRequest,
+    Clip, ClipReaction, CreateAudioUploadRequest, CreateAudioUploadSpec, CreateImageUploadRequest,
+    CreatePersonaRequest, EditPersonaRequest, FeedFilters, FinishAudioUploadRequest,
+    GenerateRequest, InitializeAudioClipRequest, PersonaListScope, PlaylistReaction,
+    SetMetadataRequest,
 };
 use crate::auth::{AuthState, BrowserEnvironment};
 use crate::core::CliError;
@@ -363,7 +364,14 @@ async fn feed_posts_v3_workspace_filter_contract() {
     let server = MockServer::json(r#"{"clips":[],"next_cursor":"next","has_more":true}"#).await;
     let client = server.client();
 
-    let response = client.feed(Some("cursor-1".into())).await.expect("feed");
+    let response = client
+        .feed(
+            Some("cursor-1".into()),
+            None,
+            FeedFilters::default_workspace(),
+        )
+        .await
+        .expect("feed");
 
     assert!(response.has_more);
     assert_eq!(response.next_cursor.as_deref(), Some("next"));
@@ -381,6 +389,41 @@ async fn feed_posts_v3_workspace_filter_contract() {
 }
 
 #[tokio::test]
+async fn feed_posts_public_liked_upload_cover_extend_popular_filter_contract() {
+    let server = MockServer::json(r#"{"clips":[]}"#).await;
+    let client = server.client();
+
+    client
+        .feed(
+            None,
+            Some(20),
+            FeedFilters::default_workspace()
+                .with_public()
+                .with_liked()
+                .with_upload()
+                .with_cover()
+                .with_extend()
+                .with_popular_sort(),
+        )
+        .await
+        .expect("feed");
+
+    let request = server.captured().await;
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/api/feed/v3");
+    let body = serde_json::from_str::<serde_json::Value>(&request.body).expect("request json");
+    assert_eq!(body["limit"], 20);
+    assert_eq!(body["filters"]["liked"], "True");
+    assert_eq!(body["filters"]["public"], "True");
+    assert_eq!(body["filters"]["upload"], "True");
+    assert!(body["filters"].get("disliked").is_none());
+    assert_eq!(body["filters"]["cover"]["presence"], "True");
+    assert_eq!(body["filters"]["extend"]["presence"], "True");
+    assert_eq!(body["filters"]["sort"]["sortBy"], "upvote_count");
+    assert_eq!(body["filters"]["sort"]["sortDirection"], "desc");
+}
+
+#[tokio::test]
 async fn search_posts_v3_search_text_filter_contract() {
     let server = MockServer::json(r#"{"clips":[]}"#).await;
     let client = server.client();
@@ -394,6 +437,164 @@ async fn search_posts_v3_search_text_filter_contract() {
     assert_eq!(body["limit"], 50);
     assert_eq!(body["filters"]["searchText"], "summer pop");
     assert_eq!(body["filters"]["workspace"]["workspaceId"], "default");
+}
+
+#[tokio::test]
+async fn clip_info_fetches_song_page_supplemental_contract() {
+    let server = MockServer::json_sequence(&[
+        r#"{"source_clips":[{"clip_id":"source-1","title":"Source Song","image_url":"https://cdn2.suno.ai/image_source-1.jpeg","audio_url":"https://cdn1.suno.ai/source-1.mp3","is_deleted":true,"relationship":"COV","user":{"user_id":"user-1","user_display_name":"Source User","user_handle":"source"}}]}"#,
+        r#"{"results":[{"id":"comment-1","clip_id":"clip-a","content":"Nice","num_likes":2}],"allow_comment":true,"total_count":1}"#,
+        r#"{"count":3}"#,
+        r#"{"similar_clips":[{"id":"similar-1","title":"Similar","status":"complete","model_name":"chirp-fenix","created_at":"2026-07-03T00:00:00Z"}]}"#,
+    ])
+    .await;
+    let client = server.client();
+
+    let info = client
+        .clip_info(Clip {
+            id: "clip-a".into(),
+            title: "Demo".into(),
+            status: "complete".into(),
+            model_name: "chirp-fenix".into(),
+            audio_url: None,
+            video_url: None,
+            image_url: None,
+            created_at: "2026-07-03T00:00:00Z".into(),
+            play_count: 0,
+            upvote_count: 0,
+            metadata: Default::default(),
+        })
+        .await
+        .expect("clip info");
+
+    assert_eq!(info.clip.id, "clip-a");
+    assert_eq!(info.attribution.source_clips.len(), 1);
+    assert_eq!(
+        info.attribution.source_clips[0].clip_id.as_deref(),
+        Some("source-1")
+    );
+    assert_eq!(
+        info.attribution.source_clips[0].title.as_deref(),
+        Some("Source Song")
+    );
+    assert_eq!(info.comments.total_count, 1);
+    assert_eq!(info.direct_children_count, 3);
+    assert_eq!(info.similar_clips[0].id, "similar-1");
+    assert!(info.supplemental_errors.is_empty());
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].path, "/api/clips/clip-a/attribution");
+    assert_eq!(
+        requests[1].path,
+        "/api/gen/clip-a/comments?order=most_liked"
+    );
+    assert_eq!(
+        requests[2].path,
+        "/api/clips/direct_children_count?clip_id=clip-a"
+    );
+    assert_eq!(requests[3].path, "/api/clips/get_similar/?id=clip-a");
+}
+
+#[tokio::test]
+async fn clip_info_keeps_base_clip_when_supplemental_read_fails() {
+    let server = MockServer::json_status_sequence(&[
+        (500, r#"{"detail":"attribution unavailable"}"#),
+        (
+            200,
+            r#"{"results":[],"allow_comment":true,"total_count":0}"#,
+        ),
+        (200, r#"{"count":0}"#),
+        (200, r#"{"similar_clips":[]}"#),
+    ])
+    .await;
+    let client = server.client();
+
+    let info = client
+        .clip_info(Clip {
+            id: "clip-a".into(),
+            title: "Demo".into(),
+            status: "complete".into(),
+            model_name: "chirp-fenix".into(),
+            audio_url: Some("https://cdn1.suno.ai/clip-a.mp3".into()),
+            video_url: None,
+            image_url: None,
+            created_at: "2026-07-03T00:00:00Z".into(),
+            play_count: 0,
+            upvote_count: 0,
+            metadata: Default::default(),
+        })
+        .await
+        .expect("clip info should keep base clip when supplemental reads fail");
+
+    assert_eq!(info.clip.id, "clip-a");
+    assert_eq!(
+        info.clip.audio_url.as_deref(),
+        Some("https://cdn1.suno.ai/clip-a.mp3")
+    );
+    assert!(info.attribution.source_clips.is_empty());
+    assert_eq!(info.comments.total_count, 0);
+    assert_eq!(info.direct_children_count, 0);
+    assert!(info.similar_clips.is_empty());
+    assert_eq!(info.supplemental_errors.len(), 1);
+    assert_eq!(info.supplemental_errors[0].field, "attribution");
+
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 4);
+}
+
+#[tokio::test]
+async fn clip_info_aborts_on_rate_limited_supplemental_read() {
+    let server = MockServer::json_status_sequence(&[(429, "")]).await;
+    let client = server.client();
+
+    let err = client
+        .clip_info(Clip {
+            id: "clip-a".into(),
+            title: "Demo".into(),
+            status: "complete".into(),
+            model_name: "chirp-fenix".into(),
+            audio_url: Some("https://cdn1.suno.ai/clip-a.mp3".into()),
+            video_url: None,
+            image_url: None,
+            created_at: "2026-07-03T00:00:00Z".into(),
+            play_count: 0,
+            upvote_count: 0,
+            metadata: Default::default(),
+        })
+        .await
+        .expect_err("rate limit should not be hidden as supplemental data");
+
+    assert!(matches!(err, CliError::RateLimited));
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 1);
+}
+
+#[tokio::test]
+async fn clip_info_aborts_on_auth_expired_supplemental_read() {
+    let server = MockServer::json_status_sequence(&[(401, "")]).await;
+    let client = server.client();
+
+    let err = client
+        .clip_info(Clip {
+            id: "clip-a".into(),
+            title: "Demo".into(),
+            status: "complete".into(),
+            model_name: "chirp-fenix".into(),
+            audio_url: Some("https://cdn1.suno.ai/clip-a.mp3".into()),
+            video_url: None,
+            image_url: None,
+            created_at: "2026-07-03T00:00:00Z".into(),
+            play_count: 0,
+            upvote_count: 0,
+            metadata: Default::default(),
+        })
+        .await
+        .expect_err("auth failure should not be hidden as supplemental data");
+
+    assert!(matches!(err, CliError::AuthExpired));
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 1);
 }
 
 #[tokio::test]

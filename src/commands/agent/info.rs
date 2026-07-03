@@ -36,7 +36,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "clip download": "download completed media and embed MP3 lyrics",
             "post_submit_workflow": "When create or a generation-backed edit returns new or processing clip IDs, call `sunox clip wait <clip_id> --json` before download, quality filtering, or playlist decisions unless the caller explicitly wants submit-only behavior.",
             "audio_analysis": {
-                "simple": "For simple audio analysis, use the existing clip media: read audio_url from `sunox clip info <clip_id> --json` or run `sunox clip download <clip_id> --json`; do not create new Suno resources just to inspect audio.",
+                "simple": "For simple audio analysis, use existing clip media: read audio_url and song-page context from `sunox clip info <clip_id> --json` or run `sunox clip download <clip_id> --json`; non-auth supplemental read failures appear in supplemental_errors. Do not create new Suno resources just to inspect audio.",
                 "deep": "Use heavier WAV, stems, or Studio export workflows only when the user explicitly asks for WAV, stems, lossless audio, or deep spectral analysis; do not silently downgrade a WAV/lossless request to MP3."
             },
             "download_formats": {
@@ -62,6 +62,9 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
         ],
         "machine_commands": [
             "sunox agent-info --json",
+            "sunox clip list --json",
+            "sunox clip list --liked --public --sort popular --json",
+            "sunox clip info <clip_id> --json",
             "sunox clip wait <clip_id> --json",
             "sunox clip download <clip_id> --json",
             "sunox playlist add <playlist_id> <clip_id> --json",
@@ -105,13 +108,28 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                 },
                 "modes": "description mode when a non-instrumental prompt is provided; custom lyrics mode when --lyrics or --lyrics-file is provided; custom instrumental mode when --instrumental is provided, with the prompt folded into style tags",
                 "web_context": "generation metadata.user_tier is filled from current account /api/billing/info/ plan.id when available, with an empty fallback if that read is unavailable",
-                "enhance_tags": "pass --enhance-tags only when the user wants Suno to enhance style tags; it first calls /api/prompts/upsample and carries the returned tags plus request_id into metadata.last_tags_generation; personalization_enabled follows the captured web submit shape",
+                "enhance_tags": "pass --enhance-tags only when the user wants Suno to enhance style tags; it first calls /api/prompts/upsample, carries the returned tags plus request_id into metadata.last_tags_generation, and marks override_fields=[\"tags\"]; personalization_enabled follows the captured web submit shape",
                 "response_derived_metadata": "do not fabricate tag-upsample metadata; metadata.last_tags_generation is only valid after a real /api/prompts/upsample response and should otherwise be omitted",
                 "title": "optional; omitted title is sent as an empty string for description mode because Suno currently requires params.title to be a string"
             },
             "clip upload": {
                 "status": "user-facing CLI workflow is available",
                 "workflow": "create presigned upload, post local bytes to S3 form, finish upload, poll processing, initialize clip, then set title/lyrics/cover metadata when available"
+            },
+            "clip list": {
+                "route": "POST /api/feed/v3",
+                "filters": "--public, --liked, --upload, --cover, and --extend map to the current web feed filters; --sort popular maps to sortBy=upvote_count, sortDirection=desc",
+                "scope": "query-only listing; this is not a library sync or local mirror workflow"
+            },
+            "clip info": {
+                "routes": [
+                    "GET /api/feed/?ids=<clip_id>",
+                    "GET /api/clips/{clip_id}/attribution",
+                    "GET /api/gen/{clip_id}/comments?order=most_liked",
+                    "GET /api/clips/direct_children_count?clip_id=<clip_id>",
+                    "GET /api/clips/get_similar/?id=<clip_id>"
+                ],
+                "json_shape": "main clip fields remain top-level; attribution, comments, direct_children_count, and similar_clips are added as semantic song-page context; if a non-auth, non-rate-limit supplemental read fails, the base clip is still returned with supplemental_errors; auth and rate-limit errors still abort normally"
             },
             "clip remaster": {
                 "route": "POST /api/generate/upsample",
@@ -162,7 +180,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "stems", "clip_speed", "lyrics", "timed_lyrics", "set_metadata",
             "set_visibility", "search", "delete", "clip_restore",
             "clip_like", "clip_dislike", "optional_captcha_solver", "audio_upload",
-            "id3_lyrics_embedding", "voice_persona", "persona_list",
+            "id3_lyrics_embedding", "clip_list_filters", "voice_persona", "persona_list",
             "persona_info", "persona_clips", "persona_create",
             "persona_set_metadata", "persona_processed_clip",
             "persona_set_visibility", "persona_love",

@@ -71,6 +71,21 @@ fn clip_help_groups_clip_subcommands() {
 }
 
 #[test]
+fn clip_list_help_exposes_web_feed_filters() {
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    cmd.args(["clip", "list", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--liked"))
+        .stdout(predicate::str::contains("--public"))
+        .stdout(predicate::str::contains("--upload"))
+        .stdout(predicate::str::contains("--cover"))
+        .stdout(predicate::str::contains("--extend"))
+        .stdout(predicate::str::contains("--sort <SORT>"));
+}
+
+#[test]
 fn clip_status_reuses_existing_validation() {
     let mut cmd = Command::cargo_bin("sunox").expect("binary");
 

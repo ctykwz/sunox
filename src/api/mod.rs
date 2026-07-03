@@ -2,6 +2,7 @@
 
 pub mod billing;
 pub mod challenge;
+pub mod clip_info;
 pub mod concat;
 pub mod cover;
 pub mod delete;

@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use clap::ValueEnum;
+
 #[derive(clap::Args)]
 pub struct InfoArgs {
     /// Clip ID to inspect
@@ -17,6 +19,40 @@ pub struct ListArgs {
     /// Cursor returned by the previous feed response
     #[arg(long)]
     pub cursor: Option<String>,
+
+    /// Maximum number of clips to return
+    #[arg(long)]
+    pub limit: Option<u32>,
+
+    /// Restrict to public clips
+    #[arg(long)]
+    pub public: bool,
+
+    /// Restrict to liked clips
+    #[arg(long)]
+    pub liked: bool,
+
+    /// Restrict to uploaded clips
+    #[arg(long)]
+    pub upload: bool,
+
+    /// Restrict to cover/remix-derived clips
+    #[arg(long)]
+    pub cover: bool,
+
+    /// Restrict to extended clips
+    #[arg(long)]
+    pub extend: bool,
+
+    /// Sort list results
+    #[arg(long, value_enum)]
+    pub sort: Option<ListSort>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ListSort {
+    /// Sort by public upvote count, descending
+    Popular,
 }
 
 #[derive(clap::Args)]

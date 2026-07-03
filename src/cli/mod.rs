@@ -22,8 +22,8 @@ pub use create::{
     RemasterArgs, SpeedArgs, StemsArgs,
 };
 pub use library::{
-    DeleteArgs, InfoArgs, ListArgs, PublishArgs, ReactionArgs, RestoreArgs, SearchArgs, SetArgs,
-    StatusArgs,
+    DeleteArgs, InfoArgs, ListArgs, ListSort, PublishArgs, ReactionArgs, RestoreArgs, SearchArgs,
+    SetArgs, StatusArgs,
 };
 pub use media::{DownloadArgs, TimedLyricsArgs, UploadArgs};
 pub use models::{ModelVersion, RemasterModel, VocalGender};

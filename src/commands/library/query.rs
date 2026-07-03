@@ -1,11 +1,20 @@
+use crate::api::types::FeedFilters;
 use crate::app::AppContext;
-use crate::cli::{InfoArgs, ListArgs, SearchArgs, StatusArgs};
+use crate::cli::{InfoArgs, ListArgs, ListSort, SearchArgs, StatusArgs};
 use crate::core::{CliError, ensure_clip_ids};
 use crate::output::{self, OutputFormat};
 use crate::workflow::tasks;
 
 pub async fn list(args: ListArgs, ctx: &AppContext) -> Result<(), CliError> {
-    let feed = ctx.client().await?.feed(args.cursor).await?;
+    if args.limit == Some(0) {
+        return Err(CliError::Config("--limit must be greater than 0".into()));
+    }
+    let filters = list_filters(&args);
+    let feed = ctx
+        .client()
+        .await?
+        .feed(args.cursor, args.limit, filters)
+        .await?;
     match ctx.fmt {
         OutputFormat::Json => output::json::success(&feed),
         OutputFormat::Table => {
@@ -37,17 +46,15 @@ pub async fn search(args: SearchArgs, ctx: &AppContext) -> Result<(), CliError> 
 }
 
 pub async fn info(args: InfoArgs, ctx: &AppContext) -> Result<(), CliError> {
-    let clips = ctx
-        .client()
-        .await?
-        .get_clips(std::slice::from_ref(&args.id))
-        .await?;
+    let client = ctx.client().await?;
+    let clips = client.get_clips(std::slice::from_ref(&args.id)).await?;
     if clips.is_empty() {
         return Err(CliError::NotFound(format!("clip: {}", args.id)));
     }
+    let info = client.clip_info(clips[0].clone()).await?;
     match ctx.fmt {
-        OutputFormat::Json => output::json::success(&clips[0]),
-        OutputFormat::Table => output::table::clip_detail(&clips[0]),
+        OutputFormat::Json => output::json::success(&info),
+        OutputFormat::Table => output::table::clip_detail(&info),
     }
     Ok(())
 }
@@ -61,4 +68,27 @@ pub async fn status(args: StatusArgs, ctx: &AppContext) -> Result<(), CliError> 
         OutputFormat::Table => output::table::clips(&clips),
     }
     Ok(())
+}
+
+fn list_filters(args: &ListArgs) -> FeedFilters {
+    let mut filters = FeedFilters::default_workspace();
+    if args.public {
+        filters = filters.with_public();
+    }
+    if args.liked {
+        filters = filters.with_liked();
+    }
+    if args.upload {
+        filters = filters.with_upload();
+    }
+    if args.cover {
+        filters = filters.with_cover();
+    }
+    if args.extend {
+        filters = filters.with_extend();
+    }
+    if matches!(args.sort, Some(ListSort::Popular)) {
+        filters = filters.with_popular_sort();
+    }
+    filters
 }

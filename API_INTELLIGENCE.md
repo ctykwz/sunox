@@ -333,12 +333,18 @@ the web instrumental toggle submits `metadata.create_mode = "custom"`,
 of being sent through inspiration mode.
 
 When the web tag upsample flow is used first, `metadata.last_tags_generation`
-is copied from `POST /api/prompts/upsample` and `override_fields` can be
-`["tags"]`. The CLI runs this flow only for explicit `--enhance-tags` requests
-and does not fabricate this metadata because its tags and `request_id` are tied
-to the upsample response. Captured submits also set
+is copied from `POST /api/prompts/upsample` and `override_fields` is
+`["tags"]` in the July 3, 2026 `15suno-labs-nostudio-20260630.har` capture.
+The CLI runs this flow only for explicit `--enhance-tags` requests and does not
+fabricate this metadata because its tags and `request_id` are tied to the
+upsample response. Captured submits also set
 `personalization_enabled: true`; that flag was not observed in the upsample
 response itself.
+
+The same July 3 capture included `metadata.lyrics_model: "remi-v1"` because
+that lyrics model was selected in the web UI. Do not treat that as a default
+drift from the prior `lyrics_model: "default"` capture unless a fresh default
+submit without a user-selected lyrics model confirms it.
 
 **Challenge handling**: The web calls `POST /api/c/check` with
 `{"ctype":"generation"}` before submit. Rust CLI commands that submit through
@@ -577,6 +583,29 @@ generation/edit submits:
 }
 ```
 
+The July 3, 2026 `15suno-labs-nostudio-20260630.har` capture also confirmed
+query-only list filters that are now exposed on `sunox clip list`:
+```json
+{
+  "cursor": null,
+  "limit": 20,
+  "filters": {
+    "liked": "True",
+    "public": "True",
+    "upload": "True",
+    "trashed": "False",
+    "fromStudioProject": { "presence": "False" },
+    "stem": { "presence": "False" },
+    "cover": { "presence": "True" },
+    "extend": { "presence": "True" },
+    "workspace": { "presence": "True", "workspaceId": "default" },
+    "sort": { "sortBy": "upvote_count", "sortDirection": "desc" }
+  }
+}
+```
+These filters are for remote listing/search only. They are not a local library
+sync or mirror contract.
+
 Clip structure:
 ```
 id, title, status, model_name, audio_url, video_url, image_url,
@@ -586,6 +615,31 @@ metadata: { tags, prompt, duration, negative_tags, model_badges,
             has_stem, is_mumble, is_remix, make_instrumental, type,
             can_remix, priority, stream, uses_latest_model, refund_credits }
 ```
+
+### Song page read routes
+Captured in `15suno-labs-nostudio-20260630.har` on July 3, 2026 and wired into
+`sunox clip info` as non-mutating enrichment reads:
+
+```
+GET /api/clips/{clip_id}/attribution
+Response: {"source_clips": [{"clip_id": "...", "title": "...", "image_url": "...", "audio_url": "...", "is_deleted": true, "relationship": "COV|EX", "user": {...}}]}
+
+GET /api/gen/{clip_id}/comments?order=most_liked
+Response: {"results": [...], "allow_comment": true, "total_count": 11}
+
+GET /api/clips/direct_children_count?clip_id={clip_id}
+Response: {"count": 3}
+
+GET /api/clips/get_similar/?id={clip_id}
+Response: {"similar_clips": [<clip-like objects>]}
+```
+
+These are page-inspection APIs. They do not create resources and should not be
+treated as generation/edit flows. `sunox clip info` keeps the base clip usable
+when a non-auth, non-rate-limit supplemental read fails; JSON output then
+includes `supplemental_errors` entries with `field`, `code`, and `message`.
+Authentication and rate-limit errors still abort so callers preserve normal
+retry/auth handling.
 
 ### POST /api/unified/homepage
 Discover feed. Request: `{"cursor": null}`.

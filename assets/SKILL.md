@@ -91,9 +91,14 @@ download, quality filtering, or playlist decisions unless the user only asked
 to submit.
 
 For simple audio analysis, prefer the existing CDN media: read `audio_url` from
-`sunox clip info <clip_id> --json` or use `sunox clip download`. Do not trigger
-new Suno generation/export work just to inspect audio. Reserve WAV, stems, or
-Studio export workflows for explicit deep-analysis, lossless, or stem requests.
+`sunox clip info <clip_id> --json` or use `sunox clip download`. `clip info`
+also returns song-page context such as attribution, comments,
+`direct_children_count`, and `similar_clips` in JSON. If a non-auth,
+non-rate-limit supplemental read fails, the base clip still returns and JSON
+includes `supplemental_errors`; auth and rate-limit errors still abort
+normally. Do not trigger new Suno generation/export work just to inspect audio.
+Reserve WAV, stems, or Studio export workflows for explicit deep-analysis,
+lossless, or stem requests.
 The current CLI download supports MP3 audio from `clip.audio_url`, and `--video`
 from `clip.video_url` when present. `sunox clip stems` performs
 generation-backed stems extraction; it is not the same as Suno Web Pro Get Stems
@@ -173,6 +178,7 @@ sunox persona purge <persona_id> -y       # only when the user explicitly asks f
 # List / search your library
 sunox clip list
 sunox clip list --cursor <next_cursor>
+sunox clip list --liked --public --sort popular
 sunox clip search "rainy"
 
 # Manage playlists
@@ -264,14 +270,14 @@ Remaster models: v5.5 = chirp-flounder, v5 = chirp-carp, v4.5+ = chirp-bass.
 - Every command supports `--json`. JSON is **auto-detected** when stdout is piped.
 - Progress messages and errors go to **stderr** so they don't pollute JSON pipelines.
 - Suno write commands are account-scoped serial by default; do not pass --parallel or disable `serial_mutations` unless the user explicitly allows same-account concurrent writes.
-- For simple audio analysis, prefer clip `audio_url` CDN media or `sunox clip download`; current CLI download supports MP3 audio by default. Reserve WAV, stems, Pro video, or Studio export workflows for explicit deep-analysis/lossless requests and only when the CLI exposes support.
+- For simple audio analysis, prefer clip `audio_url` CDN media from `sunox clip info <clip_id> --json` or use `sunox clip download`; `clip info` also includes `attribution`, `comments`, `direct_children_count`, `similar_clips`, and non-fatal `supplemental_errors`. Current CLI download supports MP3 audio by default. Reserve WAV, stems, Pro video, or Studio export workflows for explicit deep-analysis/lossless requests and only when the CLI exposes support.
 - `playlist remove` submits one remove request per clip. If a later clip fails, JSON errors use code `partial_mutation`; inspect `error.details.succeeded_clip_ids`, `error.details.failed`, and `error.details.not_attempted_clip_ids` before retrying.
 - Do not publish, make public, or run destructive commands unless the user explicitly asks for that action; destructive commands require `-y/--yes`.
 - Errors include actionable suggestions in the JSON envelope.
 
 ```bash
 # Pipe-friendly: auto-JSON
-sunox clip list | jq '.data[0].title'
+sunox clip list | jq '.data.clips[0].title'
 sunox clip info <clip_id> --json | jq '.data.audio_url'
 ```
 
@@ -308,7 +314,7 @@ sunox clip concat <new_clip_id>           # stitch into a full song
 ### Batch download yesterday's songs as JSON, then pull MP3s
 
 ```bash
-ids=$(sunox clip list --json | jq -r '.data[].id')
+ids=$(sunox clip list --json | jq -r '.data.clips[].id')
 sunox clip download $ids --output ./archive/
 ```
 
@@ -326,10 +332,11 @@ sunox clip download $ids --output ./archive/
   `metadata.last_tags_generation` is only present after a real
   `/api/prompts/upsample` response; use `--enhance-tags` when the user asks for
   Suno to enhance tags, otherwise omit it. Its tags/request_id come from the
-  response; `personalization_enabled` follows the captured submit shape.
+  response; `personalization_enabled` follows the captured submit shape. The
+  submit also marks `override_fields=["tags"]`.
 - Commands that submit through `/api/generate/v2-web/` preflight `POST /api/c/check` with `ctype=generation`; if Suno reports a challenge and stored Clerk refresh material exists, Sunox refreshes the JWT once and repeats the preflight before surfacing the challenge. When no challenge is required, submit uses `token=null` and `token_provider=null`.
 - If Suno requires a challenge, prefer `--token <solved>` when available; use `--captcha` only to force the built-in browser-backed solver.
-- Generation paths (normal, describe, voice persona, cover, extend, generation-backed stems) use `/api/generate/v2-web/`; create, cover, extend, and stems expose `--token`, `--captcha`, and `--no-captcha`. Extend fetches the source clip first; when `GET /api/feed/?ids` omits source style metadata, it searches feed/v3 by source title and merges the exact source id. It defaults `title`, `tags`, `negative_tags`, and `make_instrumental` from the source when available; use `--title`, `--tags`, `--exclude`, `--instrumental`, or `--no-instrumental` to override. Remaster and speed use their current web edit/generation routes. `sunox clip stems` is not the same as Suno Web Pro Get Stems export. You usually only need the subcommands.
+- Generation paths (normal, describe, voice persona, cover, extend, generation-backed stems) use `/api/generate/v2-web/`; create, cover, extend, and stems expose `--token`, `--captcha`, and `--no-captcha`. Extend fetches the source clip first; when `GET /api/feed/?ids` omits source style metadata, it searches feed/v3 by source title and merges the exact source id. It defaults `title`, `tags`, `negative_tags`, and `make_instrumental` from the source when available; use `--title`, `--tags`, `--exclude`, `--instrumental`, or `--no-instrumental` to override. Remaster and speed use their current web edit/generation routes. `sunox clip list` supports query-only filters such as `--liked`, `--public`, `--upload`, `--cover`, `--extend`, and `--sort popular`; this is not a library sync workflow. `sunox clip stems` is not the same as Suno Web Pro Get Stems export. You usually only need the subcommands.
 - Persona list/detail/clips/create/set/processed-clip/publish/unpublish/love/unlove/toggle-love/delete/restore/purge are available through `sunox persona ...`.
 - Playlist create/list/detail/metadata/add/remove/publish/reorder/save/unsave/like/dislike/restore/delete are available through `sunox playlist ...`; use `playlist set <id> --image-file <path>` for local cover uploads.
 - Clip delete/restore and like/dislike are available through `sunox clip delete`, `sunox clip restore`, `sunox clip like`, and `sunox clip dislike`. `--clear` removes the selected reaction.

@@ -204,7 +204,14 @@ async fn maybe_enhance_tags(
         original_tags,
         upsample,
     ));
+    mark_tags_override(req);
     Ok(())
+}
+
+fn mark_tags_override(req: &mut GenerateRequest) {
+    if !req.override_fields.iter().any(|field| field == "tags") {
+        req.override_fields.push("tags".to_string());
+    }
 }
 
 fn model_api_key<'a>(model: Option<&'a ModelVersion>, config: &'a AppConfig) -> &'a str {
@@ -254,7 +261,7 @@ mod tests {
 
     use super::{
         build_describe_args_from_create, build_describe_request, build_generate_args_from_create,
-        build_generate_request,
+        build_generate_request, mark_tags_override,
     };
 
     fn config_with_default_model(default_model: &str) -> AppConfig {
@@ -475,5 +482,15 @@ mod tests {
                 .expect("metadata object")
                 .contains_key("lyrics_model")
         );
+    }
+
+    #[test]
+    fn tag_upsample_marks_tags_override_once() {
+        let mut req = crate::api::types::GenerateRequest::new("chirp-fenix", "custom");
+
+        mark_tags_override(&mut req);
+        mark_tags_override(&mut req);
+
+        assert_eq!(req.override_fields, vec!["tags".to_string()]);
     }
 }

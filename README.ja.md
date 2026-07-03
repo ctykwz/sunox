@@ -134,6 +134,7 @@ sunox clip stems          既存 clip から stems を生成
 
 ```text
 sunox clip list
+sunox clip list --liked --public --sort popular
 sunox clip search <query>
 sunox clip info <id>
 sunox clip status <ids>
@@ -304,12 +305,13 @@ Remaster models: v5.5 = chirp-flounder, v5 = chirp-carp, v4.5+ = chirp-bass。
 - stdout が pipe されると自動で JSON になります。
 - 進捗とエラーは stderr に出るため JSON を汚しません。
 - Suno の書き込み操作はデフォルトでアカウント単位に直列実行されます。ユーザーが同一アカウントの並行書き込みを明示的に許可していない限り、`sunox config set serial_mutations false`、`-c serial_mutations=false`、または `--parallel` は使わないでください。
-- 通常の音声確認では既存の clip メディアを使います。`sunox clip info <id> --json` は `audio_url` を返し、`sunox clip download` は現在 `clip.audio_url` から MP3 をダウンロードします（`--video` は `clip.video_url` がある場合のみ）。`sunox clip stems` は生成ベースの stems 抽出であり、Suno Web の Pro Get Stems export とは別物です。Suno Web には WAV Audio、Get Stems、Video などの Pro ダウンロード項目もありますが、CLI が対応を報告し、かつユーザーがその形式を明示した場合だけ使ってください。`playlist remove` が `partial_mutation` を返した場合は、再試行前に `error.details.succeeded_clip_ids`、`error.details.failed`、`error.details.not_attempted_clip_ids` を確認してください。
+- 通常の音声確認では既存の clip メディアを使います。`sunox clip info <id> --json` は `audio_url` に加えて `attribution`、`comments`、`direct_children_count`、`similar_clips` を返します。認証やレート制限以外の補足読み取りが失敗しても base clip は返り、JSON には `supplemental_errors` が入ります。認証とレート制限のエラーは通常どおり中断します。`sunox clip download` は現在 `clip.audio_url` から MP3 をダウンロードします（`--video` は `clip.video_url` がある場合のみ）。`sunox clip stems` は生成ベースの stems 抽出であり、Suno Web の Pro Get Stems export とは別物です。Suno Web には WAV Audio、Get Stems、Video などの Pro ダウンロード項目もありますが、CLI が対応を報告し、かつユーザーがその形式を明示した場合だけ使ってください。`playlist remove` が `partial_mutation` を返した場合は、再試行前に `error.details.succeeded_clip_ids`、`error.details.failed`、`error.details.not_attempted_clip_ids` を確認してください。
 - ユーザーが明示しない限り、公開、`--captcha` の強制、認証情報の出力、削除系コマンドの実行は行わないでください。削除系コマンドには `-y/--yes` が必須です。
 - エラーには推奨アクションが含まれます。
 
 ```bash
-sunox clip list | jq '.data[0].title'
+sunox clip list | jq '.data.clips[0].title'
+sunox clip list --liked --public --sort popular --json
 sunox agent-info --json
 ```
 
@@ -339,7 +341,7 @@ sunox install-skill --target cursor
 
 ## 実装メモ
 
-生成、description、persona、cover、extend は Suno Web の `/api/generate/v2-web/` を使います。2026-06-30 の HAR で custom create body を再捕捉しました。カスタム歌詞は `gpt_description_prompt` に入り、`prompt` は空のままです。challenge token を送る場合は `token_provider: 1` も送信します。Sunox は現在のアカウントの `/api/billing/info/` `plan.id` から `metadata.user_tier` を埋め、取得できない場合は空値に fallback します。`--enhance-tags` を指定すると、Sunox は先に `/api/prompts/upsample` を呼び、返された tags と `request_id` を `metadata.last_tags_generation` に入れます。`personalization_enabled` は捕捉済みの Web submit 形状に合わせます。この flag がない場合、`metadata.last_tags_generation` は送信しません。instrumental create も custom mode を使います。`sunox create --instrumental <prompt>` では prompt を style tags に統合し、送信時の `prompt` は空のままにします。これは `15suno-labs-nostudio-20260630.har` で再捕捉した Web リクエスト形状と一致します。`task: "playlist_condition"` も捕捉済みですが、これは inspiration 生成の別変種で、歌詞は `prompt` に入ります。通常の custom create ルールを流用しないでください。extend は送信前に source clip を読みます。`GET /api/feed/?ids` が source style metadata を返さない場合は、feed/v3 で source title を検索し、完全一致した clip id の metadata だけを merge します。`--title` がなければ `title` に source title を入れ、可能なら source `tags`、`negative_tags`、`metadata.make_instrumental` を継承します。上書きには `--title`、`--tags`、`--exclude`、`--instrumental`、`--no-instrumental` を使います。remaster は捕捉済みの `/api/generate/upsample`、speed adjust は `/api/clips/adjust-speed/` を使います。認証済み生成はデフォルトで challenge token なしで送信します。Suno が required を返し、保存済み Clerk session を refresh できる場合、Sunox は JWT を一度更新して preflight を再実行し、それでも required の場合だけ `--token <solved>` または明示的な `--captcha` を案内します。cover generation と concat edit の body は、まだ新しい live mutation capture が必要です。playlist mutation は bundle/live evidence と endpoint contract test に基づいて実装済みです。`playlist remove` は大きなバッチで Suno 500 が返る場合があるため、clip ごとに 1 リクエストで送信します。
+生成、description、persona、cover、extend は Suno Web の `/api/generate/v2-web/` を使います。2026-06-30 の HAR で custom create body を再捕捉しました。カスタム歌詞は `gpt_description_prompt` に入り、`prompt` は空のままです。challenge token を送る場合は `token_provider: 1` も送信します。Sunox は現在のアカウントの `/api/billing/info/` `plan.id` から `metadata.user_tier` を埋め、取得できない場合は空値に fallback します。`--enhance-tags` を指定すると、Sunox は先に `/api/prompts/upsample` を呼び、返された tags と `request_id` を `metadata.last_tags_generation` に入れ、`override_fields=["tags"]` を設定します。`personalization_enabled` は捕捉済みの Web submit 形状に合わせます。この flag がない場合、`metadata.last_tags_generation` は送信しません。instrumental create も custom mode を使います。`sunox create --instrumental <prompt>` では prompt を style tags に統合し、送信時の `prompt` は空のままにします。これは `15suno-labs-nostudio-20260630.har` で再捕捉した Web リクエスト形状と一致します。`task: "playlist_condition"` も捕捉済みですが、これは inspiration 生成の別変種で、歌詞は `prompt` に入ります。通常の custom create ルールを流用しないでください。extend は送信前に source clip を読みます。`GET /api/feed/?ids` が source style metadata を返さない場合は、feed/v3 で source title を検索し、完全一致した clip id の metadata だけを merge します。`--title` がなければ `title` に source title を入れ、可能なら source `tags`、`negative_tags`、`metadata.make_instrumental` を継承します。上書きには `--title`、`--tags`、`--exclude`、`--instrumental`、`--no-instrumental` を使います。`clip list` は `POST /api/feed/v3` を使い、`--liked`、`--public`、`--upload`、`--cover`、`--extend`、`--sort popular` などの検索フィルタを提供します。これは library sync ではありません。remaster は捕捉済みの `/api/generate/upsample`、speed adjust は `/api/clips/adjust-speed/` を使います。認証済み生成はデフォルトで challenge token なしで送信します。Suno が required を返し、保存済み Clerk session を refresh できる場合、Sunox は JWT を一度更新して preflight を再実行し、それでも required の場合だけ `--token <solved>` または明示的な `--captcha` を案内します。cover generation と concat edit の body は、まだ新しい live mutation capture が必要です。playlist mutation は bundle/live evidence と endpoint contract test に基づいて実装済みです。`playlist remove` は大きなバッチで Suno 500 が返る場合があるため、clip ごとに 1 リクエストで送信します。
 
 ## コントリビューション
 

@@ -2,6 +2,7 @@
 
 mod account;
 mod clip;
+mod clip_info;
 mod clip_mutation;
 mod feed;
 mod generation;
@@ -15,6 +16,10 @@ mod upload;
 
 pub use account::{BillingInfo, Model};
 pub use clip::Clip;
+pub use clip_info::{
+    ClipAttribution, ClipComments, ClipInfo, ClipInfoSupplementalError,
+    DirectChildrenCountResponse, SimilarClipsResponse,
+};
 pub use clip_mutation::{ClipReaction, ClipTrashRequest, SetClipReactionRequest};
 pub use feed::{FeedFilters, FeedResponse, FeedV3Request};
 pub use generation::{ControlSliders, GenerateRequest, GenerateResponse, LastTagsGeneration};
