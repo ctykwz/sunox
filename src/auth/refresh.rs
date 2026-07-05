@@ -56,7 +56,7 @@ async fn refresh_state_with_lock(
         match clerk_refresh_jwt(client, cookie, session_id).await {
             Ok(jwt) => {
                 auth.jwt = Some(jwt);
-                auth.save()?;
+                auth.save_without_account_lock()?;
                 eprintln!("JWT refreshed successfully");
                 Ok(())
             }
@@ -71,7 +71,7 @@ async fn refresh_state_with_lock(
             Ok((session_id, jwt)) => {
                 auth.session_id = Some(session_id);
                 auth.jwt = Some(jwt);
-                auth.save()?;
+                auth.save_without_account_lock()?;
                 eprintln!("JWT refreshed successfully");
                 Ok(())
             }

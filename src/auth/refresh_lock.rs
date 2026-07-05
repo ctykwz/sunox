@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
 
@@ -12,8 +12,14 @@ pub(crate) struct AuthRefreshLockGuard {
 
 impl AuthRefreshLockGuard {
     pub(crate) fn acquire(auth: &AuthState) -> Result<Self, CliError> {
-        let key = auth.account_lock_key()?;
-        let path = lock_file_path(&key)?;
+        let path = lock_file_path(auth)?;
+        Self::acquire_path(&path)
+    }
+
+    pub(crate) fn acquire_path(path: &Path) -> Result<Self, CliError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -31,10 +37,10 @@ impl Drop for AuthRefreshLockGuard {
     }
 }
 
-fn lock_file_path(key: &str) -> Result<PathBuf, CliError> {
+fn lock_file_path(auth: &AuthState) -> Result<PathBuf, CliError> {
+    let key = auth.account_lock_key()?;
     let dir = directories::ProjectDirs::from("com", "sunox", "sunox")
         .map(|dirs| dirs.config_dir().join("locks"))
         .ok_or_else(|| CliError::Config("cannot resolve sunox config directory".into()))?;
-    std::fs::create_dir_all(&dir)?;
     Ok(dir.join(format!("auth-refresh-{key}.lock")))
 }

@@ -24,6 +24,8 @@ impl SunoClient {
             }
             auth.clone()
         };
+        // Cross-process serialization is handled inside `refresh_state_for_retry`
+        // so this retry path does not hold the in-process mutex across await.
         auth::refresh_state_for_retry(&self.client, &mut auth).await?;
 
         {

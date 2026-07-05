@@ -57,3 +57,22 @@ fn looks_like_auth_expired(body: &str) -> bool {
         || lower.contains("not authenticated")
         || lower.contains("unauthenticated")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::looks_like_auth_expired;
+
+    #[test]
+    fn auth_expired_detector_matches_suno_and_clerk_phrases() {
+        assert!(looks_like_auth_expired("Token validation failed."));
+        assert!(looks_like_auth_expired(r#"{"detail":"JWT expired"}"#));
+        assert!(looks_like_auth_expired("not authenticated"));
+        assert!(looks_like_auth_expired("invalid token"));
+    }
+
+    #[test]
+    fn auth_expired_detector_does_not_match_unrelated_failures() {
+        assert!(!looks_like_auth_expired("generation challenge required"));
+        assert!(!looks_like_auth_expired("unexpected server error"));
+    }
+}

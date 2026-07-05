@@ -2,6 +2,8 @@ use super::SunoClient;
 use super::types::{Clip, GenerateRequest, GenerateResponse};
 use crate::core::CliError;
 
+const FEED_IDS_CHUNK_SIZE: usize = 2;
+
 impl SunoClient {
     /// Submit a music generation request (custom mode or inspiration mode).
     /// Posts only to the current `/api/generate/v2-web/` route. The older
@@ -40,7 +42,7 @@ impl SunoClient {
     /// flows survive Suno's JWT staleness window mid-generation.
     pub async fn get_clips(&self, ids: &[String]) -> Result<Vec<Clip>, CliError> {
         let mut all_clips = Vec::new();
-        for chunk in ids.chunks(2) {
+        for chunk in ids.chunks(FEED_IDS_CHUNK_SIZE) {
             let ids_param = chunk.join(",");
             let path = format!("/api/feed/?ids={ids_param}");
             let clips: Vec<Clip> = self
@@ -98,4 +100,14 @@ fn generation_challenge_error(challenge: &super::challenge::GenerationChallenge)
     CliError::Config(format!(
         "Suno requires a generation challenge (captcha_version={version}). When stored Clerk refresh material is available, Sunox refreshes the JWT once and repeats the challenge preflight before showing this message. Complete a manual generation challenge in the Suno web app and retry, provide a valid challenge token with --token <token>, or force the browser-backed solver with --captcha."
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FEED_IDS_CHUNK_SIZE;
+
+    #[test]
+    fn feed_id_batch_size_documents_current_web_limit() {
+        assert_eq!(FEED_IDS_CHUNK_SIZE, 2);
+    }
 }

@@ -1185,6 +1185,41 @@ async fn extend_fetches_source_clip_and_posts_string_title_contract() {
 }
 
 #[tokio::test]
+async fn extend_metadata_fallback_does_not_merge_same_title_different_clip() {
+    let billing = billing_info_response("tier-pro");
+    let server = MockServer::json_sequence(&[
+        r#"[{"id":"clip-a","title":"Source Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z","metadata":{"prompt":"[Verse]\nOriginal words"}}]"#,
+        r#"{"clips":[{"id":"clip-other","title":"Source Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z","metadata":{"tags":"wrong same-title tags","negative_tags":"wrong negatives","make_instrumental":true}}]}"#,
+        r#"{"required":false}"#,
+        billing.as_str(),
+        r#"{"clips":[{"id":"extend-1","title":"Source Song","status":"submitted","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z"}]}"#,
+    ])
+    .await;
+    let client = server.client();
+
+    client
+        .extend(ExtendClipOptions {
+            clip_id: "clip-a",
+            continue_at: 118.0,
+            tags: None,
+            negative_tags: None,
+            lyrics: None,
+            title: None,
+            instrumental: None,
+            challenge_token: None,
+        })
+        .await
+        .expect("extend");
+
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 5);
+    let body = serde_json::from_str::<serde_json::Value>(&requests[4].body).expect("request json");
+    assert_eq!(body["tags"], "");
+    assert_eq!(body["negative_tags"], "");
+    assert_eq!(body["make_instrumental"], false);
+}
+
+#[tokio::test]
 async fn lyrics_generation_posts_and_polls_current_web_contract() {
     let server = MockServer::json_sequence(&[
         r#"{"id":"lyrics-job-1"}"#,

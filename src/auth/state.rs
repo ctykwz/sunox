@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 
 use crate::core::CliError;
 
+use super::refresh_lock::AuthRefreshLockGuard;
 use super::types::BrowserEnvironment;
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
@@ -33,7 +34,23 @@ impl AuthState {
 
     pub fn save(&self) -> Result<(), CliError> {
         let path = Self::path();
+        self.save_to_path_with_account_lock(&path)
+    }
+
+    pub(crate) fn save_without_account_lock(&self) -> Result<(), CliError> {
+        let path = Self::path();
         self.save_to_path(&path)
+    }
+
+    fn save_to_path_with_account_lock(&self, path: &Path) -> Result<(), CliError> {
+        let _guard = AuthRefreshLockGuard::acquire(self)?;
+        self.save_to_path(path)
+    }
+
+    #[cfg(test)]
+    fn save_to_path_with_lock_path(&self, path: &Path, lock_path: &Path) -> Result<(), CliError> {
+        let _guard = AuthRefreshLockGuard::acquire_path(lock_path)?;
+        self.save_to_path(path)
     }
 
     fn save_to_path(&self, path: &Path) -> Result<(), CliError> {
@@ -233,6 +250,29 @@ mod tests {
 
         let saved = std::fs::read_to_string(&path).expect("saved auth file");
         serde_json::from_str::<AuthState>(&saved).expect("valid saved auth json");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn locked_save_creates_lock_file_and_writes_auth_state() {
+        let dir =
+            std::env::temp_dir().join(format!("sunox-auth-locked-save-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("test dir");
+        let path = dir.join("auth.json");
+        let lock_path = dir.join("auth.lock");
+        let auth = AuthState {
+            jwt: Some(jwt_with_subject("locked-save-user")),
+            clerk_client_cookie: Some("client".into()),
+            ..Default::default()
+        };
+
+        auth.save_to_path_with_lock_path(&path, &lock_path)
+            .expect("locked save");
+
+        assert!(lock_path.exists());
+        let saved = std::fs::read_to_string(&path).expect("saved auth file");
+        let saved = serde_json::from_str::<AuthState>(&saved).expect("valid saved auth json");
+        assert_eq!(saved.jwt, auth.jwt);
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 

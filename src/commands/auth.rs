@@ -69,13 +69,17 @@ pub async fn run(args: AuthArgs, _ctx: &AppContext) -> Result<(), CliError> {
     let client = SunoClient::new_with_refresh(state.clone()).await?;
     let info = client.billing_info().await?;
     if should_save_after_verify {
-        state.save()?;
+        verified_auth_state(&client).save()?;
     }
     eprintln!(
         "Authenticated! Plan: {}, Credits: {}",
         info.plan.name, info.total_credits_left
     );
     Ok(())
+}
+
+fn verified_auth_state(client: &SunoClient) -> AuthState {
+    client.auth_state_snapshot()
 }
 
 fn run_logout_with_cleanup<D, P>(
@@ -145,6 +149,7 @@ fn store_direct_jwt_state(state: &mut AuthState, jwt: String) {
 mod tests {
     use std::cell::Cell;
 
+    use crate::api::SunoClient;
     use crate::auth::BrowserEnvironment;
 
     use super::*;
@@ -326,6 +331,28 @@ mod tests {
         assert_eq!(state.session_id, None);
         assert_ne!(state.device_id.as_deref(), Some("old-device"));
         assert!(state.browser_environment.is_none());
+    }
+
+    #[test]
+    fn verified_auth_state_uses_client_snapshot_after_refresh() {
+        let stale_state = AuthState {
+            jwt: Some("old-jwt".into()),
+            session_id: Some("session".into()),
+            device_id: Some("device".into()),
+            clerk_client_cookie: Some("client".into()),
+            ..Default::default()
+        };
+        let client =
+            SunoClient::new_for_tests("http://127.0.0.1".into(), stale_state).expect("client");
+        {
+            let mut auth = client.auth.lock().expect("auth mutex");
+            auth.jwt = Some("new-jwt".into());
+        }
+
+        let saved = verified_auth_state(&client);
+
+        assert_eq!(saved.jwt.as_deref(), Some("new-jwt"));
+        assert_eq!(saved.device_id.as_deref(), Some("device"));
     }
 
     #[test]

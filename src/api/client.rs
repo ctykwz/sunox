@@ -42,6 +42,10 @@ impl SunoClient {
         })
     }
 
+    pub(crate) fn auth_state_snapshot(&self) -> AuthState {
+        self.auth.lock().expect("auth mutex poisoned").clone()
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url, path)
     }

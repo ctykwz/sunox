@@ -60,7 +60,9 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          7z a ../../../${{ matrix.name }}.zip sunox.exe
+          # Keep Windows release zips uncompressed so older sunox builds without
+          # zip Deflate support can still self-update into the fixed release.
+          Compress-Archive -LiteralPath sunox.exe -DestinationPath ../../../${{ matrix.name }}.zip -CompressionLevel NoCompression -Force
           cd ../../..
 
       - name: Upload artifact
