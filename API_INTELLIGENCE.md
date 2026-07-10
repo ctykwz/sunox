@@ -3,8 +3,10 @@
 Implementation notes in this file were refreshed for the Rust CLI structure on
 June 30, 2026. Non-Studio page-load traffic was recaptured from the user's
 logged-in local Chrome with NetLog on June 30, 2026, and Suno frontend chunks
-loaded by that browser session were scanned for endpoint schemas. Live endpoint
-behavior can drift; recapture requests before changing schemas.
+loaded by that browser session were scanned for endpoint schemas. The current
+Suno create bundle was scanned again on July 10, 2026 for non-generation edit
+and download contracts. Live endpoint behavior can drift; recapture requests
+before changing schemas.
 
 ## Capture Scope (June 30, 2026)
 
@@ -189,10 +191,12 @@ Studio routes also appeared in the bundle, but they are excluded by scope.
 Agent-facing capability metadata should expose known non-implemented or
 unverified surfaces instead of advertising an empty gap list. As of this pass,
 `sunox agent-info --json` reports video upload, `update_feedback_state`,
-social/profile/project/video surfaces, and stale voice-verification routes,
-plus live-captured playlist-conditioned generation, fade, and Studio export
-surfaces under `unsupported_surfaces`. Image upload is implemented for clip and
-playlist cover replacement.
+social/profile/project/video surfaces, stale voice-verification routes,
+live-captured playlist-conditioned generation, and Studio export surfaces under
+`unsupported_surfaces`. Image upload is implemented for clip and playlist cover
+replacement. Fade is now exposed as `sunox clip fade`; reverse,
+crop/remove-section, and official download formats were added from the July 10,
+2026 current bundle scan.
 
 Read-oriented surfaces worth capturing next:
 - Search: `/api/unified/search/omnisearch`,
@@ -397,11 +401,18 @@ the request's `original_tags`, and the captured submit field
 ### GET /api/feed/?ids={clip_id_1},{clip_id_2}
 Batch clip lookup used by `status`, `wait`, and post-submit polling. The CLI
 batches IDs in pairs to avoid oversized query strings and expects the response
-to be a JSON array of clip objects. An empty or partial response for requested
-IDs is treated as `NotFound`, not as successful completion.
+to be a JSON array of clip objects. Ordinary status/download lookups treat an
+empty or partial response for requested IDs as `NotFound`. `clip wait` tolerates
+temporarily missing IDs until its configured deadline because newly submitted
+clips can become feed-visible asynchronously; missing IDs at the deadline are
+then reported as `NotFound`.
 
 ### POST /api/generate/concat/v2/
-Concatenate clips into a full song. `{"clip_id": "<id>"}`
+Concatenate clips into a full song. `{"clip_id": "<id>"}` A July 10, 2026
+live CLI submission completed from an original `metadata.type="gen"` source;
+an `edit_fade` source was rejected by Suno with `Bad history.` This endpoint
+therefore requires usable original generation history, not an arbitrary edited
+clip.
 
 ### POST /api/generate/v2-web/ for clip extend
 Continue an existing clip from a timestamp. Current CLI fetches the source clip
@@ -726,6 +737,9 @@ Body: {"trash": true, "clip_ids": ["..."]}
 POST /api/gen/trash
 Body: {"trash": false, "clip_ids": ["..."]}
 
+POST /api/clips/delete/
+Body: {"ids": ["..."]}
+
 POST /api/gen/{gen_id}/update_reaction_type/
 Body: {"reaction": "LIKE", "recommendation_metadata": {}}
 
@@ -738,11 +752,50 @@ Body: {"reaction": null, "recommendation_metadata": {}}
 
 The bundle also exposes `/api/gen/{gen_id}/update_feedback_state/`, but the
 feedback reason/state contract is intentionally out of scope for now. Current
-CLI implements clip delete/restore and like/dislike/clear-reaction.
+CLI implements clip delete/restore/purge/empty-trash and like/dislike/clear-reaction.
+`clip purge` permanently deletes specified trashed clips in serial batches of
+20; `clip empty-trash`
+pages through `feed/v3` with `filters.trashed = "True"` and permanently
+deletes every returned clip. The trash query intentionally omits normal-library
+defaults such as `disliked`, `fromStudioProject`, `stem`, and `workspace`, matching
+the current web trash filter and preventing valid trashed clips from being hidden.
+Both commands require explicit `-y/--yes`. Permanent delete
+was confirmed from the current frontend and live-verified through the CLI on
+July 10, 2026.
+
+`clip empty-trash` enumerates the complete trash before starting permanent
+deletion, then uses the same serial batch executor. For either command, if the
+first batch fails, the CLI
+preserves the original semantic error such as `rate_limited` or `auth_expired`.
+If a later batch fails after earlier batches succeeded, it returns
+`partial_mutation` with `purged_clip_ids`, a structured `failed` object, and
+`not_attempted_clip_ids`.
 
 `POST /api/gen/{clip_id}/update_reaction_type/` with
 `{"reaction":"LIKE"|"DISLIKE"|null,"recommendation_metadata":{}}` was also
 live-observed in `13suno-labs-nostudio-20260630.har`.
+
+Multi-clip visibility and reaction commands submit one request per clip under
+the account mutation lock. A first failure preserves its semantic error. If a
+later request fails after earlier clips succeeded, the CLI returns
+`partial_mutation` with `operation`, `succeeded_clip_ids`, `failed`, and
+`not_attempted_clip_ids` so callers can retry only unresolved clips.
+
+Playlist create/set, image upload and cover assignment, and audio upload are
+multi-step workflows rather than atomic endpoints. Their workflow orchestration
+records the playlist/upload/clip identity and completed steps. Once any
+server-side mutation succeeds, a later failure returns `partial_mutation` with
+`completed_steps` and a structured `failed` step so callers do not create
+duplicate playlists or uploads. API playlist helpers perform one mutation each;
+the playlist workflow owns follow-up metadata, cover, and readback steps.
+Presigned audio bytes are streamed with a dedicated transfer client instead of
+inheriting the 30-second API deadline. When audio upload changes clip metadata,
+the workflow polls until the requested title, lyrics, and image fields are
+visible. Partial workflow errors include `recovery.resumable`; safe recovery
+paths provide a structured command and arguments, while mutations whose retry
+idempotency is not live-verified are explicitly marked non-resumable. The
+read-only `clip upload-status` command queries an existing audio upload without
+replaying any mutation.
 
 ### Additional live edit bodies from `13suno-labs-nostudio-20260630.har`
 and `14suno-labs-nostudio-20260630.har`
@@ -759,10 +812,67 @@ Body: {"content_params":{"content_id":"...","content_type":"clip"}}
 ```
 
 `POST /api/edit/fade/{clip_id}/` returns `{"action_clip_id":"..."}`; the web
-then polls both `GET /api/edit/action/{action_clip_id}/` and
-`GET /api/video/generate/{action_clip_id}/status/` until `status: "complete"`.
+polls `GET /api/edit/action/{action_clip_id}/` until `status: "complete"`, then
+loads the resulting clip. A July 10, 2026 live browser submission completed
+through this flow.
 `POST /api/clips/adjust-speed/` returns a processing clip directly and is now
 exposed as `sunox clip speed <clip_id> --multiplier <n>`.
+
+### Additional current bundle edit and download contracts from July 10, 2026
+
+The Reverse, Crop, and Remove Section flows completed through the CLI on July
+10, 2026. Their request-body schemas below remain bundle-derived because a
+fresh browser wire capture was not retained:
+
+```http
+POST /api/clips/reverse-clip/
+Body: {"clip_id":"...","title":"..."}
+
+POST /api/edit/crop/{clip_id}/
+Body: {"crop_start_s":12.5,"crop_end_s":74.0,"is_crop_remove":false,"title":"...","ui_surface":"song_actions"}
+
+POST /api/edit/crop/{clip_id}/
+Body: {"crop_start_s":30.0,"crop_end_s":45.0,"is_crop_remove":true,"title":"...","ui_surface":"song_actions"}
+
+POST /api/edit/fade/{clip_id}/
+Body: {"fade_in_time":2.0,"fade_out_time":78.5,"title":"..."}
+```
+
+Crop and Fade return `{"action_clip_id":"..."}` and require polling
+`GET /api/edit/action/{action_clip_id}/` until complete before loading the
+resulting clip. Reverse returns a clip object directly. These are exposed as:
+
+```bash
+sunox clip reverse <clip_id>
+sunox clip crop <clip_id> --start <seconds> --end <seconds>
+sunox clip crop <clip_id> --start <seconds> --end <seconds> --remove-section
+sunox clip fade <clip_id> --in <seconds> --out <seconds>
+```
+
+Official download routes observed in the current bundle:
+
+```http
+GET /api/download/clip/{clip_id}?format=mp3
+GET /api/download/clip/{clip_id}?format=m4a
+
+POST /api/gen/{clip_id}/convert_wav/
+GET /api/gen/{clip_id}/wav_file/
+
+GET /api/gen/{clip_id}/opus_file/
+POST /api/gen/{clip_id}/convert_opus
+```
+
+MP3 and M4A return a prepared download response with `download_url` and can be
+`processing`; WAV uses convert-then-poll for `wav_file_url`; OPUS reads an
+existing `opus_file_url` first and starts conversion only when absent. The CLI
+defaults to the existing `audio_url` MP3, while explicit
+`--format mp3|m4a|wav|opus` uses these official format routes. Preparation and
+edit-action polling use the configured `poll_timeout_secs` and
+`poll_interval_secs`; CDN file transfer has a bounded connection timeout but
+no total body deadline, while a 60-second no-progress timeout prevents a
+connected but stalled response from hanging the CLI. WAV conversion is
+serialized as account-scoped mutations. OPUS checks for an existing file while
+holding that lock and only requests conversion when the URL is absent.
 
 ### Studio multitrack stem export
 Captured from `13suno-labs-nostudio-20260630.har` and the downloaded
@@ -957,7 +1067,11 @@ the June 30 HAR audit; current web stem extraction was observed as
 `POST /api/generate/v2-web/` with `task: "gen_stem"`.
 
 ### POST /api/generate/v2-web/
-Cover generation. Current CLI implementation uses the unified web generation route with `metadata.create_mode = "cover"` and `cover_clip_id` set.
+Cover generation. Current CLI implementation first loads the source through
+`GET /api/feed/?ids={clip_id}`, then uses the unified web generation route with
+`metadata.create_mode = "cover"`, `cover_clip_id`, and the source title as a
+non-null string. Live CLI submit and completion were verified on July 10, 2026;
+the fresh browser mutation body remains unrecaptured.
 
 ### POST /api/generate/v2-web/
 Older/bundle-discovered remaster variant. The current CLI uses the live-captured

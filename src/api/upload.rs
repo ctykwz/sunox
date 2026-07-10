@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use reqwest::multipart::{Form, Part};
+use tokio_util::io::ReaderStream;
 
 use super::SunoClient;
 use super::types::{
@@ -9,6 +10,7 @@ use super::types::{
     InitializeAudioClipRequest, InitializeAudioClipResponse,
 };
 use crate::core::CliError;
+use crate::net::http;
 
 impl SunoClient {
     /// Start Suno's presigned audio upload flow.
@@ -25,15 +27,17 @@ impl SunoClient {
     }
 
     /// Upload local bytes to the presigned S3 form returned by Suno.
-    pub async fn upload_presigned_audio_form(
+    pub async fn upload_presigned_audio_file(
         &self,
         url: &str,
         fields: &BTreeMap<String, String>,
         filename: &str,
-        bytes: Vec<u8>,
+        file: tokio::fs::File,
+        content_length: u64,
     ) -> Result<(), CliError> {
-        self.upload_presigned_form(url, fields, filename, None, bytes)
-            .await
+        let body = reqwest::Body::wrap_stream(ReaderStream::new(file));
+        let part = Part::stream_with_length(body, content_length).file_name(filename.to_string());
+        self.upload_presigned_part(url, fields, part).await
     }
 
     /// Start Suno's presigned image upload flow.
@@ -58,31 +62,32 @@ impl SunoClient {
         content_type: Option<&str>,
         bytes: Vec<u8>,
     ) -> Result<(), CliError> {
-        self.upload_presigned_form(url, fields, filename, content_type, bytes)
-            .await
+        let mut part = Part::bytes(bytes).file_name(filename.to_string());
+        if let Some(content_type) = content_type {
+            part = part
+                .mime_str(content_type)
+                .map_err(|e| CliError::Config(format!("invalid upload content type: {e}")))?;
+        }
+        self.upload_presigned_part(url, fields, part).await
     }
 
-    async fn upload_presigned_form(
+    async fn upload_presigned_part(
         &self,
         url: &str,
         fields: &BTreeMap<String, String>,
-        filename: &str,
-        content_type: Option<&str>,
-        bytes: Vec<u8>,
+        file_part: Part,
     ) -> Result<(), CliError> {
         let mut form = Form::new();
         for (key, value) in fields {
             form = form.text(key.clone(), value.clone());
         }
-        let mut file_part = Part::bytes(bytes).file_name(filename.to_string());
-        if let Some(content_type) = content_type {
-            file_part = file_part
-                .mime_str(content_type)
-                .map_err(|e| CliError::Config(format!("invalid upload content type: {e}")))?;
-        }
         form = form.part("file", file_part);
 
-        let resp = self.client.post(url).multipart(form).send().await?;
+        let resp = http::transfer_client()?
+            .post(url)
+            .multipart(form)
+            .send()
+            .await?;
         self.check_response(resp).await?;
         Ok(())
     }

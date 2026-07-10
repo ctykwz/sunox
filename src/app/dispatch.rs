@@ -98,8 +98,11 @@ async fn run_clip(command: ClipCommand, ctx: &AppContext) -> Result<(), CliError
         ClipCommand::Wait(args) => commands::wait::run(args, ctx).await,
         ClipCommand::Download(args) => commands::media::download(args, ctx).await,
         ClipCommand::Upload(args) => commands::media::upload(args, ctx).await,
+        ClipCommand::UploadStatus(args) => commands::media::upload_status(args, ctx).await,
         ClipCommand::Delete(args) => commands::library::delete(args, ctx).await,
         ClipCommand::Restore(args) => commands::library::restore(args, ctx).await,
+        ClipCommand::Purge(args) => commands::library::purge(args, ctx).await,
+        ClipCommand::EmptyTrash(args) => commands::library::empty_trash(args, ctx).await,
         ClipCommand::Like(args) => commands::library::like(args, ctx).await,
         ClipCommand::Dislike(args) => commands::library::dislike(args, ctx).await,
         ClipCommand::Set(args) => commands::library::set(args, ctx).await,
@@ -110,6 +113,9 @@ async fn run_clip(command: ClipCommand, ctx: &AppContext) -> Result<(), CliError
         ClipCommand::Cover(args) => commands::create::cover(args, ctx).await,
         ClipCommand::Remaster(args) => commands::create::remaster(args, ctx).await,
         ClipCommand::Speed(args) => commands::create::speed(args, ctx).await,
+        ClipCommand::Reverse(args) => commands::create::reverse(args, ctx).await,
+        ClipCommand::Crop(args) => commands::create::crop(args, ctx).await,
+        ClipCommand::Fade(args) => commands::create::fade(args, ctx).await,
         ClipCommand::Stems(args) => commands::create::stems(args, ctx).await,
     }
 }

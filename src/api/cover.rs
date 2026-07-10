@@ -14,7 +14,16 @@ impl SunoClient {
         tags: Option<&str>,
         challenge_token: Option<String>,
     ) -> Result<Vec<Clip>, CliError> {
+        let requested = [clip_id.to_string()];
+        let source = self
+            .get_clips(&requested)
+            .await?
+            .into_iter()
+            .find(|clip| clip.id == clip_id)
+            .ok_or_else(|| CliError::NotFound(format!("clip: {clip_id}")))?;
+
         let mut req = GenerateRequest::new(model_key, "cover");
+        req.title = Some(source.title);
         req.tags = tags.map(String::from);
         req.cover_clip_id = Some(clip_id.to_string());
         req.set_challenge_token(challenge_token);

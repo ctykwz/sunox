@@ -1,6 +1,6 @@
 [package]
 name = "sunox"
-version = "0.0.12"
+version = "0.0.13"
 edition = "2024"
 description = "Generate AI music from your terminal via direct Suno web workflows"
 license = "MIT"
@@ -17,6 +17,7 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs", "process", "net"] }
+tokio-util = { version = "0.7", features = ["io"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 reqwest = { version = "0.12", features = ["json", "multipart", "rustls-tls", "stream"], default-features = false }
 serde = { version = "1", features = ["derive"] }
@@ -34,6 +35,7 @@ id3 = "1"
 rookie = "0.5"
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
+tempfile = "3"
 self_update = { version = "0.42", default-features = false, features = ["rustls", "compression-flate2", "compression-zip-deflate", "archive-tar", "archive-zip"] }
 
 [dev-dependencies]

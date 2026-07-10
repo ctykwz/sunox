@@ -33,22 +33,23 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
         "workflow": {
             "create": "submit generation or description and return clip payload",
             "clip wait": "poll clip ids until complete or error",
-            "clip download": "download completed media and embed MP3 lyrics",
+            "clip download": "download completed media; default CDN MP3 embeds lyrics; explicit --format supports mp3|m4a|wav|opus and --video. Output directories are created automatically; existing files require explicit --force to replace. Batch downloads remain serial; if a later item fails after any output is written, JSON returns partial_download with error.details.succeeded, failed, and not_attempted_clip_ids.",
             "post_submit_workflow": "When create or a generation-backed edit returns new or processing clip IDs, call `sunox clip wait <clip_id> --json` before download, quality filtering, or playlist decisions unless the caller explicitly wants submit-only behavior.",
             "audio_analysis": {
-                "simple": "For simple audio analysis, use existing clip media: read audio_url and song-page context from `sunox clip info <clip_id> --json` or run `sunox clip download <clip_id> --json`; non-auth supplemental read failures appear in supplemental_errors. Do not create new Suno resources just to inspect audio.",
+                "simple": "For simple audio analysis, use existing clip media: read audio_url and song-page context from `sunox clip info <clip_id> --json` or run `sunox clip download <clip_id> --json` for the default CDN MP3; non-auth supplemental read failures appear in supplemental_errors. Do not create new Suno resources just to inspect audio.",
                 "deep": "Use heavier WAV, stems, or Studio export workflows only when the user explicitly asks for WAV, stems, lossless audio, or deep spectral analysis; do not silently downgrade a WAV/lossless request to MP3."
             },
             "download_formats": {
-                "current_cli": "current CLI download supports MP3 audio from clip.audio_url and `--video` from clip.video_url when present",
-                "web_pro_choices": "Suno Web exposes Pro download choices such as WAV Audio, Get Stems, and Video; do not assume they are available through this CLI unless agent-info reports a command for them. `sunox clip stems` is generation-backed stems extraction and is not the same as Suno Web Pro Get Stems export.",
-                "agent_default": "Use MP3/audio_url for routine listening, preview, transcription, and lightweight analysis. Use Pro/WAV/stems/video paths only when explicitly requested and supported."
+                "current_cli": "current CLI download uses clip.audio_url for the default CDN MP3 path; explicit --format mp3|m4a|wav|opus uses Suno's official download endpoints; --video uses clip.video_url when present. Download preparation and edit polling use poll_timeout_secs and poll_interval_secs from config, including in-flight requests and auth retries.",
+                "web_pro_choices": "Suno Web exposes Pro download choices such as WAV Audio, Get Stems, and Video. This CLI supports explicit WAV download via --format wav, but `sunox clip stems` is generation-backed stems extraction and is not the same as Suno Web Pro Get Stems export.",
+                "agent_default": "Use the default CDN MP3 for routine listening, preview, transcription, and lightweight analysis. Use --format mp3|m4a|wav|opus, stems, or video only when explicitly requested and supported."
             }
         },
         "execution_policy": {
             "default_mutations": "account-scoped serial execution for Suno create, upload, edit, playlist, persona, and other write commands",
             "config_disable": "set serial_mutations=false with `sunox config set serial_mutations false`, `-c serial_mutations=false`, or SUNO_SERIAL_MUTATIONS=false to disable the account-scoped mutation lock",
             "native_batch": "commands may still use a Suno endpoint's native batch body when the endpoint is reliable; playlist remove is intentionally one request per clip because large remove batches can return Suno 500s",
+            "partial_failures": "serial multi-clip operations preserve the first semantic error and return partial_mutation after earlier successes. Multi-step workflows also include recovery.resumable and, when safe, a structured recovery command and arguments. Never replay a mutation marked resumable=false.",
             "parallel_override": "pass --parallel for a single invocation override; it takes precedence over serial_mutations",
             "agent_parallel_guidance": "Agents should not pass --parallel or disable serial_mutations unless the user explicitly asks to allow same-account concurrent writes."
         },
@@ -66,7 +67,9 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "sunox clip list --liked --public --sort popular --json",
             "sunox clip info <clip_id> --json",
             "sunox clip wait <clip_id> --json",
+            "sunox clip upload-status <upload_id> --json",
             "sunox clip download <clip_id> --json",
+            "sunox clip download <clip_id> --format wav --json",
             "sunox playlist add <playlist_id> <clip_id> --json",
             "sunox persona list --json",
             "sunox config show --json"
@@ -82,19 +85,19 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "contract": [
                 "run sunox agent-info for current capabilities",
                 "prefer --json for machine-readable command output",
-                "after any command returns new clip IDs, call clip wait before download, filtering, or playlist decisions unless submit-only behavior was requested",
+                "when create or a command in async_clip_edits.returns_new_or_processing returns clip IDs, call clip wait before downstream work unless submit-only behavior was requested; crop and fade already wait for their result clip to complete",
                 "do not pass --parallel or disable serial_mutations unless the user explicitly opts into same-account concurrent writes",
-                "for simple audio analysis, use existing clip audio_url or clip download; reserve WAV, stems, or Studio export workflows for explicit deep-analysis or lossless requests",
+                "for simple audio analysis, use existing clip audio_url or the default CDN download; reserve explicit --format, stems, or Studio export workflows for explicit format, deep-analysis, or lossless requests",
                 "do not publish, make public, or run destructive commands unless the user explicitly asked for that action; destructive commands require -y/--yes",
                 "use semantic exit codes to decide retry, auth, and config actions"
             ]
         },
         "agent_safety": {
             "parallel_writes": "do not pass --parallel or disable serial_mutations unless the user explicitly asks to allow same-account concurrent writes",
-            "paid_or_credit_work": "create, cover, extend, stems, remaster, speed, upload, and Pro download/export workflows can be stateful or credit/plan-sensitive; only run the amount and format the user requested",
-            "download_quality": "current CLI download supports MP3 by default; Suno Web exposes Pro download choices including WAV Audio, Get Stems, and Video, but agents should only use supported Pro/export commands when explicitly requested",
+            "paid_or_credit_work": "create, cover, extend, stems, remaster, speed, reverse, crop, fade, upload, and explicit non-default download/export workflows can be stateful or credit/plan-sensitive; only run the amount, operation, and format the user requested",
+            "download_quality": "current CLI download defaults to CDN MP3 and supports explicit --format mp3|m4a|wav|opus; agents should use an explicit format only when requested",
             "public_visibility": "do not publish clips, playlists, or personas or make them public unless the user explicitly asks",
-            "destructive_actions": "do not run delete, trash, purge, or other destructive commands unless the user explicitly asks; when explicitly requested, pass -y/--yes because destructive commands require it",
+            "destructive_actions": "do not run delete, trash, purge, empty-trash, or other destructive commands unless the user explicitly asks. clip purge and clip empty-trash are irreversible and require -y/--yes.",
             "captcha": "do not force --captcha unless the user asks for the browser-backed solver; prefer normal challenge preflight and externally supplied --token when provided",
             "secrets": "never print, persist in project files, or include auth cookies, Clerk values, JWTs, or challenge tokens in prompts, logs, README examples, or commits"
         },
@@ -114,12 +117,26 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             },
             "clip upload": {
                 "status": "user-facing CLI workflow is available",
-                "workflow": "create presigned upload, post local bytes to S3 form, finish upload, poll processing, initialize clip, then set title/lyrics/cover metadata when available"
+                "workflow": "open and validate the local file, create a presigned upload, stream the file to S3 with transfer-specific timeouts, finish upload, poll processing, initialize clip, then set title/lyrics/cover metadata when available; metadata-changing uploads poll until the requested fields are visible",
+                "status_command": "sunox clip upload-status <upload_id> --json performs a read-only status check and never replays an upload mutation",
+                "partial_failure": "after an upload_id exists, failures return partial_mutation with upload_id, optional clip_id, completed_steps, failed.step/code/message, and recovery. Follow recovery only when resumable=true"
+            },
+            "image upload": {
+                "workflow": "create an image upload, submit the presigned S3 form, finish moderation, then apply the approved image to a clip or playlist",
+                "partial_failure": "after an upload_id exists, image transfer, finish, moderation, and later clip/playlist cover failures return partial_mutation with a complete cover reference, completed steps, and recovery. Unverified mutation replays are marked resumable=false"
             },
             "clip list": {
                 "route": "POST /api/feed/v3",
-                "filters": "--public, --liked, --upload, --cover, and --extend map to the current web feed filters; --sort popular maps to sortBy=upvote_count, sortDirection=desc",
+                "filters": "--public, --liked, --upload, --trashed, --cover, and --extend map to the current web feed filters; --sort popular maps to sortBy=upvote_count, sortDirection=desc",
                 "scope": "query-only listing; this is not a library sync or local mirror workflow"
+            },
+            "clip purge": {
+                "route": "POST /api/clips/delete/",
+                "constraints": "permanently deletes specific clips that are already in trash in serial batches of 20; requires explicit -y/--yes and cannot be undone. A first-batch failure preserves its original semantic error; a later failure returns partial_mutation with purged_clip_ids, failed.clip_ids/code/message, and not_attempted_clip_ids."
+            },
+            "clip empty-trash": {
+                "route": "POST /api/feed/v3 with only filters.trashed=True, then POST /api/clips/delete/",
+                "constraints": "paginates every clip currently in trash and permanently deletes them in serial batches; requires explicit -y/--yes and cannot be undone. A first-batch failure preserves its original semantic error. A later failure returns partial_mutation with purged_clip_ids, failed.clip_ids/code/message, and not_attempted_clip_ids."
             },
             "clip info": {
                 "routes": [
@@ -140,6 +157,11 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                 },
                 "response": "generation response with submitted clips"
             },
+            "clip download": {
+                "route": "GET /api/download/clip/{clip_id}?format=mp3|m4a for prepared MP3/M4A; POST /api/gen/{clip_id}/convert_wav/ then GET /api/gen/{clip_id}/wav_file/ for WAV; GET/POST /api/gen/{clip_id}/opus_file|convert_opus for OPUS",
+                "defaults": "without --format, downloads clip.audio_url as MP3 and embeds lyrics into ID3 tags; explicit --format mp3|m4a|wav|opus uses the official endpoint for that format",
+                "constraints": "--video uses clip.video_url and cannot be combined with --format. WAV and OPUS preparation are serialized as account-scoped mutations; OPUS still reuses an existing file URL without requesting conversion. Output directories are created automatically; existing output is preserved unless --force is explicit."
+            },
             "clip stems": {
                 "route": "POST /api/generate/v2-web/",
                 "status": "generation-backed stems extraction; not the same as Suno Web Pro Get Stems export",
@@ -153,14 +175,26 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                 "body_constraints": "task=extend, metadata.create_mode=custom, metadata.is_remix=true, metadata.lyrics_updated=true, mv=chirp-fenix, continue_clip_id=<source clip id>, continue_at=<seconds>, continued_aligned_prompt=<source context or empty string>, title must be a string",
                 "response": "generation response with submitted continuation clips"
             },
+            "clip cover": {
+                "route": "GET /api/feed/?ids=<clip_id>, then POST /api/generate/v2-web/",
+                "defaults": "fetches the source clip before submit and always sends title as source.title because Suno requires a string title for the cover generation variant",
+                "body_constraints": "metadata.create_mode=cover, cover_clip_id=<source clip id>, title=<source title string>",
+                "response": "generation response with submitted cover clips"
+            },
+            "clip concat": {
+                "route": "POST /api/generate/concat/v2/",
+                "input_constraint": "use a source with original Suno generation history. A live July 10 validation accepted metadata.type=gen and completed; an edit_fade result was rejected by Suno with Bad history.",
+                "response": "queued or processing clip; wait for the returned ID before downstream work"
+            },
             "challenge_capable_generation_commands": {
                 "commands": ["create", "describe", "clip cover", "clip extend", "clip stems"],
                 "challenge_flags": "only these commands expose --token, --captcha, and --no-captcha because they submit through /api/generate/v2-web/ and can hit the generation challenge gate"
             },
             "async_clip_edits": {
-                "commands": ["clip cover", "clip extend", "clip concat", "clip stems", "clip remaster", "clip speed"],
-                "post_submit_workflow": "these commands can return new or processing clip IDs; wait for returned clip IDs before downstream download, filtering, or playlist mutation",
-                "challenge_note": "only clip cover, clip extend, and clip stems expose challenge flags; clip concat, clip remaster, and clip speed use their own edit routes and do not expose --token, --captcha, or --no-captcha"
+                "returns_new_or_processing": ["clip cover", "clip extend", "clip concat", "clip stems", "clip remaster", "clip speed", "clip reverse"],
+                "waits_for_complete": ["clip crop", "clip fade"],
+                "post_submit_workflow": "commands in returns_new_or_processing require clip wait before downstream work; clip crop and clip fade already wait for the resulting clip to complete and do not require another wait after success",
+                "challenge_note": "only clip cover, clip extend, and clip stems expose challenge flags; clip concat, clip remaster, clip speed, clip reverse, clip crop, and clip fade use their own edit routes and do not expose --token, --captcha, or --no-captcha"
             },
             "clip speed": {
                 "route": "POST /api/clips/adjust-speed/",
@@ -171,15 +205,44 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                     "title": "<new clip title>"
                 },
                 "response": "processing clip"
+            },
+            "clip reverse": {
+                "route": "POST /api/clips/reverse-clip/",
+                "body": {
+                    "clip_id": "<source clip id>",
+                    "title": "<new clip title>"
+                },
+                "response": "new clip"
+            },
+            "clip crop": {
+                "route": "POST /api/edit/crop/{clip_id}/ then GET /api/edit/action/{action_clip_id}/",
+                "body": {
+                    "crop_start_s": "finite seconds, >= 0",
+                    "crop_end_s": "finite seconds, greater than crop_start_s",
+                    "is_crop_remove": "false for trim-to-section, true for remove-section",
+                    "title": "<new clip title>",
+                    "ui_surface": "song_actions"
+                },
+                "response": "poll action_clip_id, then fetch completed clip; polling uses config poll_timeout_secs and poll_interval_secs"
+            },
+            "clip fade": {
+                "route": "POST /api/edit/fade/{clip_id}/ then poll GET /api/edit/action/{action_clip_id}/",
+                "body": {
+                    "fade_in_time": "optional finite nonnegative seconds",
+                    "fade_out_time": "optional finite nonnegative seconds",
+                    "title": "<new clip title>"
+                },
+                "response": "poll the edit action to complete, then fetch the completed clip; polling uses config poll_timeout_secs and poll_interval_secs"
             }
         },
         "features": [
             "tags", "enhance_tags", "negative_tags", "vocal_gender",
             "weirdness", "style_influence",
             "instrumental", "extend", "concat", "cover", "remaster",
-            "stems", "clip_speed", "lyrics", "timed_lyrics", "set_metadata",
-            "set_visibility", "search", "delete", "clip_restore",
-            "clip_like", "clip_dislike", "optional_captcha_solver", "audio_upload",
+            "stems", "clip_speed", "clip_reverse", "clip_crop", "clip_fade",
+            "download_formats", "lyrics", "timed_lyrics", "set_metadata",
+            "set_visibility", "search", "delete", "clip_restore", "clip_purge", "clip_trash_query",
+            "clip_like", "clip_dislike", "optional_captcha_solver", "audio_upload", "audio_upload_status",
             "id3_lyrics_embedding", "clip_list_filters", "voice_persona", "persona_list",
             "persona_info", "persona_clips", "persona_create",
             "persona_set_metadata", "persona_processed_clip",
@@ -216,11 +279,6 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                 "route": "POST /api/generate/v2-web/",
                 "reason": "captured task=playlist_condition uses playlist_id=inspiration and playlist_clip_ids, but it is a separate inspiration/remix surface from normal create"
             },
-            "fade_edit": {
-                "status": "live_captured_not_exposed",
-                "route": "POST /api/edit/fade/{clip_id}/",
-                "reason": "captured flow returns action_clip_id and requires polling /api/edit/action/{action_clip_id}/"
-            },
             "studio_multitrack_export": {
                 "status": "live_captured_not_exposed",
                 "route": "POST /api/studio/render-state-multitrack",
@@ -236,10 +294,11 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "clip": {
                 "commands": [
                     "clip list", "clip search", "clip info", "clip status", "clip wait",
-                    "clip download", "clip upload", "clip delete", "clip restore",
+                    "clip download", "clip upload", "clip upload-status", "clip delete", "clip restore", "clip purge", "clip empty-trash",
                     "clip like", "clip dislike", "clip set", "clip publish",
                     "clip timed-lyrics", "clip extend", "clip concat",
-                    "clip cover", "clip remaster", "clip speed", "clip stems"
+                    "clip cover", "clip remaster", "clip speed", "clip reverse",
+                    "clip crop", "clip fade", "clip stems"
                 ],
                 "cover_status": "clip set supports --image-url, --image-file, --remove-cover, and --remove-video-cover; local image files use POST /api/uploads/image/, presigned S3 form upload, POST /api/uploads/image/{id}/upload-finish/, then POST /api/gen/{clip_id}/set_metadata/ with image_url"
             },
@@ -270,12 +329,13 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                 ],
                 "cover_status": "playlist set/create support --image-file for local image upload; uploaded covers use POST /api/uploads/image/, presigned S3 form upload, POST /api/uploads/image/{id}/upload-finish/, then PATCH /api/playlist/v2/{id} with metadata.cover_url, metadata.cover_image_s3_id, and metadata.cover_is_user_set=true",
                 "cover_url_status": "playlist set --image-url accepts existing Suno uploaded image URLs such as https://cdn2.suno.ai/image_<upload_id>.jpeg and maps them to the same v2 cover metadata patch; arbitrary external URLs still use the legacy set_metadata route",
+                "multi_step_failure": "playlist create/set expose completed_steps, playlist_id, and failed.step/code/message through partial_mutation when an earlier server mutation succeeded",
                 "remove_status": "playlist remove accepts multiple clip IDs but submits one POST /api/playlist/v2/{playlist_id}/tracks/remove request per clip ID because larger batch remove requests can return Suno 500s. If a later item fails, the command returns partial_mutation with error.details containing requested_clip_ids, succeeded_clip_ids, failed, and not_attempted_clip_ids."
             }
         },
         "exit_codes": {
             "0": "success",
-            "1": "runtime, web endpoint, or partial mutation error; inspect error.code and error.details before retrying",
+            "1": "runtime, web endpoint, partial mutation or partial download error; inspect error.code and error.details before retrying",
             "2": "configuration error — check config",
             "3": "auth error — run `sunox login`",
             "4": "rate limited — wait and retry",

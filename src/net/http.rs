@@ -5,6 +5,8 @@ use reqwest::Client;
 use crate::core::CliError;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const TRANSFER_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const TRANSFER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(target_os = "macos")]
 pub(crate) const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
 #[cfg(target_os = "windows")]
@@ -24,9 +26,23 @@ pub fn browser_client() -> Result<Client, CliError> {
         .map_err(|e| CliError::Config(format!("HTTP client: {e}")))
 }
 
-pub fn default_client() -> Result<Client, CliError> {
+/// CDN media can legitimately take longer than an API response. Keep the
+/// connection bounded but do not impose Reqwest's total-body deadline.
+pub fn download_client() -> Result<Client, CliError> {
     Client::builder()
-        .timeout(REQUEST_TIMEOUT)
+        .connect_timeout(REQUEST_TIMEOUT)
         .build()
         .map_err(|e| CliError::Config(format!("HTTP client: {e}")))
+}
+
+/// Presigned uploads can be much larger than API payloads. Keep connection,
+/// idle-read, and total deadlines explicit without inheriting the API's 30s
+/// total timeout.
+pub fn transfer_client() -> Result<Client, CliError> {
+    Client::builder()
+        .connect_timeout(REQUEST_TIMEOUT)
+        .read_timeout(TRANSFER_IDLE_TIMEOUT)
+        .timeout(TRANSFER_TIMEOUT)
+        .build()
+        .map_err(|e| CliError::Config(format!("HTTP transfer client: {e}")))
 }

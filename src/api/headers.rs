@@ -87,10 +87,8 @@ struct ChromiumClientHints {
 fn chromium_client_hints(user_agent: &str) -> Option<ChromiumClientHints> {
     let (brand, major) = if let Some(major) = major_version_after(user_agent, "Edg/") {
         ("Microsoft Edge", major)
-    } else if let Some(major) = major_version_after(user_agent, "Chrome/") {
-        ("Google Chrome", major)
     } else {
-        return None;
+        ("Google Chrome", major_version_after(user_agent, "Chrome/")?)
     };
 
     Some(ChromiumClientHints {

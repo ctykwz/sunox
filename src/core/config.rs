@@ -56,6 +56,8 @@ impl AppConfig {
             .extract()
             .map_err(|e| CliError::Config(format!("parse config: {e}")))?;
         config.apply_env_overrides(vars)?;
+        ensure_poll_interval_secs(config.poll_interval_secs)?;
+        ensure_poll_timeout_secs(config.poll_timeout_secs)?;
         Ok(config)
     }
 
@@ -86,10 +88,11 @@ impl AppConfig {
             match key.as_str() {
                 "SUNO_DEFAULT_MODEL" => self.default_model = normalize_model_key(&value)?,
                 "SUNO_POLL_INTERVAL_SECS" => {
-                    self.poll_interval_secs = parse_u64("SUNO_POLL_INTERVAL_SECS", &value)?;
+                    self.poll_interval_secs =
+                        parse_poll_interval("SUNO_POLL_INTERVAL_SECS", &value)?;
                 }
                 "SUNO_POLL_TIMEOUT_SECS" => {
-                    self.poll_timeout_secs = parse_u64("SUNO_POLL_TIMEOUT_SECS", &value)?;
+                    self.poll_timeout_secs = parse_poll_timeout("SUNO_POLL_TIMEOUT_SECS", &value)?;
                 }
                 "SUNO_OUTPUT_DIR" => self.output_dir = value,
                 "SUNO_SERIAL_MUTATIONS" => {
@@ -116,8 +119,8 @@ impl AppConfig {
     fn set_value(&mut self, key: &str, value: String) -> Result<(), CliError> {
         match key {
             "default_model" => self.default_model = normalize_model_key(&value)?,
-            "poll_interval_secs" => self.poll_interval_secs = parse_u64(key, &value)?,
-            "poll_timeout_secs" => self.poll_timeout_secs = parse_u64(key, &value)?,
+            "poll_interval_secs" => self.poll_interval_secs = parse_poll_interval(key, &value)?,
+            "poll_timeout_secs" => self.poll_timeout_secs = parse_poll_timeout(key, &value)?,
             "output_dir" => self.output_dir = value,
             "serial_mutations" => self.serial_mutations = parse_bool(key, &value)?,
             _ => {
@@ -156,8 +159,10 @@ impl StoredConfig {
     fn set(&mut self, key: &str, value: &str) -> Result<(), CliError> {
         match key {
             "default_model" => self.default_model = Some(normalize_model_key(value)?),
-            "poll_interval_secs" => self.poll_interval_secs = Some(parse_u64(key, value)?),
-            "poll_timeout_secs" => self.poll_timeout_secs = Some(parse_u64(key, value)?),
+            "poll_interval_secs" => {
+                self.poll_interval_secs = Some(parse_poll_interval(key, value)?)
+            }
+            "poll_timeout_secs" => self.poll_timeout_secs = Some(parse_poll_timeout(key, value)?),
             "output_dir" => self.output_dir = Some(value.to_string()),
             "serial_mutations" => self.serial_mutations = Some(parse_bool(key, value)?),
             _ => {
@@ -208,6 +213,26 @@ fn parse_u64(key: &str, value: &str) -> Result<u64, CliError> {
         .map_err(|_| CliError::Config(format!("config key `{key}` expects an unsigned integer")))
 }
 
+fn parse_poll_timeout(key: &str, value: &str) -> Result<u64, CliError> {
+    let value = parse_u64(key, value)?;
+    ensure_poll_timeout_secs(value)?;
+    Ok(value)
+}
+
+fn parse_poll_interval(key: &str, value: &str) -> Result<u64, CliError> {
+    let value = parse_u64(key, value)?;
+    ensure_poll_interval_secs(value)?;
+    Ok(value)
+}
+
+fn ensure_poll_interval_secs(value: u64) -> Result<(), CliError> {
+    super::polling::ensure_poll_interval(std::time::Duration::from_secs(value))
+}
+
+pub fn ensure_poll_timeout_secs(value: u64) -> Result<(), CliError> {
+    super::polling::ensure_poll_timeout(std::time::Duration::from_secs(value))
+}
+
 fn parse_bool(key: &str, value: &str) -> Result<bool, CliError> {
     match value {
         "true" => Ok(true),
@@ -220,6 +245,8 @@ fn parse_bool(key: &str, value: &str) -> Result<bool, CliError> {
 
 #[cfg(test)]
 mod tests {
+    use crate::core::CliError;
+
     use super::{AppConfig, StoredConfig};
 
     #[test]
@@ -349,5 +376,36 @@ mod tests {
 
         let _ = std::fs::remove_file(path);
         assert!(err.to_string().contains("parse config"));
+    }
+
+    #[test]
+    fn env_override_rejects_zero_poll_timeout() {
+        let error =
+            AppConfig::load_from_path(None, [("SUNO_POLL_TIMEOUT_SECS".into(), "0".into())])
+                .expect_err("zero poll timeout must be rejected");
+
+        assert!(matches!(error, CliError::Config(message) if message.contains("greater than 0")));
+    }
+
+    #[test]
+    fn env_override_rejects_zero_poll_interval() {
+        let error =
+            AppConfig::load_from_path(None, [("SUNO_POLL_INTERVAL_SECS".into(), "0".into())])
+                .expect_err("zero poll interval must be rejected");
+
+        assert!(
+            matches!(error, CliError::Config(message) if message.contains("poll interval") && message.contains("greater than 0"))
+        );
+    }
+
+    #[test]
+    fn env_override_rejects_poll_timeout_that_overflows_instant() {
+        let error = AppConfig::load_from_path(
+            None,
+            [("SUNO_POLL_TIMEOUT_SECS".into(), u64::MAX.to_string())],
+        )
+        .expect_err("overflowing poll timeout must be rejected");
+
+        assert!(matches!(error, CliError::Config(message) if message.contains("too large")));
     }
 }

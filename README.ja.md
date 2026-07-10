@@ -127,6 +127,9 @@ sunox clip concat         複数 clip を 1 曲に結合
 sunox clip cover          別スタイルまたは別モデルで cover を作成
 sunox clip remaster       別モデルで remaster
 sunox clip speed          再生速度を調整
+sunox clip reverse        音声を反転
+sunox clip crop           一部を切り出す、または中間部分を削除
+sunox clip fade           フェードイン/アウトを追加
 sunox clip stems          既存 clip から stems を生成
 ```
 
@@ -134,6 +137,7 @@ sunox clip stems          既存 clip から stems を生成
 
 ```text
 sunox clip list
+sunox clip list --trashed
 sunox clip list --liked --public --sort popular
 sunox clip search <query>
 sunox clip info <id>
@@ -151,11 +155,14 @@ sunox models
 ### 管理
 
 ```text
-sunox download <ids>
-sunox clip download <ids>
+sunox download <ids>       デフォルトは CDN MP3。明示的に --format mp3|m4a|wav|opus を指定可能
+sunox clip download <ids>  download と同等の agent/高度なコマンド
 sunox clip upload <file>
+sunox clip upload-status <upload_id>
 sunox clip delete <ids> -y
 sunox clip restore <ids>
+sunox clip purge <ids> -y       # ゴミ箱内の曲を完全削除（元に戻せません）
+sunox clip empty-trash -y       # ゴミ箱を空にする（元に戻せません）
 sunox clip like <ids>
 sunox clip dislike <ids>
 sunox clip set <id>
@@ -257,11 +264,18 @@ sunox playlist reorder <playlist_id> --clip-id <clip_id> --index 0
 ### Clip 変換
 
 ```bash
+# 以下のコマンドは submitted/processing の clip を返す場合があります。後続処理の前に wait します
 sunox clip cover <clip_id> --tags "jazz, smooth piano" --model v5.5
 sunox clip remaster <clip_id> --model v5.5
 sunox clip speed <clip_id> --multiplier 0.94
+sunox clip reverse <clip_id>
 sunox clip wait <new_clip_id>
 sunox download <new_clip_id> --output ./remastered/
+
+# crop/fade は結果 clip の complete まで内部で待つため、再度 wait する必要はありません
+sunox clip crop <clip_id> --start 12.5 --end 74.0
+sunox clip crop <clip_id> --start 30.0 --end 45.0 --remove-section
+sunox clip fade <clip_id> --in 2.0 --out 78.5
 ```
 
 ### 歌詞付きダウンロード
@@ -273,8 +287,14 @@ MP3 ダウンロード時に次の ID3 タグを自動で埋め込みます。
 
 ```bash
 sunox download <id1> <id2> --output ./songs/
+
+# 同名の既存ファイルを上書きする場合だけ --force を明示する
+sunox download <id1> --output ./songs/ --force
+sunox download <id1> --format wav --output ./songs/
 sunox download <id1> --video --output ./videos/
 ```
+
+ファイル名は `title-slug-clipid8.<ext>` 形式です。出力ディレクトリは自動作成され、既存ファイルはデフォルトで保持されます。上書きするのは `--force` を明示した場合だけです。
 
 ### 音声アップロード
 
@@ -282,6 +302,7 @@ sunox download <id1> --video --output ./videos/
 sunox clip upload ./demo.mp3 --title "Demo Upload"
 sunox clip upload ./demo.wav --lyrics-file lyrics.txt --timeout 900
 sunox clip upload ./vocal-stem.wav --stem-mix --title "Vocal stem"
+sunox clip upload-status <upload_id> --json  # 読み取り専用。upload mutation は再実行しません
 ```
 
 ## モデル
@@ -305,7 +326,8 @@ Remaster models: v5.5 = chirp-flounder, v5 = chirp-carp, v4.5+ = chirp-bass。
 - stdout が pipe されると自動で JSON になります。
 - 進捗とエラーは stderr に出るため JSON を汚しません。
 - Suno の書き込み操作はデフォルトでアカウント単位に直列実行されます。ユーザーが同一アカウントの並行書き込みを明示的に許可していない限り、`sunox config set serial_mutations false`、`-c serial_mutations=false`、または `--parallel` は使わないでください。
-- 通常の音声確認では既存の clip メディアを使います。`sunox clip info <id> --json` は `audio_url` に加えて `attribution`、`comments`、`direct_children_count`、`similar_clips` を返します。認証やレート制限以外の補足読み取りが失敗しても base clip は返り、JSON には `supplemental_errors` が入ります。認証とレート制限のエラーは通常どおり中断します。`sunox clip download` は現在 `clip.audio_url` から MP3 をダウンロードします（`--video` は `clip.video_url` がある場合のみ）。`sunox clip stems` は生成ベースの stems 抽出であり、Suno Web の Pro Get Stems export とは別物です。Suno Web には WAV Audio、Get Stems、Video などの Pro ダウンロード項目もありますが、CLI が対応を報告し、かつユーザーがその形式を明示した場合だけ使ってください。`playlist remove` が `partial_mutation` を返した場合は、再試行前に `error.details.succeeded_clip_ids`、`error.details.failed`、`error.details.not_attempted_clip_ids` を確認してください。
+- 通常の音声確認では既存の clip メディアを使います。`sunox clip info <id> --json` は `audio_url` に加えて `attribution`、`comments`、`direct_children_count`、`similar_clips` を返します。認証やレート制限以外の補足読み取りが失敗しても base clip は返り、JSON には `supplemental_errors` が入ります。認証とレート制限のエラーは通常どおり中断します。`sunox clip download` はデフォルトでその `audio_url` の CDN MP3 をダウンロードして歌詞を埋め込みます。明示的な `--format mp3|m4a|wav|opus` は Suno の公式形式を要求し、`--video` は `clip.video_url` がある場合のみ使います。`sunox clip stems` は生成ベースの stems 抽出であり、Suno Web の Pro Get Stems export とは別物です。ユーザーが形式、stems、video を明示しない限り、agent は勝手に切り替えないでください。`--quiet` はダウンロード進捗と通常の状態出力を抑制します。バッチダウンロードが `partial_download` を返した場合は、`error.details.succeeded`、`error.details.failed`、`error.details.not_attempted_clip_ids` を確認し、必要な ID だけを再試行してください。`playlist remove` または複数 clip の publish/reaction 操作が `partial_mutation` を返した場合は、再試行前に `error.details.succeeded_clip_ids`、`error.details.failed`、`error.details.not_attempted_clip_ids` を確認してください。
+- Playlist create/set、ローカル画像 upload、clip cover 更新、音声 upload は複数ステップの workflow です。途中の失敗は resource ID、`completed_steps`、`failed.step/code/message`、`recovery` を含む `partial_mutation` を返します。`recovery.resumable=true` の場合だけ構造化された回復コマンドに従い、false の mutation は再実行しないでください。音声 file は stream 送信され、metadata 変更時は要求した field が見えるまで poll します。`clip upload-status` は読み取り専用です。
 - ユーザーが明示しない限り、公開、`--captcha` の強制、認証情報の出力、削除系コマンドの実行は行わないでください。削除系コマンドには `-y/--yes` が必須です。
 - エラーには推奨アクションが含まれます。
 
@@ -320,7 +342,7 @@ sunox agent-info --json
 | Code | 意味 | 推奨アクション |
 |---|---|---|
 | 0 | 成功 | 続行 |
-| 1 | 実行時、Web endpoint、または部分 mutation エラー | `error.code` と `error.details` を確認してから再試行 |
+| 1 | 実行時、Web endpoint、部分 mutation、または部分 download エラー | `error.code` と `error.details` を確認してから再試行 |
 | 2 | 設定エラー | 設定を修正。盲目的に再試行しない |
 | 3 | 認証エラー | `sunox login` を実行 |
 | 4 | rate limit | 30-60 秒待って再試行 |

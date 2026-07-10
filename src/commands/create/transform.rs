@@ -1,5 +1,8 @@
 use crate::app::AppContext;
-use crate::cli::{ConcatArgs, CoverArgs, ModelVersion, RemasterArgs, SpeedArgs, StemsArgs};
+use crate::cli::{
+    ConcatArgs, CoverArgs, CropArgs, FadeArgs, ModelVersion, RemasterArgs, ReverseArgs, SpeedArgs,
+    StemsArgs,
+};
 use crate::core::{AppConfig, CliError};
 use crate::output::{self, OutputFormat};
 
@@ -86,6 +89,121 @@ pub async fn speed(args: SpeedArgs, ctx: &AppContext) -> Result<(), CliError> {
         .await?;
     output_clips(&[clip], ctx);
     Ok(())
+}
+
+pub async fn reverse(args: ReverseArgs, ctx: &AppContext) -> Result<(), CliError> {
+    let client = ctx.client().await?;
+    let title = match args.title {
+        Some(title) => title,
+        None => {
+            let source = require_source_clip(&client, &args.clip_id).await?;
+            format!("{} (Reversed)", source.title)
+        }
+    };
+    let _mutation_guard = ctx.acquire_mutation_lock()?;
+    let clip = client.reverse_clip(&args.clip_id, &title).await?;
+    output_clips(&[clip], ctx);
+    Ok(())
+}
+
+pub async fn crop(args: CropArgs, ctx: &AppContext) -> Result<(), CliError> {
+    if !args.start.is_finite()
+        || !args.end.is_finite()
+        || args.start < 0.0
+        || args.end <= args.start
+    {
+        return Err(CliError::Config(
+            "--start and --end must be finite seconds with 0 <= start < end".into(),
+        ));
+    }
+
+    let client = ctx.client().await?;
+    let title = match args.title {
+        Some(title) => title,
+        None => {
+            let source = require_source_clip(&client, &args.clip_id).await?;
+            let suffix = if args.remove_section {
+                "Remove Section"
+            } else {
+                "Crop"
+            };
+            format!("{} ({suffix})", source.title)
+        }
+    };
+    let _mutation_guard = ctx.acquire_mutation_lock()?;
+    let polling = configured_polling(ctx);
+    let clip = client
+        .crop_clip(
+            &args.clip_id,
+            args.start,
+            args.end,
+            args.remove_section,
+            &title,
+            polling,
+        )
+        .await?;
+    output_clips(&[clip], ctx);
+    Ok(())
+}
+
+pub async fn fade(args: FadeArgs, ctx: &AppContext) -> Result<(), CliError> {
+    if args.fade_in.is_none() && args.fade_out.is_none() {
+        return Err(CliError::Config(
+            "provide --in <seconds>, --out <seconds>, or both".into(),
+        ));
+    }
+    if args
+        .fade_in
+        .into_iter()
+        .chain(args.fade_out)
+        .any(|value| !value.is_finite() || value < 0.0)
+    {
+        return Err(CliError::Config(
+            "fade times must be finite non-negative seconds".into(),
+        ));
+    }
+
+    let client = ctx.client().await?;
+    let title = match args.title {
+        Some(title) => title,
+        None => {
+            let source = require_source_clip(&client, &args.clip_id).await?;
+            let suffix = match (args.fade_in.is_some(), args.fade_out.is_some()) {
+                (true, true) => "Fade",
+                (true, false) => "Fade In",
+                (false, true) => "Fade Out",
+                (false, false) => unreachable!("validated above"),
+            };
+            format!("{} ({suffix})", source.title)
+        }
+    };
+    let _mutation_guard = ctx.acquire_mutation_lock()?;
+    let polling = configured_polling(ctx);
+    let clip = client
+        .fade_clip(&args.clip_id, args.fade_in, args.fade_out, &title, polling)
+        .await?;
+    output_clips(&[clip], ctx);
+    Ok(())
+}
+
+fn configured_polling(ctx: &AppContext) -> crate::api::PollingOptions {
+    crate::api::PollingOptions {
+        timeout: std::time::Duration::from_secs(ctx.config.poll_timeout_secs),
+        interval: std::time::Duration::from_secs(ctx.config.poll_interval_secs.max(1)),
+    }
+}
+
+async fn require_source_clip(
+    client: &crate::api::SunoClient,
+    clip_id: &str,
+) -> Result<crate::api::types::Clip, CliError> {
+    let requested = [clip_id.to_string()];
+    client
+        .get_clips(&requested)
+        .await?
+        .into_iter()
+        .find(|clip| clip.id == clip_id)
+        .ok_or_else(|| CliError::NotFound(format!("clip: {clip_id}")))
 }
 
 pub async fn stems(args: StemsArgs, ctx: &AppContext) -> Result<(), CliError> {

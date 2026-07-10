@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use super::SunoClient;
 use super::types::{Clip, GenerateRequest, GenerateResponse};
 use crate::core::CliError;
@@ -55,7 +57,11 @@ impl SunoClient {
                 .await?;
             all_clips.extend(clips);
         }
-        Ok(all_clips)
+        let mut clips_by_id = all_clips
+            .into_iter()
+            .map(|clip| (clip.id.clone(), clip))
+            .collect::<HashMap<_, _>>();
+        Ok(ids.iter().filter_map(|id| clips_by_id.remove(id)).collect())
     }
 
     async fn generation_request_body(

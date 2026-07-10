@@ -316,3 +316,53 @@ pub struct SpeedArgs {
     #[arg(long)]
     pub title: Option<String>,
 }
+
+#[derive(clap::Args)]
+pub struct ReverseArgs {
+    /// Clip ID to reverse
+    pub clip_id: String,
+
+    /// Title for the generated reversed clip
+    #[arg(long)]
+    pub title: Option<String>,
+}
+
+#[derive(clap::Args)]
+pub struct CropArgs {
+    /// Clip ID to crop
+    pub clip_id: String,
+
+    /// Start time in seconds
+    #[arg(long)]
+    pub start: f64,
+
+    /// End time in seconds
+    #[arg(long)]
+    pub end: f64,
+
+    /// Remove the selected section instead of keeping only the selected section
+    #[arg(long)]
+    pub remove_section: bool,
+
+    /// Title for the generated edited clip
+    #[arg(long)]
+    pub title: Option<String>,
+}
+
+#[derive(clap::Args)]
+pub struct FadeArgs {
+    /// Clip ID to fade
+    pub clip_id: String,
+
+    /// Fade in until this timestamp, in seconds
+    #[arg(long = "in")]
+    pub fade_in: Option<f64>,
+
+    /// Fade out starting at this timestamp, in seconds
+    #[arg(long = "out")]
+    pub fade_out: Option<f64>,
+
+    /// Title for the generated faded clip
+    #[arg(long)]
+    pub title: Option<String>,
+}

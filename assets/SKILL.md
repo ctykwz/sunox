@@ -1,16 +1,16 @@
 ---
 name: sunox
-description: Generate AI music from the terminal using the `sunox` CLI. Use when user asks to "generate a song", "make music", "create AI music", "make a track", "generate audio", or wants to programmatically use Suno web workflows for custom lyrics, tags, voice personas, playlists, covers, remasters, speed edits, or generation-backed stems. Also use when downloading Suno songs (auto-embeds lyrics into MP3). Run `sunox agent-info` for the full machine-readable capability dump. NOT for writing song prompts/lyrics without generating audio.
+description: Generate AI music from the terminal using the `sunox` CLI. Use when user asks to "generate a song", "make music", "create AI music", "make a track", "generate audio", or wants to programmatically use Suno web workflows for custom lyrics, tags, voice personas, playlists, covers, remasters, speed/reverse/crop/fade edits, or generation-backed stems. Also use when downloading Suno songs (default MP3 auto-embeds lyrics; explicit m4a/wav/opus supported). Run `sunox agent-info` for the full machine-readable capability dump. NOT for writing song prompts/lyrics without generating audio.
 ---
 
 # sunox CLI
 
-Generate AI music from your terminal using direct Suno web workflows, including custom lyrics, style tags, voice personas, playlists, covers, remasters, speed edits, stems extraction, and word-level timed lyrics.
+Generate AI music from your terminal using direct Suno web workflows, including custom lyrics, style tags, voice personas, playlists, covers, remasters, speed/reverse/crop/fade edits, stems extraction, and word-level timed lyrics.
 
 ## When to use
 
 - User wants to **generate** AI music programmatically through the sunox CLI
-- User wants to **download** Suno songs (auto-embeds USLT + SYLT lyrics into MP3 ID3 tags)
+- User wants to **download** Suno songs (default MP3 auto-embeds USLT + SYLT lyrics into ID3 tags; explicit m4a/wav/opus supported)
 - User wants to **batch generate**, **script**, or **integrate** Suno into a music workflow
 - User mentions Suno, AI music generation, or wants to control Suno parameters from the terminal
 
@@ -74,24 +74,28 @@ Risk control defaults for agents:
   explicitly asks for parallel writes or has disabled serial mutations.
 - do not publish clips, playlists, or personas, or make them public, unless the
   user explicitly asks.
-- do not run delete, trash, purge, or similar destructive commands unless the
-  user explicitly asks. When explicitly requested, pass `-y/--yes` because
-  destructive commands require it.
+- do not run delete, trash, purge, `empty-trash`, or similar destructive commands
+  unless the user explicitly asks. `clip purge` and `clip empty-trash` are
+  irreversible. When explicitly requested, pass `-y/--yes` because destructive
+  commands require it.
 - do not force `--captcha` unless the user asks for the browser-backed solver;
   prefer normal challenge preflight and externally supplied `--token` when
   provided.
 - never print or commit cookies, Clerk values, JWTs, challenge tokens, or other
   auth material.
 
-Treat generation and generation-backed edits as asynchronous workflows. After
-`sunox create`, `sunox clip cover`, `sunox clip extend`, `sunox clip concat`,
-`sunox clip stems`, `sunox clip remaster`, or `sunox clip speed` returns a
-new/processing clip ID, call `sunox clip wait <clip_id> --json` before
-download, quality filtering, or playlist decisions unless the user only asked
-to submit.
+Treat commands that return new or processing clips as asynchronous workflows.
+After `sunox create`, `sunox clip cover`, `sunox clip extend`, `sunox clip
+concat`, `sunox clip stems`, `sunox clip remaster`, `sunox clip speed`, or
+`sunox clip reverse` returns a new/processing clip ID, call `sunox clip wait
+<clip_id> --json` before download, quality filtering, or playlist decisions
+unless the user only asked to submit. `sunox clip crop` and `sunox clip fade`
+already wait for the resulting clip to complete, so a successful response from
+either command does not require another `clip wait`.
 
-For simple audio analysis, prefer the existing CDN media: read `audio_url` from
-`sunox clip info <clip_id> --json` or use `sunox clip download`. `clip info`
+For simple audio analysis, prefer the existing media: read `audio_url` from
+`sunox clip info <clip_id> --json` or use the default CDN `sunox clip download`.
+`clip info`
 also returns song-page context such as attribution, comments,
 `direct_children_count`, and `similar_clips` in JSON. If a non-auth,
 non-rate-limit supplemental read fails, the base clip still returns and JSON
@@ -99,12 +103,15 @@ includes `supplemental_errors`; auth and rate-limit errors still abort
 normally. Do not trigger new Suno generation/export work just to inspect audio.
 Reserve WAV, stems, or Studio export workflows for explicit deep-analysis,
 lossless, or stem requests.
-The current CLI download supports MP3 audio from `clip.audio_url`, and `--video`
-from `clip.video_url` when present. `sunox clip stems` performs
-generation-backed stems extraction; it is not the same as Suno Web Pro Get Stems
-export. Suno Web exposes Pro download choices such as WAV Audio, Get Stems, and
-Video; do not assume those exports are available through this CLI unless `sunox
-agent-info --json` reports a supported command.
+The current CLI download defaults to the existing `clip.audio_url` CDN MP3 and
+supports explicit `--format mp3|m4a|wav|opus` through Suno's official download
+endpoints; `--video` uses `clip.video_url` when present.
+`sunox clip stems` performs generation-backed stems extraction; it is not the
+same as Suno Web Pro Get Stems export.
+
+Download output directories are created automatically. Existing local files are
+preserved by default; only pass `--force` when the user explicitly asks to
+replace the matching downloaded file.
 
 ## Human commands
 
@@ -148,6 +155,7 @@ sunox clip download <clip_id_1> <clip_id_2> --output ./songs/
 
 # Upload a local audio file into the Suno library
 sunox clip upload ./demo.mp3 --title "Demo Upload"
+sunox clip upload-status <upload_id> --json
 
 # Lyrics only — FREE, uses no credits
 sunox lyrics --prompt "song about coffee at sunrise"
@@ -178,6 +186,7 @@ sunox persona purge <persona_id> -y       # only when the user explicitly asks f
 # List / search your library
 sunox clip list
 sunox clip list --cursor <next_cursor>
+sunox clip list --trashed
 sunox clip list --liked --public --sort popular
 sunox clip search "rainy"
 
@@ -204,21 +213,30 @@ sunox clip remaster <clip_id> --model v5.5
 # Adjust playback speed while keeping pitch
 sunox clip speed <clip_id> --multiplier 0.94
 
+# Non-generation edit actions
+sunox clip reverse <clip_id>
+sunox clip crop <clip_id> --start 12.5 --end 74.0
+sunox clip crop <clip_id> --start 30.0 --end 45.0 --remove-section
+sunox clip fade <clip_id> --in 2.0 --out 78.5
+
 # Extract stems (vocals + instruments)
 sunox clip stems <clip_id>
 
 # Word-level timed lyrics (LRC format for synced display)
 sunox clip timed-lyrics <clip_id> --lrc > song.lrc
 
-# Download with auto-embedded synced lyrics
+# Download with auto-embedded synced lyrics by default, or request a format
 sunox download <clip_id_1> <clip_id_2> --output ./songs/
+sunox clip download <clip_id> --format wav --output ./songs/
 
 # Manage clips
 sunox clip set <clip_id> --title "New Title" --lyrics-file updated.txt
 sunox clip publish <clip_id_1> <clip_id_2>          # only when the user explicitly asks to make public
 sunox clip publish <clip_id_1> --private            # make private
-sunox clip delete <clip_id> -y
-sunox clip restore <clip_id>
+sunox clip delete <clip_id> -y               # move to trash
+sunox clip restore <clip_id>                  # undo trash
+sunox clip purge <clip_id> -y                 # irreversible permanent delete
+sunox clip empty-trash -y                     # irreversible: delete every trashed clip
 sunox clip like <clip_id>
 sunox clip like <clip_id> --clear
 sunox clip dislike <clip_id>
@@ -270,8 +288,12 @@ Remaster models: v5.5 = chirp-flounder, v5 = chirp-carp, v4.5+ = chirp-bass.
 - Every command supports `--json`. JSON is **auto-detected** when stdout is piped.
 - Progress messages and errors go to **stderr** so they don't pollute JSON pipelines.
 - Suno write commands are account-scoped serial by default; do not pass --parallel or disable `serial_mutations` unless the user explicitly allows same-account concurrent writes.
-- For simple audio analysis, prefer clip `audio_url` CDN media from `sunox clip info <clip_id> --json` or use `sunox clip download`; `clip info` also includes `attribution`, `comments`, `direct_children_count`, `similar_clips`, and non-fatal `supplemental_errors`. Current CLI download supports MP3 audio by default. Reserve WAV, stems, Pro video, or Studio export workflows for explicit deep-analysis/lossless requests and only when the CLI exposes support.
+- For simple audio analysis, prefer clip `audio_url` CDN media from `sunox clip info <clip_id> --json` or use the default CDN `sunox clip download`; `clip info` also includes `attribution`, `comments`, `direct_children_count`, `similar_clips`, and non-fatal `supplemental_errors`. Reserve explicit `--format`, stems, Pro video, or Studio export workflows for requests that name that format or need deep/lossless analysis.
+- Download output directories are created automatically. Do not pass `--force` unless the user explicitly requests replacing an existing local download; ordinary downloads refuse to overwrite a matching file.
+- `--quiet` suppresses download progress and ordinary status output. A batch download that has already written any output and then fails returns `partial_download`; inspect `error.details.succeeded`, `error.details.failed`, and `error.details.not_attempted_clip_ids`, then retry only the required IDs.
 - `playlist remove` submits one remove request per clip. If a later clip fails, JSON errors use code `partial_mutation`; inspect `error.details.succeeded_clip_ids`, `error.details.failed`, and `error.details.not_attempted_clip_ids` before retrying.
+- Multi-clip `publish`, `unpublish`, `like`, and `dislike` also run serially. If a later clip fails, inspect the same `partial_mutation` progress fields and retry only failed or unattempted IDs.
+- Multi-step playlist create/set, local image upload, clip cover update, and audio upload failures use `partial_mutation` with resource IDs, `completed_steps`, `failed.step/code/message`, and `recovery`. Follow `recovery.command` only when `recovery.resumable=true`; never replay a mutation marked false. Use `sunox clip upload-status <upload_id> --json` for a read-only audio upload status check.
 - Do not publish, make public, or run destructive commands unless the user explicitly asks for that action; destructive commands require `-y/--yes`.
 - Errors include actionable suggestions in the JSON envelope.
 
@@ -286,7 +308,7 @@ sunox clip info <clip_id> --json | jq '.data.audio_url'
 | Code | Meaning | What the agent should do |
 |---|---|---|
 | 0 | Success | Continue |
-| 1 | Runtime, web endpoint, or partial mutation error | Inspect `error.code` and `error.details` before retrying |
+| 1 | Runtime, web endpoint, partial mutation or partial download error | Inspect `error.code` and `error.details` before retrying |
 | 2 | Config error | Fix config, do not retry blindly |
 | 3 | Auth error | Run `sunox login` |
 | 4 | Rate limited | Wait 30–60s, then retry |
@@ -310,6 +332,10 @@ sunox clip extend <clip_id> --at 60.0 --lyrics "[Verse 2]\n..."
 sunox clip wait <new_clip_id>
 sunox clip concat <new_clip_id>           # stitch into a full song
 ```
+
+Use `clip concat` with a source that has original Suno generation history. Do
+not assume crop, fade, reverse, or other edited results are valid inputs: Suno
+can reject them with `Bad history.`
 
 ### Batch download yesterday's songs as JSON, then pull MP3s
 
@@ -336,11 +362,11 @@ sunox clip download $ids --output ./archive/
   submit also marks `override_fields=["tags"]`.
 - Commands that submit through `/api/generate/v2-web/` preflight `POST /api/c/check` with `ctype=generation`; if Suno reports a challenge and stored Clerk refresh material exists, Sunox refreshes the JWT once and repeats the preflight before surfacing the challenge. When no challenge is required, submit uses `token=null` and `token_provider=null`.
 - If Suno requires a challenge, prefer `--token <solved>` when available; use `--captcha` only to force the built-in browser-backed solver.
-- Generation paths (normal, describe, voice persona, cover, extend, generation-backed stems) use `/api/generate/v2-web/`; create, cover, extend, and stems expose `--token`, `--captcha`, and `--no-captcha`. Extend fetches the source clip first; when `GET /api/feed/?ids` omits source style metadata, it searches feed/v3 by source title and merges the exact source id. It defaults `title`, `tags`, `negative_tags`, and `make_instrumental` from the source when available; use `--title`, `--tags`, `--exclude`, `--instrumental`, or `--no-instrumental` to override. Remaster and speed use their current web edit/generation routes. `sunox clip list` supports query-only filters such as `--liked`, `--public`, `--upload`, `--cover`, `--extend`, and `--sort popular`; this is not a library sync workflow. `sunox clip stems` is not the same as Suno Web Pro Get Stems export. You usually only need the subcommands.
+- Generation paths (normal, describe, voice persona, cover, extend, generation-backed stems) use `/api/generate/v2-web/`; create, cover, extend, and stems expose `--token`, `--captcha`, and `--no-captcha`. Cover fetches the source clip and submits its title because Suno requires a string `title` for this variant. Extend fetches the source clip first; when `GET /api/feed/?ids` omits source style metadata, it searches feed/v3 by source title and merges the exact source id. It defaults `title`, `tags`, `negative_tags`, and `make_instrumental` from the source when available; use `--title`, `--tags`, `--exclude`, `--instrumental`, or `--no-instrumental` to override. Remaster and speed use their current web edit/generation routes. `sunox clip list` supports query-only filters such as `--liked`, `--public`, `--upload`, `--cover`, `--extend`, and `--sort popular`; this is not a library sync workflow. `sunox clip stems` is not the same as Suno Web Pro Get Stems export. You usually only need the subcommands.
 - Persona list/detail/clips/create/set/processed-clip/publish/unpublish/love/unlove/toggle-love/delete/restore/purge are available through `sunox persona ...`.
 - Playlist create/list/detail/metadata/add/remove/publish/reorder/save/unsave/like/dislike/restore/delete are available through `sunox playlist ...`; use `playlist set <id> --image-file <path>` for local cover uploads.
-- Clip delete/restore and like/dislike are available through `sunox clip delete`, `sunox clip restore`, `sunox clip like`, and `sunox clip dislike`. `--clear` removes the selected reaction.
-- `sunox clip upload <file>` uploads local audio through Suno's presigned S3 flow, waits for processing, initializes a clip, and can set title/lyrics metadata.
+- Clip delete/restore/purge and like/dislike are available through `sunox clip delete`, `sunox clip restore`, `sunox clip purge`, `sunox clip like`, and `sunox clip dislike`. `sunox clip empty-trash -y` permanently deletes every trashed clip. Purge and empty-trash are irreversible and require an explicit user request. `--clear` removes the selected reaction.
+- `sunox clip upload <file>` uploads local audio through Suno's presigned S3 flow, waits for processing, initializes a clip, and can set title/lyrics metadata. `sunox clip upload-status <upload_id>` only reads an existing upload's processing status.
 - `sunox config set <key> <value>` persists local defaults; `SUNO_*` environment variables override persisted config.
 - When the CLI returns `schema_drift` (Suno changed its web schema), run `sunox update` to pull the latest binary from GitHub Releases.
 - When unsure about flags, run `sunox <command> --help` or `sunox agent-info`.

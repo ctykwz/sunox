@@ -46,7 +46,7 @@ pub struct FinishAudioUploadRequest {
     pub upload_filename: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct AudioUploadStatus {
     pub id: Option<String>,
     pub status: Option<String>,

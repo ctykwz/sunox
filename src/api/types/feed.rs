@@ -84,6 +84,25 @@ pub struct FeedSort {
 }
 
 impl FeedFilters {
+    pub fn trashed() -> Self {
+        Self {
+            search_text: None,
+            disliked: None,
+            liked: None,
+            public: None,
+            upload: None,
+            trashed: Some("True".to_string()),
+            full_song: None,
+            from_studio_project: None,
+            stem: None,
+            cover: None,
+            extend: None,
+            workspace: None,
+            user: None,
+            sort: None,
+        }
+    }
+
     pub fn default_workspace() -> Self {
         Self {
             search_text: None,
@@ -257,5 +276,13 @@ mod tests {
         assert_eq!(json["filters"]["extend"]["presence"], "True");
         assert_eq!(json["filters"]["sort"]["sortBy"], "upvote_count");
         assert_eq!(json["filters"]["sort"]["sortDirection"], "desc");
+    }
+
+    #[test]
+    fn trashed_feed_filter_overrides_the_default_active_library_filter() {
+        let filters = FeedFilters::trashed();
+        let json = serde_json::to_value(filters).expect("feed filters json");
+
+        assert_eq!(json, serde_json::json!({ "trashed": "True" }));
     }
 }

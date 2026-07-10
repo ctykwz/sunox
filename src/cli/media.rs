@@ -1,3 +1,5 @@
+pub use crate::api::download::DownloadFormat;
+
 #[derive(clap::Args)]
 pub struct UploadArgs {
     /// Local audio file to upload
@@ -29,6 +31,12 @@ pub struct UploadArgs {
 }
 
 #[derive(clap::Args)]
+pub struct UploadStatusArgs {
+    /// Suno audio upload ID
+    pub upload_id: String,
+}
+
+#[derive(clap::Args)]
 pub struct DownloadArgs {
     /// Clip ID(s) to download
     pub ids: Vec<String>,
@@ -37,9 +45,17 @@ pub struct DownloadArgs {
     #[arg(short, long)]
     pub output: Option<String>,
 
+    /// Replace an existing downloaded file with the same clip ID and format
+    #[arg(long)]
+    pub force: bool,
+
     /// Download video instead of audio
     #[arg(long)]
     pub video: bool,
+
+    /// Audio format to download through Suno's web download endpoints
+    #[arg(long, value_enum)]
+    pub format: Option<DownloadFormat>,
 }
 
 #[derive(clap::Args)]

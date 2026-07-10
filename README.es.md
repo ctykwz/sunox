@@ -127,6 +127,9 @@ sunox clip concat         Unir clips en una canción completa
 sunox clip cover          Crear una cover con otro estilo o modelo
 sunox clip remaster       Remasterizar con otro modelo
 sunox clip speed          Ajustar la velocidad de reproducción
+sunox clip reverse        Invertir el audio
+sunox clip crop           Recortar a una sección o quitar una sección
+sunox clip fade           Añadir fundido de entrada/salida
 sunox clip stems          Generar stems desde un clip existente
 ```
 
@@ -134,6 +137,7 @@ sunox clip stems          Generar stems desde un clip existente
 
 ```text
 sunox clip list
+sunox clip list --trashed
 sunox clip list --liked --public --sort popular
 sunox clip search <query>
 sunox clip info <id>
@@ -151,11 +155,14 @@ sunox models
 ### Gestionar recursos
 
 ```text
-sunox download <ids>
-sunox clip download <ids>
+sunox download <ids>       MP3 CDN por defecto; --format mp3|m4a|wav|opus es explícito
+sunox clip download <ids>  Equivalente avanzado/agent de download
 sunox clip upload <file>
+sunox clip upload-status <upload_id>
 sunox clip delete <ids> -y
 sunox clip restore <ids>
+sunox clip purge <ids> -y       # elimina canciones de la papelera de forma permanente
+sunox clip empty-trash -y       # vacía la papelera de forma irreversible
 sunox clip like <ids>
 sunox clip dislike <ids>
 sunox clip set <id>
@@ -257,11 +264,18 @@ sunox playlist reorder <playlist_id> --clip-id <clip_id> --index 0
 ### Transformaciones de clips
 
 ```bash
+# Estos comandos pueden devolver un clip submitted/processing; espera antes de continuar
 sunox clip cover <clip_id> --tags "jazz, smooth piano" --model v5.5
 sunox clip remaster <clip_id> --model v5.5
 sunox clip speed <clip_id> --multiplier 0.94
+sunox clip reverse <clip_id>
 sunox clip wait <new_clip_id>
 sunox download <new_clip_id> --output ./remastered/
+
+# crop/fade ya esperan a que el clip resultante esté complete; no requieren otro wait
+sunox clip crop <clip_id> --start 12.5 --end 74.0
+sunox clip crop <clip_id> --start 30.0 --end 45.0 --remove-section
+sunox clip fade <clip_id> --in 2.0 --out 78.5
 ```
 
 ### Descargar e integrar letras
@@ -273,8 +287,14 @@ Al descargar MP3, `sunox` escribe automáticamente:
 
 ```bash
 sunox download <id1> <id2> --output ./songs/
+
+# Usa --force solo para reemplazar explícitamente un archivo existente
+sunox download <id1> --output ./songs/ --force
+sunox download <id1> --format wav --output ./songs/
 sunox download <id1> --video --output ./videos/
 ```
+
+Los archivos usan el formato `title-slug-clipid8.<ext>`. Los directorios de salida se crean automáticamente y los archivos existentes se conservan salvo con `--force`.
 
 ### Subir audio
 
@@ -282,6 +302,7 @@ sunox download <id1> --video --output ./videos/
 sunox clip upload ./demo.mp3 --title "Demo Upload"
 sunox clip upload ./demo.wav --lyrics-file lyrics.txt --timeout 900
 sunox clip upload ./vocal-stem.wav --stem-mix --title "Vocal stem"
+sunox clip upload-status <upload_id> --json  # solo lectura; no repite la mutación
 ```
 
 ## Modelos
@@ -305,7 +326,8 @@ Modelos de remaster: v5.5 = chirp-flounder, v5 = chirp-carp, v4.5+ = chirp-bass.
 - Cuando stdout está redirigido, se activa JSON automáticamente.
 - El progreso y los errores van a stderr para no contaminar el JSON.
 - Las escrituras Suno se serializan por cuenta por defecto; no uses `sunox config set serial_mutations false`, `-c serial_mutations=false` ni `--parallel` salvo que el usuario permita explícitamente escrituras concurrentes en la misma cuenta.
-- Para una inspección de audio normal, usa el medio existente del clip: `sunox clip info <id> --json` expone `audio_url` y también `attribution`, `comments`, `direct_children_count` y `similar_clips`; si falla una lectura suplementaria sin ser un error de autenticación ni de límite de tasa, el clip base sigue devolviéndose con `supplemental_errors`. Los errores de autenticación y límite de tasa abortan normalmente. `sunox clip download` actualmente descarga MP3 desde `clip.audio_url` (`--video` usa `clip.video_url` cuando existe). `sunox clip stems` es extracción de stems basada en generación, distinta del export Pro Get Stems de Suno Web. Suno Web también muestra opciones Pro como WAV Audio, Get Stems y Video; los agentes solo deben usarlas cuando el CLI declare soporte y el usuario pida explícitamente ese formato. Si `playlist remove` devuelve `partial_mutation`, revisa `error.details.succeeded_clip_ids`, `error.details.failed` y `error.details.not_attempted_clip_ids` antes de reintentar.
+- Para una inspección de audio normal, usa el medio existente del clip: `sunox clip info <id> --json` expone `audio_url` y también `attribution`, `comments`, `direct_children_count` y `similar_clips`; si falla una lectura suplementaria sin ser un error de autenticación ni de límite de tasa, el clip base sigue devolviéndose con `supplemental_errors`. Los errores de autenticación y límite de tasa abortan normalmente. Por defecto, `sunox clip download` descarga el MP3 CDN de `audio_url` e incrusta letras; `--format mp3|m4a|wav|opus` solicita explícitamente el formato oficial de Suno y `--video` usa `clip.video_url` cuando existe. `sunox clip stems` es extracción de stems basada en generación, distinta del export Pro Get Stems de Suno Web. Los agentes solo deben solicitar un formato explícito, stems o video cuando el usuario lo pida. `--quiet` elimina el progreso de descarga y la salida de estado ordinaria. Si una descarga por lotes devuelve `partial_download`, revisa `error.details.succeeded`, `error.details.failed` y `error.details.not_attempted_clip_ids`, y vuelve a intentar solo los ID necesarios. Si `playlist remove` o una operación de publicación/reacción sobre varios clips devuelve `partial_mutation`, revisa `error.details.succeeded_clip_ids`, `error.details.failed` y `error.details.not_attempted_clip_ids` antes de reintentar.
+- La creación/edición de playlists, la subida de imágenes locales, las portadas y la subida de audio son flujos de varios pasos. Un fallo devuelve `partial_mutation` con identificadores, `completed_steps`, `failed.step/code/message` y `recovery`. Sigue el comando estructurado solo si `recovery.resumable=true` y nunca repitas una mutación marcada false. El audio se transmite por streaming y los metadatos se consultan hasta que los campos solicitados sean visibles. `clip upload-status` es estrictamente de solo lectura.
 - Sin una petición explícita del usuario, no publiques recursos, no fuerces `--captcha`, no imprimas material de autenticación y no ejecutes comandos destructivos; esos comandos requieren `-y/--yes`.
 - Las respuestas de error incluyen una acción sugerida.
 
@@ -320,7 +342,7 @@ Códigos de salida semánticos:
 | Código | Significado | Acción sugerida |
 |---|---|---|
 | 0 | Éxito | Continuar |
-| 1 | Error runtime, endpoint Web o mutación parcial | Revisar `error.code` y `error.details` antes de reintentar |
+| 1 | Error runtime, endpoint Web, mutación parcial o descarga parcial | Revisar `error.code` y `error.details` antes de reintentar |
 | 2 | Error de configuración | Corregir la config, no reintentar a ciegas |
 | 3 | Error de autenticación | Ejecutar `sunox login` |
 | 4 | Rate limit | Esperar 30-60 segundos |

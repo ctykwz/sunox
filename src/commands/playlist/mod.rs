@@ -9,7 +9,7 @@ use crate::cli::{
 };
 use crate::core::{CliError, ensure_clip_ids, ensure_destructive_confirmed};
 use crate::output::{self, OutputFormat};
-use crate::workflow::image_upload;
+use crate::workflow::{image_upload, playlist as playlist_workflow};
 
 pub async fn run(args: PlaylistArgs, ctx: &AppContext) -> Result<(), CliError> {
     match args.command {
@@ -65,19 +65,37 @@ async fn create(args: PlaylistCreateArgs, ctx: &AppContext) -> Result<(), CliErr
     } else {
         None
     };
-
-    let mut playlist = client
-        .create_playlist(
-            &args.name,
-            args.description.as_deref(),
-            args.image_url.as_deref(),
-        )
-        .await?;
-    if let Some(uploaded) = uploaded_cover {
-        playlist = client
-            .set_playlist_uploaded_cover(&playlist.id, &uploaded.upload_id)
-            .await?;
-    }
+    let image_url_upload_id = args
+        .image_url
+        .as_deref()
+        .and_then(crate::api::playlist::upload_id_from_suno_image_url);
+    let external_image_url = args
+        .image_url
+        .as_deref()
+        .filter(|_| image_url_upload_id.is_none());
+    let cover = uploaded_cover
+        .as_ref()
+        .map(|uploaded| {
+            playlist_workflow::CoverReference::uploaded(&uploaded.upload_id, &uploaded.image_url)
+        })
+        .or_else(|| {
+            image_url_upload_id
+                .as_deref()
+                .zip(args.image_url.as_deref())
+                .map(|(upload_id, image_url)| {
+                    playlist_workflow::CoverReference::existing(upload_id, image_url)
+                })
+        });
+    let playlist = playlist_workflow::create(
+        &client,
+        playlist_workflow::CreatePlaylistInput {
+            name: &args.name,
+            description: args.description.as_deref(),
+            external_image_url,
+            cover,
+        },
+    )
+    .await?;
     match ctx.fmt {
         OutputFormat::Json => output::json::success(&playlist),
         OutputFormat::Table => {
@@ -101,29 +119,46 @@ async fn set(args: PlaylistSetArgs, ctx: &AppContext) -> Result<(), CliError> {
 
     let _mutation_guard = ctx.acquire_mutation_lock()?;
     let client = ctx.client().await?;
-    let mut playlist =
-        if args.name.is_some() || args.description.is_some() || args.image_url.is_some() {
-            client
-                .set_playlist_metadata(
-                    &args.id,
-                    args.name.as_deref(),
-                    args.description.as_deref(),
-                    args.image_url.as_deref(),
-                )
-                .await?
-        } else {
-            client.get_playlist(&args.id).await?
-        };
-
-    if let Some(image_file) = args.image_file.as_deref() {
+    let uploaded_cover = if let Some(image_file) = args.image_file.as_deref() {
         if !ctx.quiet {
             eprintln!("Uploading playlist cover image...");
         }
-        let uploaded = image_upload::run(&client, image_file).await?;
-        playlist = client
-            .set_playlist_uploaded_cover(&args.id, &uploaded.upload_id)
-            .await?;
-    }
+        Some(image_upload::run(&client, image_file).await?)
+    } else {
+        None
+    };
+    let image_url_upload_id = args
+        .image_url
+        .as_deref()
+        .and_then(crate::api::playlist::upload_id_from_suno_image_url);
+    let external_image_url = args
+        .image_url
+        .as_deref()
+        .filter(|_| image_url_upload_id.is_none());
+    let cover = uploaded_cover
+        .as_ref()
+        .map(|uploaded| {
+            playlist_workflow::CoverReference::uploaded(&uploaded.upload_id, &uploaded.image_url)
+        })
+        .or_else(|| {
+            image_url_upload_id
+                .as_deref()
+                .zip(args.image_url.as_deref())
+                .map(|(upload_id, image_url)| {
+                    playlist_workflow::CoverReference::existing(upload_id, image_url)
+                })
+        });
+    let playlist = playlist_workflow::set(
+        &client,
+        playlist_workflow::SetPlaylistInput {
+            playlist_id: &args.id,
+            name: args.name.as_deref(),
+            description: args.description.as_deref(),
+            external_image_url,
+            cover,
+        },
+    )
+    .await?;
     match ctx.fmt {
         OutputFormat::Json => output::json::success(&playlist),
         OutputFormat::Table => {

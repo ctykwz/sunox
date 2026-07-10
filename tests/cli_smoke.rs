@@ -80,6 +80,7 @@ fn clip_list_help_exposes_web_feed_filters() {
         .stdout(predicate::str::contains("--liked"))
         .stdout(predicate::str::contains("--public"))
         .stdout(predicate::str::contains("--upload"))
+        .stdout(predicate::str::contains("--trashed"))
         .stdout(predicate::str::contains("--cover"))
         .stdout(predicate::str::contains("--extend"))
         .stdout(predicate::str::contains("--sort <SORT>"));
@@ -127,6 +128,8 @@ fn help_lists_clip_management_commands() {
         .assert()
         .success()
         .stdout(predicate::str::contains("restore"))
+        .stdout(predicate::str::contains("purge"))
+        .stdout(predicate::str::contains("empty-trash"))
         .stdout(predicate::str::contains("like"))
         .stdout(predicate::str::contains("dislike"));
 }
@@ -139,6 +142,7 @@ fn help_lists_upload_command() {
         .assert()
         .success()
         .stdout(predicate::str::contains("upload"))
+        .stdout(predicate::str::contains("upload-status"))
         .stdout(predicate::str::contains("Upload a local audio file"));
 }
 
@@ -155,6 +159,17 @@ fn upload_help_lists_workflow_flags() {
         .stdout(predicate::str::contains("--title"))
         .stdout(predicate::str::contains("--lyrics-file"))
         .stdout(predicate::str::contains("--timeout"));
+}
+
+#[test]
+fn upload_status_help_exposes_upload_identity() {
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    cmd.args(["clip", "upload-status", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("<UPLOAD_ID>"))
+        .stdout(predicate::str::contains("processing status"));
 }
 
 #[test]
@@ -330,6 +345,36 @@ fn speed_help_exposes_live_adjust_speed_contract() {
 }
 
 #[test]
+fn edit_help_exposes_reverse_crop_and_fade_contracts() {
+    for args in [
+        ["clip", "reverse", "--help"],
+        ["clip", "crop", "--help"],
+        ["clip", "fade", "--help"],
+    ] {
+        let mut cmd = Command::cargo_bin("sunox").expect("binary");
+        cmd.args(args)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("--title"));
+    }
+
+    let mut crop = Command::cargo_bin("sunox").expect("binary");
+    crop.args(["clip", "crop", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--start"))
+        .stdout(predicate::str::contains("--end"))
+        .stdout(predicate::str::contains("--remove-section"));
+
+    let mut fade = Command::cargo_bin("sunox").expect("binary");
+    fade.args(["clip", "fade", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--in"))
+        .stdout(predicate::str::contains("--out"));
+}
+
+#[test]
 fn generate_backed_clip_commands_expose_challenge_controls() {
     for args in [
         ["clip", "cover", "--help"],
@@ -372,9 +417,7 @@ fn install_skill_prints_current_generation_guidance() {
         .stdout(predicate::str::contains("returned clip ID"))
         .stdout(predicate::str::contains("do not pass --parallel"))
         .stdout(predicate::str::contains("simple audio analysis"))
-        .stdout(predicate::str::contains(
-            "current CLI download supports MP3",
-        ))
+        .stdout(predicate::str::contains("--format mp3|m4a|wav|opus"))
         .stdout(predicate::str::contains("do not publish"))
         .stdout(predicate::str::contains("destructive commands require"))
         .stdout(predicate::str::contains("WAV"))
@@ -383,7 +426,12 @@ fn install_skill_prints_current_generation_guidance() {
         ))
         .stdout(predicate::str::contains("error.details"))
         .stdout(predicate::str::contains("sunox clip upload <file>"))
-        .stdout(predicate::str::contains("sunox clip speed <clip_id>"));
+        .stdout(predicate::str::contains("sunox clip list --trashed"))
+        .stdout(predicate::str::contains("sunox clip speed <clip_id>"))
+        .stdout(predicate::str::contains("sunox clip crop <clip_id>"))
+        .stdout(predicate::str::contains(
+            "already wait for the resulting clip to complete",
+        ));
 }
 
 #[test]
@@ -445,6 +493,56 @@ fn status_rejects_empty_ids_before_auth() {
 }
 
 #[test]
+fn wait_rejects_zero_timeout_before_auth() {
+    let test_home = isolated_test_home("sunox-cli-zero-wait-timeout-test");
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    with_isolated_home(&mut cmd, &test_home)
+        .args(["clip", "wait", "clip-a", "--timeout", "0", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("\"code\": \"config_error\""))
+        .stderr(predicate::str::contains("greater than 0"));
+}
+
+#[test]
+fn upload_rejects_zero_timeout_before_auth_or_file_io() {
+    let test_home = isolated_test_home("sunox-cli-zero-upload-timeout-test");
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    with_isolated_home(&mut cmd, &test_home)
+        .args(["clip", "upload", "missing.wav", "--timeout", "0", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("\"code\": \"config_error\""))
+        .stderr(predicate::str::contains("greater than 0"));
+}
+
+#[test]
+fn polling_config_rejects_zero_timeout_before_auth() {
+    let test_home = isolated_test_home("sunox-cli-zero-poll-config-test");
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    with_isolated_home(&mut cmd, &test_home)
+        .args([
+            "-c",
+            "poll_timeout_secs=0",
+            "clip",
+            "crop",
+            "clip-a",
+            "--start",
+            "1",
+            "--end",
+            "2",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("\"code\": \"config_error\""))
+        .stderr(predicate::str::contains("greater than 0"));
+}
+
+#[test]
 fn download_rejects_empty_ids_before_auth() {
     let mut cmd = Command::cargo_bin("sunox").expect("binary");
 
@@ -467,6 +565,21 @@ fn top_level_download_reuses_clip_download_validation() {
 }
 
 #[test]
+fn download_rejects_video_and_audio_format_before_auth() {
+    let test_home = isolated_test_home("sunox-cli-download-video-format-test");
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    with_isolated_home(&mut cmd, &test_home)
+        .args(["download", "clip-a", "--video", "--format", "wav", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("\"code\": \"config_error\""))
+        .stderr(predicate::str::contains(
+            "--video cannot be combined with --format",
+        ));
+}
+
+#[test]
 fn top_level_download_help_is_user_facing() {
     let mut cmd = Command::cargo_bin("sunox").expect("binary");
 
@@ -477,6 +590,8 @@ fn top_level_download_help_is_user_facing() {
             "Usage: sunox download [OPTIONS] [IDS]...",
         ))
         .stdout(predicate::str::contains("--output"))
+        .stdout(predicate::str::contains("--force"))
+        .stdout(predicate::str::contains("--format"))
         .stdout(predicate::str::contains("--video"));
 }
 
@@ -516,6 +631,32 @@ fn clip_delete_requires_yes_before_auth() {
 
     with_isolated_home(&mut cmd, &test_home)
         .args(["clip", "delete", "clip-a", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("\"code\": \"config_error\""))
+        .stderr(predicate::str::contains("requires -y/--yes"));
+}
+
+#[test]
+fn clip_purge_requires_yes_before_auth() {
+    let test_home = isolated_test_home("sunox-cli-purge-confirmation-test");
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    with_isolated_home(&mut cmd, &test_home)
+        .args(["clip", "purge", "clip-a", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("\"code\": \"config_error\""))
+        .stderr(predicate::str::contains("requires -y/--yes"));
+}
+
+#[test]
+fn clip_empty_trash_requires_yes_before_auth() {
+    let test_home = isolated_test_home("sunox-cli-empty-trash-confirmation-test");
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    with_isolated_home(&mut cmd, &test_home)
+        .args(["clip", "empty-trash", "--json"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("\"code\": \"config_error\""))
@@ -707,7 +848,7 @@ fn agent_info_reports_submit_wait_download_workflow() {
         .stdout(predicate::str::contains("\"audio_analysis\""))
         .stdout(predicate::str::contains("\"download_formats\""))
         .stdout(predicate::str::contains(
-            "current CLI download supports MP3",
+            "supports explicit --format mp3|m4a|wav|opus",
         ))
         .stdout(predicate::str::contains(
             "Suno Web exposes Pro download choices",
@@ -715,9 +856,25 @@ fn agent_info_reports_submit_wait_download_workflow() {
         .stdout(predicate::str::contains("WAV"))
         .stdout(predicate::str::contains("do not publish"))
         .stdout(predicate::str::contains("destructive commands require"))
-        .stdout(predicate::str::contains("returned clip IDs"))
+        .stdout(predicate::str::contains("returns_new_or_processing"))
+        .stdout(predicate::str::contains("waits_for_complete"))
+        .stdout(predicate::str::contains(
+            "crop and fade already wait for their result clip to complete",
+        ))
+        .stdout(predicate::str::contains("after any command returns new clip IDs").not())
         .stdout(predicate::str::contains("--parallel"))
         .stdout(predicate::str::contains("partial_mutation"))
+        .stdout(predicate::str::contains("completed_steps"))
+        .stdout(predicate::str::contains("recovery.resumable"))
+        .stdout(predicate::str::contains("clip upload-status"))
+        .stdout(predicate::str::contains("local image upload"))
+        .stdout(predicate::str::contains(
+            "poll until the requested fields are visible",
+        ))
+        .stdout(predicate::str::contains("stream the file to S3"))
+        .stdout(predicate::str::contains(
+            "partial mutation or partial download",
+        ))
         .stdout(predicate::str::contains(
             "not the same as Suno Web Pro Get Stems export",
         ))
@@ -754,6 +911,10 @@ fn agent_info_reports_submit_wait_download_workflow() {
         .stdout(predicate::str::contains("\"clip_like\""))
         .stdout(predicate::str::contains("\"clip_dislike\""))
         .stdout(predicate::str::contains("\"clip_speed\""))
+        .stdout(predicate::str::contains("\"clip_reverse\""))
+        .stdout(predicate::str::contains("\"clip_crop\""))
+        .stdout(predicate::str::contains("\"clip_fade\""))
+        .stdout(predicate::str::contains("\"download_formats\""))
         .stdout(predicate::str::contains("\"persona_list\""))
         .stdout(predicate::str::contains("token=null"))
         .stdout(predicate::str::contains("--captcha"))
@@ -775,6 +936,9 @@ fn agent_info_reports_submit_wait_download_workflow() {
             "sunox install-skill --target codex",
         ))
         .stdout(predicate::str::contains("clip speed"))
+        .stdout(predicate::str::contains("clip reverse"))
+        .stdout(predicate::str::contains("clip crop"))
+        .stdout(predicate::str::contains("clip fade"))
         .stdout(predicate::str::contains("config.toml"));
 }
 
@@ -810,14 +974,21 @@ fn agent_info_separates_challenge_capable_commands_from_async_edits() {
             "clip stems"
         ]
     );
-    for command in ["clip concat", "clip remaster", "clip speed"] {
+    for command in [
+        "clip concat",
+        "clip remaster",
+        "clip speed",
+        "clip reverse",
+        "clip crop",
+        "clip fade",
+    ] {
         assert!(!challenge_commands.contains(&command));
     }
 
-    let async_edits = command_notes["async_clip_edits"]["commands"]
+    let processing_edits = command_notes["async_clip_edits"]["returns_new_or_processing"]
         .as_array()
-        .expect("async edit commands");
-    let async_edits = async_edits
+        .expect("processing edit commands");
+    let processing_edits = processing_edits
         .iter()
         .map(|value| value.as_str().expect("command string"))
         .collect::<Vec<_>>();
@@ -829,9 +1000,20 @@ fn agent_info_separates_challenge_capable_commands_from_async_edits() {
         "clip stems",
         "clip remaster",
         "clip speed",
+        "clip reverse",
     ] {
-        assert!(async_edits.contains(&command));
+        assert!(processing_edits.contains(&command));
     }
+    assert!(!processing_edits.contains(&"clip crop"));
+    assert!(!processing_edits.contains(&"clip fade"));
+
+    let completed_edits = command_notes["async_clip_edits"]["waits_for_complete"]
+        .as_array()
+        .expect("completed edit commands")
+        .iter()
+        .map(|value| value.as_str().expect("command string"))
+        .collect::<Vec<_>>();
+    assert_eq!(completed_edits, vec!["clip crop", "clip fade"]);
     let extend_notes = command_notes["clip extend"]
         .as_object()
         .expect("extend notes");

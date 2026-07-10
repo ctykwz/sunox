@@ -1,9 +1,10 @@
 use clap::Subcommand;
 
 use super::{
-    ConcatArgs, CoverArgs, DeleteArgs, DownloadArgs, ExtendArgs, InfoArgs, ListArgs, PublishArgs,
-    ReactionArgs, RemasterArgs, RestoreArgs, SearchArgs, SetArgs, SpeedArgs, StatusArgs, StemsArgs,
-    TimedLyricsArgs, UploadArgs, WaitArgs,
+    ConcatArgs, CoverArgs, CropArgs, DeleteArgs, DownloadArgs, EmptyTrashArgs, ExtendArgs,
+    FadeArgs, InfoArgs, ListArgs, PublishArgs, PurgeArgs, ReactionArgs, RemasterArgs, RestoreArgs,
+    ReverseArgs, SearchArgs, SetArgs, SpeedArgs, StatusArgs, StemsArgs, TimedLyricsArgs,
+    UploadArgs, UploadStatusArgs, WaitArgs,
 };
 
 #[derive(clap::Args)]
@@ -35,11 +36,20 @@ pub enum ClipCommand {
     /// Upload a local audio file into your Suno library
     Upload(UploadArgs),
 
+    /// Show processing status for an existing audio upload
+    UploadStatus(UploadStatusArgs),
+
     /// Delete/trash a clip
     Delete(DeleteArgs),
 
     /// Restore clip(s) from trash
     Restore(RestoreArgs),
+
+    /// Permanently delete trashed clip(s)
+    Purge(PurgeArgs),
+
+    /// Permanently delete every clip currently in trash
+    EmptyTrash(EmptyTrashArgs),
 
     /// Like clip(s), or clear likes with --clear
     Like(ReactionArgs),
@@ -70,6 +80,15 @@ pub enum ClipCommand {
 
     /// Adjust playback speed for a clip
     Speed(SpeedArgs),
+
+    /// Reverse a clip
+    Reverse(ReverseArgs),
+
+    /// Crop a clip or remove a section
+    Crop(CropArgs),
+
+    /// Apply fade in and/or fade out
+    Fade(FadeArgs),
 
     /// Extract stems (vocals, instruments) from a clip
     Stems(StemsArgs),

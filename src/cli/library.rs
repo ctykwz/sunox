@@ -36,6 +36,10 @@ pub struct ListArgs {
     #[arg(long)]
     pub upload: bool,
 
+    /// Restrict to clips in trash
+    #[arg(long)]
+    pub trashed: bool,
+
     /// Restrict to cover/remix-derived clips
     #[arg(long)]
     pub cover: bool,
@@ -67,6 +71,23 @@ pub struct DeleteArgs {
     pub ids: Vec<String>,
 
     /// Confirm this destructive action
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+}
+
+#[derive(clap::Args)]
+pub struct PurgeArgs {
+    /// Trashed clip ID(s) to permanently delete
+    pub ids: Vec<String>,
+
+    /// Confirm this irreversible action
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+}
+
+#[derive(clap::Args)]
+pub struct EmptyTrashArgs {
+    /// Confirm permanently deleting every clip currently in trash
     #[arg(short = 'y', long)]
     pub yes: bool,
 }

@@ -39,63 +39,25 @@ impl SunoClient {
         .await
     }
 
-    /// Create a playlist. Suno Web's create route only sends the name; when a
-    /// description is supplied we follow with the metadata route.
-    pub async fn create_playlist(
-        &self,
-        name: &str,
-        description: Option<&str>,
-        image_url: Option<&str>,
-    ) -> Result<PlaylistInfo, CliError> {
-        let mut playlist = self
-            .with_auth_retry(|| async {
-                let resp = self
-                    .post("/api/playlist/create/")
-                    .json(&CreatePlaylistRequest {
-                        name: name.to_string(),
-                    })
-                    .send()
-                    .await?;
-                let resp = self.check_response(resp).await?;
-                decode_playlist(resp.json().await?)
-            })
-            .await?;
-
-        if description.is_some() || image_url.is_some() {
-            playlist = self
-                .set_playlist_metadata(&playlist.id, None, description, image_url)
+    /// Create a playlist through Suno Web's name-only create route.
+    pub async fn create_playlist(&self, name: &str) -> Result<PlaylistInfo, CliError> {
+        self.with_auth_retry(|| async {
+            let resp = self
+                .post("/api/playlist/create/")
+                .json(&CreatePlaylistRequest {
+                    name: name.to_string(),
+                })
+                .send()
                 .await?;
-        }
-
-        Ok(playlist)
+            let resp = self.check_response(resp).await?;
+            decode_playlist(resp.json().await?)
+        })
+        .await
     }
 
     /// Update playlist metadata.
     /// POST /api/playlist/set_metadata
     pub async fn set_playlist_metadata(
-        &self,
-        playlist_id: &str,
-        name: Option<&str>,
-        description: Option<&str>,
-        image_url: Option<&str>,
-    ) -> Result<PlaylistInfo, CliError> {
-        if let Some(upload_id) = image_url.and_then(upload_id_from_suno_image_url) {
-            if name.is_some() || description.is_some() {
-                self.post_playlist_metadata(playlist_id, name, description, None)
-                    .await?;
-            }
-            return self
-                .set_playlist_uploaded_cover(playlist_id, &upload_id)
-                .await;
-        }
-
-        self.post_playlist_metadata(playlist_id, name, description, image_url)
-            .await?;
-
-        self.get_playlist(playlist_id).await
-    }
-
-    async fn post_playlist_metadata(
         &self,
         playlist_id: &str,
         name: Option<&str>,
@@ -133,7 +95,7 @@ impl SunoClient {
         &self,
         playlist_id: &str,
         upload_id: &str,
-    ) -> Result<PlaylistInfo, CliError> {
+    ) -> Result<(), CliError> {
         let req = SetPlaylistCoverRequest::from_upload_id(upload_id);
         self.with_auth_retry(|| async {
             let resp = self
@@ -144,9 +106,7 @@ impl SunoClient {
             self.check_response(resp).await?;
             Ok(())
         })
-        .await?;
-
-        self.get_playlist(playlist_id).await
+        .await
     }
 
     /// Set or clear playlist like/dislike reaction.
@@ -370,7 +330,7 @@ fn decode_playlist(body: Value) -> Result<PlaylistInfo, CliError> {
     })
 }
 
-fn upload_id_from_suno_image_url(url: &str) -> Option<String> {
+pub(crate) fn upload_id_from_suno_image_url(url: &str) -> Option<String> {
     let url = url.trim().split(['?', '#']).next().unwrap_or_default();
     if !url.starts_with("https://cdn1.suno.ai/") && !url.starts_with("https://cdn2.suno.ai/") {
         return None;

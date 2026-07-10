@@ -71,7 +71,11 @@ pub async fn status(args: StatusArgs, ctx: &AppContext) -> Result<(), CliError> 
 }
 
 fn list_filters(args: &ListArgs) -> FeedFilters {
-    let mut filters = FeedFilters::default_workspace();
+    let mut filters = if args.trashed {
+        FeedFilters::trashed()
+    } else {
+        FeedFilters::default_workspace()
+    };
     if args.public {
         filters = filters.with_public();
     }
