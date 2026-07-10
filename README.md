@@ -34,6 +34,8 @@ Suno's web UI works, but it is not built for scripting, piping lyrics from a fil
 
 This CLI fixes that. Auto-auth from your browser, core generation parameters exposed as flags, dual JSON/table output for both humans and AI agents. Downloads auto-embed synced lyrics into MP3 files.
 
+Sunox is an unofficial project and is not affiliated with or endorsed by Suno. It uses private Web APIs that can change without notice. You are responsible for complying with Suno's terms, account limits, and the rights applicable to generated or uploaded material.
+
 ## Install
 
 ### Cargo (any platform)
@@ -42,9 +44,12 @@ This CLI fixes that. Auto-auth from your browser, core generation parameters exp
 cargo install sunox
 ```
 
+Requires Rust 1.88 or newer.
+
 ### Pre-built binaries
 
 Download from [GitHub Releases](https://github.com/ctykwz/sunox/releases) — binaries for macOS (Apple Silicon + Intel), Linux (x86_64 + ARM), and Windows.
+Each release includes `SHA256SUMS`; `sunox update` verifies the selected archive before installing it.
 
 ### Self-update
 
@@ -103,6 +108,8 @@ Available on every subcommand:
 Suno write commands are account-scoped serial by default. Disable that behavior
 persistently with `sunox config set serial_mutations false`, for one invocation
 with `-c serial_mutations=false`, or for one command with `--parallel`.
+Environment overrides use the `SUNOX_*` prefix, for example `SUNOX_DEFAULT_MODEL`,
+`SUNOX_OUTPUT_DIR`, and `SUNOX_BROWSER_PATH`.
 
 ## Human Commands
 
@@ -132,6 +139,7 @@ sunox lyrics              Generate lyrics only (free, no credits)
 sunox clip extend         Continue a clip from a timestamp
 sunox clip concat         Stitch clips into a full song
 sunox clip cover          Create a cover with different style/model
+sunox clip inspire        Generate a new song from one clip's loose inspiration
 sunox clip remaster       Remaster with a different model version
 sunox clip speed          Adjust playback speed
 sunox clip reverse        Reverse audio
@@ -223,7 +231,9 @@ sunox update         Self-update from GitHub Releases (--check to peek first)
 sunox login    # Browser-cookie auth, with interactive Chrome/Edge fallback
 ```
 
-`sunox login` first tries to read the Clerk auth cookie from Chrome, Arc, Brave, Firefox, or Edge. If that succeeds, Sunox records a stable browser source id for the extractor that produced the session and best-effort public profile settings such as accepted languages; it does not fabricate a user-agent from the browser label. If browser-cookie extraction fails, it opens a dedicated Sunox Chrome/Edge-compatible browser profile and waits for you to log into Suno there. The captured Clerk session is exchanged for a JWT, stored in a `0600` local auth file, and used to refresh stale JWTs automatically while the underlying session is still valid. When interactive login is used, stable browser runtime headers such as user-agent and accepted languages are saved and reused for later API calls. API requests derive Chromium client hints from the selected user-agent, send browser fetch metadata headers, and fall back field-by-field when real browser values are unavailable.
+`sunox login` first tries to read the Clerk auth cookie from Chrome, Arc, Brave, Firefox, or Edge. If that succeeds, Sunox records a stable browser source id for the extractor that produced the session and best-effort public profile settings such as accepted languages; it does not fabricate a user-agent from the browser label. If browser-cookie extraction fails, it opens a dedicated Sunox Chrome/Edge-compatible browser profile and waits for you to log into Suno there. The captured Clerk session is exchanged for a JWT and used to refresh stale JWTs automatically while the underlying session is still valid. When interactive login is used, stable browser runtime headers such as user-agent and accepted languages are saved and reused for later API calls. API requests derive Chromium client hints from the selected user-agent, send browser fetch metadata headers, and fall back field-by-field when real browser values are unavailable.
+
+Credentials are stored as local JSON, not in an OS keychain. Sunox creates the auth file with mode `0600` on Unix; on Windows it relies on the per-user ACL of the configuration directory. Manual `--cookie` and `--jwt` values can be visible in shell history and process listings, so prefer `sunox login` on interactive machines and never include credentials in logs, prompts, project files, or commits.
 
 Auth methods (in order of convenience):
 1. `sunox login` — automatic browser extraction, with interactive Chrome/Edge fallback (recommended)
@@ -238,12 +248,12 @@ Auth methods (in order of convenience):
 | Flag | What it does | Values |
 |---|---|---|
 | `--title` | Song title | up to 100 chars |
-| `--tags` | Style direction | `"pop, synths, upbeat"` (1000 chars) |
+| `--tags` | Style direction | Model/account limit; inspect `sunox models --json` |
 | `--enhance-tags` | Ask Suno to enhance style tags before submit | explicit opt-in |
-| `--exclude` | Styles to avoid | `"metal, heavy, dark"` (1000 chars) |
-| `--lyrics` / `--lyrics-file` | Custom lyrics with `[Verse]` tags | up to 5000 chars |
-| `--prompt` (describe) | Free text description | up to 500 chars |
-| `--model` | Model version | v5.5, v5, v4.5+, v4.5, v4, v3.5, v3, v2 |
+| `--exclude` | Styles to avoid | Model/account limit; inspect `sunox models --json` |
+| `--lyrics` / `--lyrics-file` | Custom lyrics with `[Verse]` tags | `max_lengths.gpt_description_prompt` |
+| `--prompt` (describe) | Free text description | `max_lengths.prompt` |
+| `--model` | Model version | v5.5, v5, v4.5+, v4.5-all, v4.5, v4, v3.5, v3, v2 |
 | `--vocal` | Vocal gender | male, female |
 | `--persona` | Voice persona ID | UUID from Suno voice creation |
 | `--weirdness` | How experimental | 0-100 |
@@ -314,6 +324,7 @@ Create covers, remaster clips, or apply non-generation clip edits:
 ```bash
 # Cover with different style tags
 sunox clip cover <clip_id> --tags "jazz, smooth piano" --model v5.5
+sunox clip inspire <clip_id> --title "New Song" --tags "garage pop" --lyrics-file lyrics.txt
 
 # Remaster an old clip with the latest model
 sunox clip remaster <clip_id> --model v5.5
@@ -427,11 +438,13 @@ sunox clip upload-status <upload_id> --json
 
 ### Models
 
-| Version | Codename | Default | Notes |
+| Version | Codename | CLI default | Notes |
 |---|---|---|---|
-| **v5.5** | chirp-fenix | Yes | Latest, best quality |
+| auto | account response | Yes | Current usable account default |
+| v5.5 | chirp-fenix | | Latest generation; unavailable-billing fallback |
 | v5 | chirp-crow | | Previous generation |
 | v4.5+ | chirp-bluejay | | Extended capabilities |
+| v4.5-all | chirp-auk-turbo | | Free-tier option when available |
 | v4.5 | chirp-auk | | Stable |
 | v4 | chirp-v4 | | Legacy |
 | v3.5 | chirp-v3-5 | | Legacy |
@@ -439,6 +452,12 @@ sunox clip upload-status <upload_id> --json
 | v2 | chirp-v2-xxl-alpha | | Legacy |
 
 Remaster models: v5.5 = chirp-flounder, v5 = chirp-carp, v4.5+ = chirp-bass.
+
+Model availability, the account default, and length limits are account-specific. The default
+`default_model=auto` resolves the current usable account default directly from
+`/api/billing/info/`; `sunox models --json` exposes the same account data for inspection. Explicit
+models are validated against `can_use` and `max_lengths` when billing info is available; v5.5 is
+used only when that read is unavailable.
 
 ### Agent-Friendly
 
@@ -515,6 +534,7 @@ After installation, your coding agent automatically picks up the skill on the ne
 |---|---|---|
 | Feed | **v3** (`POST /api/feed/v3`) | Latest |
 | Generate | **v2-web** (`POST /api/generate/v2-web/`) | HAR-confirmed custom create body |
+| Inspiration | **v2-web** (`task: playlist_condition`) | HAR-confirmed; exposed as single-source `clip inspire` |
 | Stems | **v2-web** (`POST /api/generate/v2-web/`, `task: "gen_stem"`) | HAR-confirmed current web stem task |
 | Remaster | `POST /api/generate/upsample` | HAR-confirmed current web remaster route |
 | Speed adjust | `POST /api/clips/adjust-speed/` | HAR-confirmed current web edit route |
@@ -542,7 +562,7 @@ After installation, your coding agent automatically picks up the skill on the ne
 | Audio upload | `POST /api/uploads/audio/`, presigned S3 form upload, `POST /api/uploads/audio/{id}/upload-finish/`, `GET /api/uploads/audio/{id}/`, `POST /api/uploads/audio/{id}/initialize-clip/` | CLI workflow implemented and live-verified for `file_upload` |
 | Image upload | `POST /api/uploads/image/`, presigned S3 form upload, `POST /api/uploads/image/{id}/upload-finish/` | CLI workflow implemented for clip and playlist covers; playlist cover patch uses `PATCH /api/playlist/v2/{id}` with `cover_url`, `cover_image_s3_id`, `cover_is_user_set`; clip cover patch uses `POST /api/gen/{id}/set_metadata/` with `image_url` |
 
-Generation tasks use `/api/generate/v2-web/`. The custom create payload was live-recaptured on June 30, 2026: custom lyrics are sent as `gpt_description_prompt` while `prompt` stays empty, and a solved challenge token uses `token_provider: 1`. Sunox fills `metadata.user_tier` from the current account's `/api/billing/info/` `plan.id` when available, falling back to the empty web-compatible value if that read fails. With `--enhance-tags`, Sunox first calls `/api/prompts/upsample`, carries the returned tags plus `request_id` into `metadata.last_tags_generation`, and marks `override_fields=["tags"]`; the `personalization_enabled` field follows the captured web submit shape. Without that flag it omits `metadata.last_tags_generation`. Instrumental create also uses custom mode; when `sunox create --instrumental <prompt>` is used, the prompt is folded into style tags and the submitted `prompt` field stays empty, matching the live web request shape recaptured in `15suno-labs-nostudio-20260630.har`. `task: "playlist_condition"` was also captured and intentionally treated as a separate inspiration flow because it puts lyrics in `prompt`. Extend fetches the source clip before submit, uses a feed/v3 exact-id metadata fallback when `GET /api/feed/?ids` omits source style metadata, sends `title` as the source title unless `--title` is provided, defaults `tags` and `negative_tags` from the source when available, and inherits `metadata.make_instrumental` unless `--instrumental` or `--no-instrumental` overrides it; use `--tags` and `--exclude` to override the inherited values. `clip list` uses `POST /api/feed/v3` and exposes query-only filters such as `--liked`, `--public`, `--upload`, `--cover`, `--extend`, and `--sort popular`; this is not a library sync workflow. Remaster uses the live-captured `/api/generate/upsample` route, speed adjust uses `/api/clips/adjust-speed/`, reverse uses `/api/clips/reverse-clip/`, and crop/fade use `/api/edit/*` action routes. Concat completed in a live CLI validation from an original generation source; edited inputs can be rejected by Suno with `Bad history.` Commands that submit through `/api/generate/v2-web/` preflight `/api/c/check` with `ctype=generation`; if Suno reports a challenge and the stored Clerk session can refresh, Sunox refreshes the JWT once and repeats the preflight before asking for a solved token. When no challenge remains they submit without a challenge token, and when a challenge is still required you can use `--token <solved>` to supply one or `--captcha` to force the browser solver on create, cover, extend, and stems. The audio upload workflow was live-verified for `file_upload`; clip cover upload was live-verified through image upload plus clip metadata update; playlist cover upload was live-verified through image upload plus v2 metadata patch. Cover generation and concat browser mutation bodies still need fresh live captures. Playlist mutations are implemented from bundle/live evidence plus endpoint contract tests; playlist remove intentionally submits one clip per request because larger live batches can return Suno 500s.
+Generation tasks use `/api/generate/v2-web/`. The custom create payload was live-recaptured on June 30, 2026: custom lyrics are sent as `gpt_description_prompt` while `prompt` stays empty, and a solved challenge token uses `token_provider: 1`. Sunox resolves `metadata.user_tier`, account model availability, the account default, and field limits from `/api/billing/info/`; `default_model=auto` falls back to v5.5 only when that read is unavailable. With `--enhance-tags`, Sunox first calls `/api/prompts/upsample`, carries the returned tags plus `request_id` into `metadata.last_tags_generation`, and marks `override_fields=["tags"]`; the `personalization_enabled` field follows the captured web submit shape. Without that flag it omits `metadata.last_tags_generation`. Instrumental create also uses custom mode; when `sunox create --instrumental <prompt>` is used, the prompt is folded into style tags and the submitted `prompt` field stays empty, matching the live web request shape recaptured in `15suno-labs-nostudio-20260630.har`. `sunox clip inspire` implements the live-captured `task: "playlist_condition"` flow for one source clip: it upsamples the supplied tags, puts lyrics in `prompt`, carries the real upsample metadata, and does not expose unverified instrumental or multi-source variants. Extend fetches the source clip before submit, uses a feed/v3 exact-id metadata fallback when `GET /api/feed/?ids` omits source style metadata, sends `title` as the source title unless `--title` is provided, defaults `tags` and `negative_tags` from the source when available, and inherits `metadata.make_instrumental` unless `--instrumental` or `--no-instrumental` overrides it; use `--tags` and `--exclude` to override the inherited values. `clip list` uses `POST /api/feed/v3` and exposes query-only filters such as `--liked`, `--public`, `--upload`, `--cover`, `--extend`, and `--sort popular`; this is not a library sync workflow. Remaster uses the live-captured `/api/generate/upsample` route, speed adjust uses `/api/clips/adjust-speed/`, reverse uses `/api/clips/reverse-clip/`, and crop/fade use `/api/edit/*` action routes. Concat completed in a live CLI validation from an original generation source; edited inputs can be rejected by Suno with `Bad history.` Commands that submit through `/api/generate/v2-web/` preflight `/api/c/check` with `ctype=generation`; if Suno reports a challenge and the stored Clerk session can refresh, Sunox refreshes the JWT once and repeats the preflight before asking for a solved token. When no challenge remains they submit without a challenge token, and when a challenge is still required you can use `--token <solved>` to supply one or `--captcha` to force the browser solver on create, inspire, cover, extend, and stems. The audio upload workflow was live-verified for `file_upload`; clip cover upload was live-verified through image upload plus clip metadata update; playlist cover upload was live-verified through image upload plus v2 metadata patch. Cover generation and concat browser mutation bodies still need fresh live captures. Playlist mutations are implemented from bundle/live evidence plus endpoint contract tests; playlist remove intentionally submits one clip per request because larger live batches can return Suno 500s.
 
 ## Contributing
 

@@ -27,7 +27,7 @@ impl MutationLockGuard {
 
 impl Drop for MutationLockGuard {
     fn drop(&mut self) {
-        let _ = self.file.unlock();
+        let _ = FileExt::unlock(&self.file);
     }
 }
 

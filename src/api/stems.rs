@@ -1,14 +1,26 @@
 use super::SunoClient;
-use super::types::{Clip, GenerateRequest};
+#[cfg(test)]
+use super::types::Clip;
+use super::types::GenerateRequest;
 use crate::core::CliError;
 
 impl SunoClient {
     /// Extract stems from a clip via the current web `gen_stem` generation task.
+    #[cfg(test)]
     pub async fn stems(
         &self,
         clip_id: &str,
         challenge_token: Option<String>,
     ) -> Result<Vec<Clip>, CliError> {
+        let req = self.prepare_stems_request(clip_id, challenge_token).await?;
+        self.generate(&req).await
+    }
+
+    pub(crate) async fn prepare_stems_request(
+        &self,
+        clip_id: &str,
+        challenge_token: Option<String>,
+    ) -> Result<GenerateRequest, CliError> {
         let requested = [clip_id.to_string()];
         let source = self
             .get_clips(&requested)
@@ -29,6 +41,6 @@ impl SunoClient {
         req.metadata.is_remix = Some(true);
         req.set_challenge_token(challenge_token);
 
-        self.generate(&req).await
+        Ok(req)
     }
 }

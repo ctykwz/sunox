@@ -207,7 +207,7 @@ async fn official_download_url(
 ) -> Result<String, CliError> {
     let polling = configured_polling(ctx);
     if format.requires_mutation_lock() {
-        let _mutation_guard = ctx.acquire_mutation_lock()?;
+        let _mutation_guard = ctx.acquire_mutation_lock_for(&client.auth_state_snapshot())?;
         client.download_url(clip_id, format, polling).await
     } else {
         client.download_url(clip_id, format, polling).await
@@ -234,8 +234,7 @@ pub async fn upload(args: UploadArgs, ctx: &AppContext) -> Result<(), CliError> 
         eprintln!("Uploading audio: {}", path.display());
     }
 
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    let client = ctx.client().await?;
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
     let result = upload::run(
         &client,
         UploadWorkflowInput {

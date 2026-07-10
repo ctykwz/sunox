@@ -12,8 +12,8 @@ use crate::workflow::image_upload;
 pub async fn delete(args: DeleteArgs, ctx: &AppContext) -> Result<(), CliError> {
     ensure_clip_ids(&args.ids)?;
     ensure_destructive_confirmed(args.yes, "sunox clip delete")?;
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    ctx.client().await?.delete_clips(&args.ids).await?;
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
+    client.delete_clips(&args.ids).await?;
     match ctx.fmt {
         OutputFormat::Json => output::json::success(clip_ids_result(&args.ids, "deleted", true)),
         OutputFormat::Table => eprintln!("Deleted {} clip(s)", args.ids.len()),
@@ -23,8 +23,8 @@ pub async fn delete(args: DeleteArgs, ctx: &AppContext) -> Result<(), CliError> 
 
 pub async fn restore(args: RestoreArgs, ctx: &AppContext) -> Result<(), CliError> {
     ensure_clip_ids(&args.ids)?;
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    ctx.client().await?.restore_clips(&args.ids).await?;
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
+    client.restore_clips(&args.ids).await?;
     match ctx.fmt {
         OutputFormat::Json => output::json::success(clip_ids_result(&args.ids, "restored", true)),
         OutputFormat::Table => eprintln!("Restored {} clip(s)", args.ids.len()),
@@ -35,8 +35,8 @@ pub async fn restore(args: RestoreArgs, ctx: &AppContext) -> Result<(), CliError
 pub async fn purge(args: PurgeArgs, ctx: &AppContext) -> Result<(), CliError> {
     ensure_clip_ids(&args.ids)?;
     ensure_destructive_confirmed(args.yes, "sunox clip purge")?;
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    ctx.client().await?.purge_clips(&args.ids).await?;
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
+    client.purge_clips(&args.ids).await?;
     match ctx.fmt {
         OutputFormat::Json => output::json::success(clip_ids_result(&args.ids, "purged", true)),
         OutputFormat::Table => eprintln!("Permanently deleted {} clip(s)", args.ids.len()),
@@ -46,8 +46,7 @@ pub async fn purge(args: PurgeArgs, ctx: &AppContext) -> Result<(), CliError> {
 
 pub async fn empty_trash(args: EmptyTrashArgs, ctx: &AppContext) -> Result<(), CliError> {
     ensure_destructive_confirmed(args.yes, "sunox clip empty-trash")?;
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    let client = ctx.client().await?;
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
     let purged = client.empty_clip_trash().await?;
 
     match ctx.fmt {
@@ -81,8 +80,7 @@ pub async fn set(args: SetArgs, ctx: &AppContext) -> Result<(), CliError> {
         (_, Some(path)) => Some(std::fs::read_to_string(path)?),
         _ => None,
     };
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    let client = ctx.client().await?;
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
     let uploaded_cover = if let Some(image_file) = args.image_file.as_deref() {
         if !ctx.quiet {
             eprintln!("Uploading clip cover image...");
@@ -123,8 +121,7 @@ pub async fn set(args: SetArgs, ctx: &AppContext) -> Result<(), CliError> {
 
 pub async fn publish(args: PublishArgs, ctx: &AppContext) -> Result<(), CliError> {
     ensure_clip_ids(&args.ids)?;
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    let client = ctx.client().await?;
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
     let is_public = !args.private;
     let mut succeeded = Vec::with_capacity(args.ids.len());
     for (index, id) in args.ids.iter().enumerate() {
@@ -156,8 +153,7 @@ async fn react(
     reaction: ClipReaction,
 ) -> Result<(), CliError> {
     ensure_clip_ids(&args.ids)?;
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    let client = ctx.client().await?;
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
     let next_reaction = if args.clear { None } else { Some(reaction) };
     let operation = match (reaction, args.clear) {
         (ClipReaction::Like, false) => "like",

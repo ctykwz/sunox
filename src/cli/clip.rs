@@ -2,9 +2,9 @@ use clap::Subcommand;
 
 use super::{
     ConcatArgs, CoverArgs, CropArgs, DeleteArgs, DownloadArgs, EmptyTrashArgs, ExtendArgs,
-    FadeArgs, InfoArgs, ListArgs, PublishArgs, PurgeArgs, ReactionArgs, RemasterArgs, RestoreArgs,
-    ReverseArgs, SearchArgs, SetArgs, SpeedArgs, StatusArgs, StemsArgs, TimedLyricsArgs,
-    UploadArgs, UploadStatusArgs, WaitArgs,
+    FadeArgs, InfoArgs, InspireArgs, ListArgs, PublishArgs, PurgeArgs, ReactionArgs, RemasterArgs,
+    RestoreArgs, ReverseArgs, SearchArgs, SetArgs, SpeedArgs, StatusArgs, StemsArgs,
+    TimedLyricsArgs, UploadArgs, UploadStatusArgs, WaitArgs,
 };
 
 #[derive(clap::Args)]
@@ -74,6 +74,9 @@ pub enum ClipCommand {
 
     /// Create a cover of an existing clip
     Cover(CoverArgs),
+
+    /// Generate a new song using a clip as loose inspiration
+    Inspire(InspireArgs),
 
     /// Remaster a clip with a different model
     Remaster(RemasterArgs),

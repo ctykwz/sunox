@@ -13,6 +13,7 @@ pub mod edit;
 pub mod extend;
 pub mod feed;
 pub mod generate;
+pub mod inspiration;
 pub mod lyrics;
 pub mod metadata;
 pub mod persona;

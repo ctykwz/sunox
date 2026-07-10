@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use super::SunoClient;
-use super::types::{Clip, GenerateRequest, GenerateResponse};
+use super::types::{Clip, GenerateRequest, GenerateResponse, Model};
 use crate::core::CliError;
 
 const FEED_IDS_CHUNK_SIZE: usize = 2;
@@ -13,8 +13,68 @@ impl SunoClient {
     /// migrated creates to `v2-web` server-side in the April 2026 capture.
     /// Wrapped in `with_auth_retry` so a single stale-JWT failure recovers
     /// transparently via Clerk refresh.
+    #[cfg(test)]
     pub async fn generate(&self, req: &GenerateRequest) -> Result<Vec<Clip>, CliError> {
-        if req.token.is_none() {
+        let mut req = req.clone();
+        self.prepare_generation_request(&mut req).await?;
+        self.submit_prepared_generation(&req).await
+    }
+
+    pub(crate) async fn prepare_generation_request(
+        &self,
+        req: &mut GenerateRequest,
+    ) -> Result<(), CliError> {
+        if !req.metadata.user_tier.trim().is_empty() && req.mv != "auto" {
+            return Ok(());
+        }
+
+        let info = match self.billing_info().await {
+            Ok(info) => info,
+            Err(error) => {
+                if error.is_auth_or_rate_limit() {
+                    return Err(error);
+                }
+                if req.mv == "auto" {
+                    req.mv = "chirp-fenix".into();
+                }
+                return Ok(());
+            }
+        };
+
+        if req.metadata.user_tier.trim().is_empty()
+            && let Some(user_tier) = info.plan.id
+            && !user_tier.trim().is_empty()
+        {
+            req.metadata.user_tier = user_tier.trim().to_string();
+        }
+
+        let uses_account_generation_model =
+            matches!(req.task.as_deref(), None | Some("playlist_condition"));
+        if !uses_account_generation_model || info.models.is_empty() {
+            if req.mv == "auto" {
+                req.mv = "chirp-fenix".into();
+            }
+            return Ok(());
+        }
+
+        let model = select_generation_model(&info.models, &req.mv)?;
+        req.mv = model.external_key.clone();
+        validate_generation_lengths(req, model)
+    }
+
+    pub(crate) async fn submit_prepared_generation(
+        &self,
+        req: &GenerateRequest,
+    ) -> Result<Vec<Clip>, CliError> {
+        self.ensure_generation_challenge(req.token.is_some())
+            .await?;
+        let body = serde_json::to_value(req)?;
+        self.submit_generation_body(&body, req.token.is_some())
+            .await
+    }
+
+    async fn ensure_generation_challenge(&self, has_token: bool) -> Result<(), CliError> {
+        if !has_token {
             let mut challenge = self.generation_challenge().await?;
             if challenge.required && self.try_refresh_jwt_for_challenge_recheck().await? {
                 challenge = self.generation_challenge().await?;
@@ -23,15 +83,19 @@ impl SunoClient {
                 return Err(generation_challenge_error(&challenge));
             }
         }
+        Ok(())
+    }
 
-        let body = self.generation_request_body(req).await?;
+    async fn submit_generation_body(
+        &self,
+        body: &serde_json::Value,
+        has_challenge_token: bool,
+    ) -> Result<Vec<Clip>, CliError> {
         self.with_auth_retry(|| async {
+            let resp = self.post("/api/generate/v2-web/").json(body).send().await?;
             let resp = self
-                .post("/api/generate/v2-web/")
-                .json(&body)
-                .send()
+                .check_generation_response(resp, has_challenge_token)
                 .await?;
-            let resp = self.check_response(resp).await?;
             let result: GenerateResponse = resp.json().await?;
             Ok(result.clips)
         })
@@ -63,39 +127,59 @@ impl SunoClient {
             .collect::<HashMap<_, _>>();
         Ok(ids.iter().filter_map(|id| clips_by_id.remove(id)).collect())
     }
-
-    async fn generation_request_body(
-        &self,
-        req: &GenerateRequest,
-    ) -> Result<serde_json::Value, CliError> {
-        let mut body = serde_json::to_value(req)?;
-        if generation_user_tier_is_empty(&body)
-            && let Some(user_tier) = self.current_generation_user_tier().await
-            && let Some(metadata) = body
-                .get_mut("metadata")
-                .and_then(|value| value.as_object_mut())
-        {
-            metadata.insert("user_tier".into(), serde_json::Value::String(user_tier));
-        }
-        Ok(body)
-    }
-
-    async fn current_generation_user_tier(&self) -> Option<String> {
-        self.billing_info()
-            .await
-            .ok()
-            .and_then(|info| info.plan.id)
-            .map(|tier| tier.trim().to_string())
-            .filter(|tier| !tier.is_empty())
-    }
 }
 
-fn generation_user_tier_is_empty(body: &serde_json::Value) -> bool {
-    body.get("metadata")
-        .and_then(|metadata| metadata.get("user_tier"))
-        .and_then(|user_tier| user_tier.as_str())
-        .map(|user_tier| user_tier.trim().is_empty())
-        .unwrap_or(true)
+fn select_generation_model<'a>(
+    models: &'a [Model],
+    requested: &str,
+) -> Result<&'a Model, CliError> {
+    let selected = if requested == "auto" {
+        models
+            .iter()
+            .find(|model| model.can_use && model.is_default_model)
+            .or_else(|| models.iter().find(|model| model.can_use))
+    } else {
+        models
+            .iter()
+            .find(|model| model.external_key == requested && model.can_use)
+    };
+
+    selected.ok_or_else(|| {
+        let requested = if requested == "auto" {
+            "an account default model".to_string()
+        } else {
+            format!("model `{requested}`")
+        };
+        CliError::Config(format!(
+            "Suno account cannot use {requested}; run `sunox models --json` and select a model whose can_use field is true"
+        ))
+    })
+}
+
+fn validate_generation_lengths(req: &GenerateRequest, model: &Model) -> Result<(), CliError> {
+    validate_length("title", req.title.as_deref(), model.max_lengths.title)?;
+    validate_length("prompt", Some(&req.prompt), model.max_lengths.prompt)?;
+    validate_length("tags", req.tags.as_deref(), model.max_lengths.tags)?;
+    validate_length(
+        "negative_tags",
+        Some(&req.negative_tags),
+        model.max_lengths.negative_tags,
+    )?;
+    validate_length(
+        "gpt_description_prompt",
+        req.gpt_description_prompt.as_deref(),
+        model.max_lengths.gpt_description_prompt,
+    )
+}
+
+fn validate_length(field: &str, value: Option<&str>, limit: u32) -> Result<(), CliError> {
+    let length = value.map(|value| value.chars().count()).unwrap_or(0);
+    if limit > 0 && length > limit as usize {
+        return Err(CliError::Config(format!(
+            "generation field `{field}` is {length} characters, exceeding the account limit of {limit} for the selected model"
+        )));
+    }
+    Ok(())
 }
 
 fn generation_challenge_error(challenge: &super::challenge::GenerationChallenge) -> CliError {
@@ -110,10 +194,51 @@ fn generation_challenge_error(challenge: &super::challenge::GenerationChallenge)
 
 #[cfg(test)]
 mod tests {
-    use super::FEED_IDS_CHUNK_SIZE;
+    use super::{FEED_IDS_CHUNK_SIZE, select_generation_model, validate_generation_lengths};
+    use crate::api::types::{GenerateRequest, MaxLengths, Model};
+
+    fn model(can_use: bool, is_default_model: bool, max_lengths: MaxLengths) -> Model {
+        Model {
+            name: "v4.5-all".into(),
+            external_key: "chirp-auk-turbo".into(),
+            can_use,
+            is_default_model,
+            description: "fixture".into(),
+            max_lengths,
+        }
+    }
 
     #[test]
     fn feed_id_batch_size_documents_current_web_limit() {
         assert_eq!(FEED_IDS_CHUNK_SIZE, 2);
+    }
+
+    #[test]
+    fn account_model_selection_rejects_unusable_explicit_model() {
+        let models = [model(false, true, MaxLengths::default())];
+
+        let error = select_generation_model(&models, "chirp-auk-turbo")
+            .expect_err("unusable model must be rejected");
+
+        assert!(error.to_string().contains("cannot use"));
+    }
+
+    #[test]
+    fn generation_limits_count_characters_instead_of_utf8_bytes() {
+        let selected = model(
+            true,
+            true,
+            MaxLengths {
+                title: 2,
+                ..MaxLengths::default()
+            },
+        );
+        let mut request = GenerateRequest::new("chirp-auk-turbo", "custom");
+        request.title = Some("中文歌".into());
+
+        let error = validate_generation_lengths(&request, &selected)
+            .expect_err("three characters exceed a two-character limit");
+
+        assert!(error.to_string().contains("3 characters"));
     }
 }

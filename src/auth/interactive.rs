@@ -193,7 +193,7 @@ async fn wait_for_cdp(port: u16) -> Result<(), CliError> {
     }
 
     Err(CliError::Config(
-        "Browser was spawned but never opened the CDP port. Check that Chrome or Edge can start normally, or set SUNO_BROWSER_PATH to a Chromium-family browser binary.".into(),
+        "Browser was spawned but never opened the CDP port. Check that Chrome or Edge can start normally, or set SUNOX_BROWSER_PATH to a Chromium-family browser binary.".into(),
     ))
 }
 

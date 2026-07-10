@@ -13,11 +13,11 @@ fn with_isolated_home<'a>(cmd: &'a mut Command, test_home: &Path) -> &'a mut Com
     cmd.env("HOME", test_home)
         .env("XDG_CONFIG_HOME", test_home.join(".config"))
         .env("XDG_DATA_HOME", test_home.join(".local").join("share"))
-        .env_remove("SUNO_DEFAULT_MODEL")
-        .env_remove("SUNO_POLL_INTERVAL_SECS")
-        .env_remove("SUNO_POLL_TIMEOUT_SECS")
-        .env_remove("SUNO_OUTPUT_DIR")
-        .env_remove("SUNO_SERIAL_MUTATIONS")
+        .env_remove("SUNOX_DEFAULT_MODEL")
+        .env_remove("SUNOX_POLL_INTERVAL_SECS")
+        .env_remove("SUNOX_POLL_TIMEOUT_SECS")
+        .env_remove("SUNOX_OUTPUT_DIR")
+        .env_remove("SUNOX_SERIAL_MUTATIONS")
 }
 
 #[test]
@@ -56,6 +56,27 @@ fn create_help_accepts_prompt_argument() {
 }
 
 #[test]
+fn create_help_exposes_the_current_free_model() {
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    cmd.args(["create", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("v4.5-all"));
+}
+
+#[test]
+fn cover_help_does_not_advertise_the_unverified_free_model() {
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    cmd.args(["clip", "cover", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("v5.5"))
+        .stdout(predicate::str::contains("v4.5-all").not());
+}
+
+#[test]
 fn clip_help_groups_clip_subcommands() {
     let mut cmd = Command::cargo_bin("sunox").expect("binary");
 
@@ -67,7 +88,22 @@ fn clip_help_groups_clip_subcommands() {
         .stdout(predicate::str::contains("status"))
         .stdout(predicate::str::contains("download"))
         .stdout(predicate::str::contains("upload"))
+        .stdout(predicate::str::contains("inspire"))
         .stdout(predicate::str::contains("timed-lyrics"));
+}
+
+#[test]
+fn inspire_help_exposes_only_the_live_captured_inputs() {
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    cmd.args(["clip", "inspire", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--title"))
+        .stdout(predicate::str::contains("--tags"))
+        .stdout(predicate::str::contains("--lyrics-file"))
+        .stdout(predicate::str::contains("--model").not())
+        .stdout(predicate::str::contains("--instrumental").not());
 }
 
 #[test]
@@ -543,6 +579,65 @@ fn polling_config_rejects_zero_timeout_before_auth() {
 }
 
 #[test]
+fn create_rejects_non_finite_generation_controls_before_auth() {
+    let test_home = isolated_test_home("sunox-cli-invalid-generation-control-test");
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    with_isolated_home(&mut cmd, &test_home)
+        .args([
+            "create",
+            "--lyrics",
+            "hello",
+            "--weirdness",
+            "NaN",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("\"code\": \"config_error\""))
+        .stderr(predicate::str::contains("finite number between 0 and 100"));
+}
+
+#[test]
+fn inspire_rejects_out_of_range_weirdness_before_auth() {
+    let test_home = isolated_test_home("sunox-cli-invalid-inspire-control-test");
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    with_isolated_home(&mut cmd, &test_home)
+        .args([
+            "clip",
+            "inspire",
+            "clip-a",
+            "--title",
+            "Title",
+            "--tags",
+            "pop",
+            "--lyrics",
+            "hello",
+            "--weirdness",
+            "101",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("\"code\": \"config_error\""))
+        .stderr(predicate::str::contains("finite number between 0 and 100"));
+}
+
+#[test]
+fn extend_rejects_non_finite_timestamp_before_auth() {
+    let test_home = isolated_test_home("sunox-cli-invalid-extend-timestamp-test");
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    with_isolated_home(&mut cmd, &test_home)
+        .args(["clip", "extend", "clip-a", "--at", "NaN", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("\"code\": \"config_error\""))
+        .stderr(predicate::str::contains("finite non-negative number"));
+}
+
+#[test]
 fn download_rejects_empty_ids_before_auth() {
     let mut cmd = Command::cargo_bin("sunox").expect("binary");
 
@@ -753,16 +848,16 @@ fn config_show_json_uses_success_envelope() {
 }
 
 #[test]
-fn config_show_applies_suno_env_overrides() {
+fn config_show_applies_sunox_env_overrides() {
     let mut cmd = Command::cargo_bin("sunox").expect("binary");
 
-    cmd.env("SUNO_OUTPUT_DIR", "/tmp/suno-output")
-        .env("SUNO_POLL_TIMEOUT_SECS", "777")
+    cmd.env("SUNOX_OUTPUT_DIR", "/tmp/sunox-output")
+        .env("SUNOX_POLL_TIMEOUT_SECS", "777")
         .args(["config", "show", "--json"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "\"output_dir\": \"/tmp/suno-output\"",
+            "\"output_dir\": \"/tmp/sunox-output\"",
         ))
         .stdout(predicate::str::contains("\"poll_timeout_secs\": 777"));
 }
@@ -779,6 +874,44 @@ fn config_set_normalizes_default_model_version() {
         .stdout(predicate::str::contains(
             "\"default_model\": \"chirp-fenix\"",
         ));
+}
+
+#[test]
+fn agent_info_exposes_the_current_free_model() {
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    cmd.arg("agent-info")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "\"v4.5-all\": \"chirp-auk-turbo\"",
+        ));
+}
+
+#[test]
+fn agent_info_reports_the_sunox_environment_prefix() {
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    cmd.arg("agent-info")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"env_prefix\": \"SUNOX_\""))
+        .stdout(predicate::str::contains(
+            "SUNOX_* environment variables override persisted config values",
+        ));
+}
+
+#[test]
+fn agent_info_exposes_inspiration_as_supported() {
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    cmd.arg("agent-info")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"clip inspire\""))
+        .stdout(predicate::str::contains("\"clip_inspiration\""))
+        .stdout(predicate::str::contains("\"playlist_condition_generation\"").not())
+        .stdout(predicate::str::contains("\"default_model\": \"auto"));
 }
 
 #[test]
@@ -808,9 +941,7 @@ fn global_config_override_applies_without_persisting() {
         .args(["config", "show", "--json"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "\"default_model\": \"chirp-fenix\"",
-        ))
+        .stdout(predicate::str::contains("\"default_model\": \"auto\""))
         .stdout(predicate::str::contains("\"serial_mutations\": true"));
 }
 
@@ -970,6 +1101,7 @@ fn agent_info_separates_challenge_capable_commands_from_async_edits() {
             "create",
             "describe",
             "clip cover",
+            "clip inspire",
             "clip extend",
             "clip stems"
         ]
@@ -995,6 +1127,7 @@ fn agent_info_separates_challenge_capable_commands_from_async_edits() {
 
     for command in [
         "clip cover",
+        "clip inspire",
         "clip extend",
         "clip concat",
         "clip stems",

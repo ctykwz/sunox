@@ -109,8 +109,8 @@ async fn create(args: PersonaCreateArgs, ctx: &AppContext) -> Result<(), CliErro
         voice_recording_id: None,
         verification_id: None,
     };
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    let persona = ctx.client().await?.create_persona(&req).await?;
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
+    let persona = client.create_persona(&req).await?;
     match ctx.fmt {
         OutputFormat::Json => output::json::success(&persona),
         OutputFormat::Table => {
@@ -136,8 +136,7 @@ async fn set(args: PersonaSetArgs, ctx: &AppContext) -> Result<(), CliError> {
         ));
     }
 
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    let client = ctx.client().await?;
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
     let current = client.get_persona(&args.id).await?;
     let req = build_edit_persona_request(args, current);
     let persona = client.edit_persona(&req).await?;
@@ -177,12 +176,8 @@ async fn publish(
     ctx: &AppContext,
     is_public: bool,
 ) -> Result<(), CliError> {
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    let persona = ctx
-        .client()
-        .await?
-        .set_persona_visibility(&args.id, is_public)
-        .await?;
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
+    let persona = client.set_persona_visibility(&args.id, is_public).await?;
     let state = if is_public { "public" } else { "private" };
     match ctx.fmt {
         OutputFormat::Json => output::json::success(json!({
@@ -204,8 +199,8 @@ async fn unlove(args: PersonaLoveArgs, ctx: &AppContext) -> Result<(), CliError>
 }
 
 async fn toggle_love(args: PersonaToggleLoveArgs, ctx: &AppContext) -> Result<(), CliError> {
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    let response = ctx.client().await?.toggle_persona_love(&args.id).await?;
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
+    let response = client.toggle_persona_love(&args.id).await?;
     match ctx.fmt {
         OutputFormat::Json => output::json::success(&response),
         OutputFormat::Table => {
@@ -217,12 +212,8 @@ async fn toggle_love(args: PersonaToggleLoveArgs, ctx: &AppContext) -> Result<()
 }
 
 async fn set_love(args: PersonaLoveArgs, ctx: &AppContext, loved: bool) -> Result<(), CliError> {
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    let response = ctx
-        .client()
-        .await?
-        .set_persona_love(&args.id, loved)
-        .await?;
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
+    let response = client.set_persona_love(&args.id, loved).await?;
     match ctx.fmt {
         OutputFormat::Json => output::json::success(&response),
         OutputFormat::Table => {
@@ -268,8 +259,7 @@ async fn update_trash(
     action: PersonaTrashAction,
 ) -> Result<(), CliError> {
     ensure_destructive_confirmed(args.yes, action.command())?;
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    let client = ctx.client().await?;
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
     let ids = std::slice::from_ref(&args.id);
     let response = match action {
         PersonaTrashAction::Trash => client.trash_personas(ids).await?,
@@ -295,8 +285,7 @@ async fn update_trash(
 }
 
 async fn restore(args: PersonaRestoreArgs, ctx: &AppContext) -> Result<(), CliError> {
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    let client = ctx.client().await?;
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
     let ids = std::slice::from_ref(&args.id);
     let response = client.restore_personas(ids).await?;
     let changed = response.updated_persona_ids.contains(&args.id);

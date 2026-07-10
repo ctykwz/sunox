@@ -85,7 +85,7 @@ Risk control defaults for agents:
   auth material.
 
 Treat commands that return new or processing clips as asynchronous workflows.
-After `sunox create`, `sunox clip cover`, `sunox clip extend`, `sunox clip
+After `sunox create`, `sunox clip inspire`, `sunox clip cover`, `sunox clip extend`, `sunox clip
 concat`, `sunox clip stems`, `sunox clip remaster`, `sunox clip speed`, or
 `sunox clip reverse` returns a new/processing clip ID, call `sunox clip wait
 <clip_id> --json` before download, quality filtering, or playlist decisions
@@ -148,6 +148,9 @@ sunox create \
 
 # Generate from a free-text description (Suno writes the lyrics)
 sunox create --title "Rainy Morning" "a chill lo-fi track about rainy mornings"
+
+# Use one existing clip as loose inspiration
+sunox clip inspire <clip_id> --title "New Song" --tags "garage pop" --lyrics-file lyrics.txt
 
 # Wait for returned clip IDs, then download completed MP3s
 sunox clip wait <clip_id_1> <clip_id_2>
@@ -253,11 +256,11 @@ sunox config set output_dir ./songs
 | Flag | What it does | Range / format |
 |---|---|---|
 | `--title` | Song title | ≤ 100 chars |
-| `--tags` | Style direction | "pop, synths, upbeat" (≤ 1000 chars) |
-| `--exclude` | Styles to avoid | "metal, heavy, dark" (≤ 1000 chars) |
-| `--lyrics` / `--lyrics-file` | Custom lyrics with `[Verse]` `[Chorus]` tags | ≤ 5000 chars |
-| `--prompt` (describe mode) | Free-text description | ≤ 500 chars |
-| `--model` | Model version | v5.5 (default), v5, v4.5+, v4.5, v4 |
+| `--tags` | Style direction | Read `max_lengths.tags` from `sunox models --json` |
+| `--exclude` | Styles to avoid | Read `max_lengths.negative_tags` from `sunox models --json` |
+| `--lyrics` / `--lyrics-file` | Custom lyrics with `[Verse]` `[Chorus]` tags | Read `max_lengths.gpt_description_prompt` |
+| `--prompt` (describe mode) | Free-text description | Read `max_lengths.prompt` |
+| `--model` | Model version | account default when omitted; v5.5, v5, v4.5+, v4.5-all, v4.5, v4 |
 | `--vocal` | Vocal gender | male, female |
 | `--persona` | Voice persona UUID | from Suno voice creation |
 | `--weirdness` | How experimental | 0–100 |
@@ -272,9 +275,11 @@ sunox config set output_dir ./songs
 
 | Version | Codename | Notes |
 |---|---|---|
-| **v5.5** | chirp-fenix | Default, latest, best quality |
+| auto | account response | CLI default; resolves the current usable account default |
+| v5.5 | chirp-fenix | Latest generation; fallback only when billing info is unavailable |
 | v5 | chirp-crow | Previous gen |
 | v4.5+ | chirp-bluejay | Extended capabilities |
+| v4.5-all | chirp-auk-turbo | Free-tier option when available to the account |
 | v4.5 | chirp-auk | Stable |
 | v4 | chirp-v4 | Legacy |
 | v3.5 | chirp-v3-5 | Legacy |
@@ -282,6 +287,12 @@ sunox config set output_dir ./songs
 | v2 | chirp-v2-xxl-alpha | Legacy |
 
 Remaster models: v5.5 = chirp-flounder, v5 = chirp-carp, v4.5+ = chirp-bass.
+
+Model availability, the account default, and length limits are account-specific. The default
+`default_model=auto` resolves the account's usable default directly from `/api/billing/info/`.
+`sunox models --json` exposes the same account data for inspection. Explicit models are validated
+against `can_use` and `max_lengths` when billing info is available; v5.5 is used only when that
+read is unavailable.
 
 ## Agent-friendly output
 
@@ -362,11 +373,11 @@ sunox clip download $ids --output ./archive/
   submit also marks `override_fields=["tags"]`.
 - Commands that submit through `/api/generate/v2-web/` preflight `POST /api/c/check` with `ctype=generation`; if Suno reports a challenge and stored Clerk refresh material exists, Sunox refreshes the JWT once and repeats the preflight before surfacing the challenge. When no challenge is required, submit uses `token=null` and `token_provider=null`.
 - If Suno requires a challenge, prefer `--token <solved>` when available; use `--captcha` only to force the built-in browser-backed solver.
-- Generation paths (normal, describe, voice persona, cover, extend, generation-backed stems) use `/api/generate/v2-web/`; create, cover, extend, and stems expose `--token`, `--captcha`, and `--no-captcha`. Cover fetches the source clip and submits its title because Suno requires a string `title` for this variant. Extend fetches the source clip first; when `GET /api/feed/?ids` omits source style metadata, it searches feed/v3 by source title and merges the exact source id. It defaults `title`, `tags`, `negative_tags`, and `make_instrumental` from the source when available; use `--title`, `--tags`, `--exclude`, `--instrumental`, or `--no-instrumental` to override. Remaster and speed use their current web edit/generation routes. `sunox clip list` supports query-only filters such as `--liked`, `--public`, `--upload`, `--cover`, `--extend`, and `--sort popular`; this is not a library sync workflow. `sunox clip stems` is not the same as Suno Web Pro Get Stems export. You usually only need the subcommands.
+- Generation paths (normal, describe, voice persona, inspiration, cover, extend, generation-backed stems) use `/api/generate/v2-web/`; create, inspire, cover, extend, and stems expose `--token`, `--captcha`, and `--no-captcha`. Cover fetches the source clip and submits its title because Suno requires a string `title` for this variant. Inspiration uses one source clip and the live-captured playlist-conditioned request; do not invent uncaptured instrumental or multi-source inputs. Extend fetches the source clip first; when `GET /api/feed/?ids` omits source style metadata, it searches feed/v3 by source title and merges the exact source id. It defaults `title`, `tags`, `negative_tags`, and `make_instrumental` from the source when available; use `--title`, `--tags`, `--exclude`, `--instrumental`, or `--no-instrumental` to override. Remaster and speed use their current web edit/generation routes. `sunox clip list` supports query-only filters such as `--liked`, `--public`, `--upload`, `--cover`, `--extend`, and `--sort popular`; this is not a library sync workflow. `sunox clip stems` is not the same as Suno Web Pro Get Stems export. You usually only need the subcommands.
 - Persona list/detail/clips/create/set/processed-clip/publish/unpublish/love/unlove/toggle-love/delete/restore/purge are available through `sunox persona ...`.
 - Playlist create/list/detail/metadata/add/remove/publish/reorder/save/unsave/like/dislike/restore/delete are available through `sunox playlist ...`; use `playlist set <id> --image-file <path>` for local cover uploads.
 - Clip delete/restore/purge and like/dislike are available through `sunox clip delete`, `sunox clip restore`, `sunox clip purge`, `sunox clip like`, and `sunox clip dislike`. `sunox clip empty-trash -y` permanently deletes every trashed clip. Purge and empty-trash are irreversible and require an explicit user request. `--clear` removes the selected reaction.
 - `sunox clip upload <file>` uploads local audio through Suno's presigned S3 flow, waits for processing, initializes a clip, and can set title/lyrics metadata. `sunox clip upload-status <upload_id>` only reads an existing upload's processing status.
-- `sunox config set <key> <value>` persists local defaults; `SUNO_*` environment variables override persisted config.
+- `sunox config set <key> <value>` persists local defaults; `SUNOX_*` environment variables override persisted config.
 - When the CLI returns `schema_drift` (Suno changed its web schema), run `sunox update` to pull the latest binary from GitHub Releases.
 - When unsure about flags, run `sunox <command> --help` or `sunox agent-info`.

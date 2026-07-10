@@ -14,6 +14,8 @@ mod playlist;
 mod prompts;
 mod upload;
 
+#[cfg(test)]
+pub use account::MaxLengths;
 pub use account::{BillingInfo, Model};
 pub use clip::Clip;
 pub use clip_info::{

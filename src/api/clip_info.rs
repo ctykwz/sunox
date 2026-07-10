@@ -123,10 +123,7 @@ impl SunoClient {
 }
 
 fn should_abort_supplemental_error(error: &CliError) -> bool {
-    matches!(
-        error,
-        CliError::AuthMissing | CliError::AuthExpired | CliError::RateLimited
-    )
+    error.is_auth_or_rate_limit()
 }
 
 fn supplemental_error(field: &str, error: CliError) -> ClipInfoSupplementalError {
@@ -134,5 +131,16 @@ fn supplemental_error(field: &str, error: CliError) -> ClipInfoSupplementalError
         field: field.to_string(),
         code: error.error_code().to_string(),
         message: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_abort_supplemental_error;
+    use crate::core::CliError;
+
+    #[test]
+    fn auth_change_aborts_supplemental_reads() {
+        assert!(should_abort_supplemental_error(&CliError::AuthChanged));
     }
 }

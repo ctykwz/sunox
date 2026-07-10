@@ -191,9 +191,9 @@ Studio routes also appeared in the bundle, but they are excluded by scope.
 Agent-facing capability metadata should expose known non-implemented or
 unverified surfaces instead of advertising an empty gap list. As of this pass,
 `sunox agent-info --json` reports video upload, `update_feedback_state`,
-social/profile/project/video surfaces, stale voice-verification routes,
-live-captured playlist-conditioned generation, and Studio export surfaces under
-`unsupported_surfaces`. Image upload is implemented for clip and playlist cover
+social/profile/project/video surfaces, stale voice-verification routes, and Studio export surfaces under
+`unsupported_surfaces`. Playlist-conditioned generation is implemented as
+`sunox clip inspire`. Image upload is implemented for clip and playlist cover
 replacement. Fade is now exposed as `sunox clip fade`; reverse,
 crop/remove-section, and official download formats were added from the July 10,
 2026 current bundle scan.
@@ -242,17 +242,20 @@ Mutation or credit-risk surfaces that need explicit confirmation before capture:
 
 ## Models (from /api/billing/info/)
 
+Read-only account response rechecked on 2026-07-10. Availability and defaults are account-specific;
+the length limits below are the values returned by that response.
+
 | Display Name | External Key | Default | Max Prompt | Max Tags | Max Neg Tags | Max GPT Desc |
 |---|---|---|---|---|---|---|
-| **v5.5** | `chirp-fenix` | **YES** | 5000 | 1000 | 1000 | 500 |
-| v5 | `chirp-crow` | No | 5000 | 1000 | 1000 | 500 |
-| v4.5+ | `chirp-bluejay` | No | 5000 | 1000 | 1000 | 500 |
-| v4.5 | `chirp-auk` | No | 5000 | 1000 | 1000 | 500 |
-| v4.5-all | `chirp-auk-turbo` | Free default | 5000 | 1000 | 1000 | 500 |
-| v4 | `chirp-v4` | No | 3000 | 200 | 1000 | 500 |
-| v3.5 | `chirp-v3-5` | No | 3000 | 200 | 1000 | 500 |
-| v3 | `chirp-v3-0` | No | 1250 | 200 | 1000 | 500 |
-| v2 | `chirp-v2-xxl-alpha` | No | 1250 | 200 | 1000 | 500 |
+| **v5.5** | `chirp-fenix` | **YES** | 5000 | 1000 | 1000 | 3000 |
+| v5 | `chirp-crow` | No | 5000 | 1000 | 1000 | 3000 |
+| v4.5+ | `chirp-bluejay` | No | 5000 | 1000 | 1000 | 3000 |
+| v4.5 | `chirp-auk` | No | 5000 | 1000 | 1000 | 3000 |
+| v4.5-all | `chirp-auk-turbo` | Free model | 5000 | 1000 | 1000 | 3000 |
+| v4 | `chirp-v4` | No | 3000 | 200 | 1000 | 3000 |
+| v3.5 | `chirp-v3-5` | No | 3000 | 200 | 1000 | 3000 |
+| v3 | `chirp-v3-0` | No | 3000 | 200 | 1000 | 3000 |
+| v2 | `chirp-v2-xxl-alpha` | No | 3000 | 200 | 1000 | 3000 |
 
 ### Remaster Models
 | Name | Key |
@@ -360,6 +363,9 @@ If the challenge is still required, the CLI stops before submit unless the user
 supplied `--token` or explicitly opted into `--captcha`. When a solved token is
 present, the submit body carries `token_provider: 1`. The user-facing create,
 cover, extend, and stems commands expose these challenge controls.
+On generation submits that carry a solved challenge token, a generic `invalid token`
+response is preserved as a structured challenge/API error; ordinary API requests keep
+that phrase on the JWT refresh path.
 
 **Two modes**:
 1. **Description mode** (`metadata.create_mode = "inspiration"`, `prompt` is the description) — Suno writes lyrics from description
@@ -545,6 +551,13 @@ in `prompt` and did not include `gpt_description_prompt`. Do not apply the
 custom-create `gpt_description_prompt` rule to `task: "playlist_condition"`.
 The response uses the normal generation response shape with `clips`,
 `metadata`, `status`, `batch_size`, and `created_at`.
+
+Current CLI exposure is `sunox clip inspire <clip_id> --title <title> --tags
+<tags> --lyrics-file <path>`. It deliberately accepts one source clip and vocal
+lyrics only: multi-source and instrumental variants have not been live-captured.
+The command runs `/api/prompts/upsample`, carries the real response into
+`metadata.last_tags_generation`, and preserves the captured empty
+`override_fields` array.
 
 ### POST /api/feed/v3
 **Request** captured from `/create`:
@@ -780,6 +793,12 @@ the account mutation lock. A first failure preserves its semantic error. If a
 later request fails after earlier clips succeeded, the CLI returns
 `partial_mutation` with `operation`, `succeeded_clip_ids`, `failed`, and
 `not_attempted_clip_ids` so callers can retry only unresolved clips.
+
+Mutation locks, API clients, and browser challenge solving are derived from one
+authentication snapshot per command. The shared local `auth.json` uses a global
+state lock for writes and logout, while JWT refresh remains account-scoped and
+uses a compare-before-write check so a stale refresh cannot replace a newly
+active account.
 
 Playlist create/set, image upload and cover assignment, and audio upload are
 multi-step workflows rather than atomic endpoints. Their workflow orchestration

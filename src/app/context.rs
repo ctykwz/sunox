@@ -33,17 +33,27 @@ impl AppContext {
         SunoClient::new_with_refresh(auth).await
     }
 
+    pub async fn mutation_client(
+        &self,
+    ) -> Result<(SunoClient, Option<MutationLockGuard>), CliError> {
+        let client = self.client().await?;
+        let guard = self.acquire_mutation_lock_for(&client.auth_state_snapshot())?;
+        Ok((client, guard))
+    }
+
     pub fn should_lock_mutations(&self) -> bool {
         !self.parallel && self.config.serial_mutations
     }
 
-    pub fn acquire_mutation_lock(&self) -> Result<Option<MutationLockGuard>, CliError> {
+    pub fn acquire_mutation_lock_for(
+        &self,
+        auth: &AuthState,
+    ) -> Result<Option<MutationLockGuard>, CliError> {
         if !self.should_lock_mutations() {
             return Ok(None);
         }
 
-        let auth = AuthState::load()?;
-        MutationLockGuard::acquire(&auth).map(Some)
+        MutationLockGuard::acquire(auth).map(Some)
     }
 }
 

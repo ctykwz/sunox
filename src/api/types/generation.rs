@@ -29,7 +29,7 @@ impl GenerationWebContext {
 /// Schema used by Suno's web generation endpoint `/api/generate/v2-web/`.
 /// Placeholder fields must be present or Suno's server-side schema rejects
 /// the request.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GenerateRequest {
     /// Optional anti-bot challenge token. Suno accepts many authenticated
     /// generation requests without one; callers can still force or supply a
@@ -61,6 +61,10 @@ pub struct GenerateRequest {
     pub continue_clip_id: Option<String>,
     pub continued_aligned_prompt: Option<String>,
     pub continue_at: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub playlist_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub playlist_clip_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stem_type_id: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -102,6 +106,8 @@ impl GenerateRequest {
             continue_clip_id: None,
             continued_aligned_prompt: None,
             continue_at: None,
+            playlist_id: None,
+            playlist_clip_ids: None,
             stem_type_id: None,
             stem_type_group_name: None,
             stem_task: None,
@@ -116,7 +122,7 @@ impl GenerateRequest {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GenerateMetadata {
     pub web_client_pathname: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -164,7 +170,7 @@ impl GenerateMetadata {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LastTagsGeneration {
     pub tags: String,
     pub request_id: String,
@@ -185,7 +191,7 @@ impl LastTagsGeneration {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ControlSliders {
     /// Weirdness: 0.0-1.0 (maps from 0-100 in UI)
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -55,8 +55,7 @@ async fn info(args: PlaylistInfoArgs, ctx: &AppContext) -> Result<(), CliError> 
 }
 
 async fn create(args: PlaylistCreateArgs, ctx: &AppContext) -> Result<(), CliError> {
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    let client = ctx.client().await?;
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
     let uploaded_cover = if let Some(image_file) = args.image_file.as_deref() {
         if !ctx.quiet {
             eprintln!("Uploading playlist cover image...");
@@ -117,8 +116,7 @@ async fn set(args: PlaylistSetArgs, ctx: &AppContext) -> Result<(), CliError> {
         ));
     }
 
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    let client = ctx.client().await?;
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
     let uploaded_cover = if let Some(image_file) = args.image_file.as_deref() {
         if !ctx.quiet {
             eprintln!("Uploading playlist cover image...");
@@ -171,9 +169,8 @@ async fn set(args: PlaylistSetArgs, ctx: &AppContext) -> Result<(), CliError> {
 
 async fn add(args: PlaylistTracksArgs, ctx: &AppContext) -> Result<(), CliError> {
     ensure_clip_ids(&args.clip_ids)?;
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    ctx.client()
-        .await?
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
+    client
         .add_clips_to_playlist(&args.id, &args.clip_ids)
         .await?;
     match ctx.fmt {
@@ -189,10 +186,8 @@ async fn add(args: PlaylistTracksArgs, ctx: &AppContext) -> Result<(), CliError>
 
 async fn remove(args: PlaylistTracksArgs, ctx: &AppContext) -> Result<(), CliError> {
     ensure_clip_ids(&args.clip_ids)?;
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    let report = ctx
-        .client()
-        .await?
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
+    let report = client
         .remove_clips_from_playlist(&args.id, &args.clip_ids)
         .await?;
     if !report.is_success() {
@@ -216,11 +211,8 @@ async fn remove(args: PlaylistTracksArgs, ctx: &AppContext) -> Result<(), CliErr
 
 async fn publish(args: PlaylistPublishArgs, ctx: &AppContext) -> Result<(), CliError> {
     let is_public = !args.private;
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    ctx.client()
-        .await?
-        .set_playlist_visibility(&args.id, is_public)
-        .await?;
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
+    client.set_playlist_visibility(&args.id, is_public).await?;
     let state = if is_public { "public" } else { "private" };
     match ctx.fmt {
         OutputFormat::Json => output::json::success(json!({
@@ -233,9 +225,8 @@ async fn publish(args: PlaylistPublishArgs, ctx: &AppContext) -> Result<(), CliE
 }
 
 async fn reorder(args: PlaylistReorderArgs, ctx: &AppContext) -> Result<(), CliError> {
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    ctx.client()
-        .await?
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
+    client
         .reorder_playlist_clip(&args.id, &args.clip_id, args.index)
         .await?;
     match ctx.fmt {
@@ -253,8 +244,8 @@ async fn reorder(args: PlaylistReorderArgs, ctx: &AppContext) -> Result<(), CliE
 }
 
 async fn restore(args: PlaylistRestoreArgs, ctx: &AppContext) -> Result<(), CliError> {
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    ctx.client().await?.restore_playlist(&args.id).await?;
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
+    client.restore_playlist(&args.id).await?;
     match ctx.fmt {
         OutputFormat::Json => {
             output::json::success(json!({ "playlist_id": args.id, "restored": true }))
@@ -265,8 +256,8 @@ async fn restore(args: PlaylistRestoreArgs, ctx: &AppContext) -> Result<(), CliE
 }
 
 async fn save(args: PlaylistSaveArgs, ctx: &AppContext) -> Result<(), CliError> {
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    ctx.client().await?.save_playlist(&args.id).await?;
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
+    client.save_playlist(&args.id).await?;
     match ctx.fmt {
         OutputFormat::Json => {
             output::json::success(json!({ "playlist_id": args.id, "saved": true }))
@@ -277,8 +268,8 @@ async fn save(args: PlaylistSaveArgs, ctx: &AppContext) -> Result<(), CliError> 
 }
 
 async fn unsave(args: PlaylistSaveArgs, ctx: &AppContext) -> Result<(), CliError> {
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    ctx.client().await?.unsave_playlist(&args.id).await?;
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
+    client.unsave_playlist(&args.id).await?;
     match ctx.fmt {
         OutputFormat::Json => {
             output::json::success(json!({ "playlist_id": args.id, "saved": false }))
@@ -302,9 +293,8 @@ async fn react(
     reaction: PlaylistReaction,
 ) -> Result<(), CliError> {
     let next_reaction = if args.clear { None } else { Some(reaction) };
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    ctx.client()
-        .await?
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
+    client
         .set_playlist_reaction(&args.id, next_reaction)
         .await?;
     let action = match (reaction, args.clear) {
@@ -326,8 +316,8 @@ async fn react(
 
 async fn delete(args: PlaylistDeleteArgs, ctx: &AppContext) -> Result<(), CliError> {
     ensure_destructive_confirmed(args.yes, "sunox playlist delete")?;
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    ctx.client().await?.trash_playlist(&args.id).await?;
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
+    client.trash_playlist(&args.id).await?;
     match ctx.fmt {
         OutputFormat::Json => {
             output::json::success(json!({ "playlist_id": args.id, "deleted": true }))

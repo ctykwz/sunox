@@ -34,6 +34,8 @@ L'interface Web de Suno fonctionne bien pour une utilisation manuelle, mais elle
 
 `sunox` corrige cela : authentification automatique depuis le navigateur, paramètres de génération exposés en flags CLI, sortie lisible par un humain ou structurée en JSON, et paroles synchronisées intégrées automatiquement dans les MP3 téléchargés.
 
+Sunox est un projet non officiel, sans affiliation ni approbation de Suno. Il utilise des API Web privées susceptibles de changer sans préavis. Il vous appartient de respecter les conditions de Suno, les limites du compte et les droits applicables aux contenus générés ou téléversés.
+
 ## Installation
 
 ### Cargo
@@ -42,9 +44,12 @@ L'interface Web de Suno fonctionne bien pour une utilisation manuelle, mais elle
 cargo install sunox
 ```
 
+Rust 1.88 ou une version plus récente est requis.
+
 ### Binaires précompilés
 
 Téléchargez les binaires macOS, Linux et Windows depuis [GitHub Releases](https://github.com/ctykwz/sunox/releases).
+Chaque release fournit `SHA256SUMS` ; `sunox update` vérifie l'archive choisie avant installation.
 
 ### Mise à jour intégrée
 
@@ -99,6 +104,7 @@ Les écritures Suno sont sérialisées par compte par défaut. Désactivez ce
 comportement de façon persistante avec `sunox config set serial_mutations false`,
 pour une invocation avec `-c serial_mutations=false`, ou pour une seule commande
 avec `--parallel`.
+Les variables d'environnement utilisent le préfixe `SUNOX_*`, par exemple `SUNOX_DEFAULT_MODEL`, `SUNOX_OUTPUT_DIR` et `SUNOX_BROWSER_PATH`.
 
 ## Commandes humaines
 
@@ -126,6 +132,7 @@ sunox lyrics              Générer uniquement des paroles, sans consommer de cr
 sunox clip extend         Continuer un clip depuis un timestamp
 sunox clip concat         Assembler des clips en chanson complète
 sunox clip cover          Créer une cover avec un autre style ou modèle
+sunox clip inspire        Générer un nouveau morceau inspiré librement d'un clip
 sunox clip remaster       Remasteriser avec un autre modèle
 sunox clip speed          Ajuster la vitesse de lecture
 sunox clip reverse        Inverser l'audio
@@ -204,6 +211,8 @@ sunox login
 
 `sunox login` essaie d'abord de lire le cookie Clerk depuis Chrome, Arc, Brave, Firefox ou Edge. Si cette extraction réussit, Sunox enregistre la source du navigateur et les paramètres publics disponibles, comme les langues acceptées, sans fabriquer de user-agent depuis ce simple libellé. Si cette extraction échoue, il ouvre un profil de navigateur dédié à Sunox et compatible Chrome/Edge, puis attend que vous vous connectiez à Suno dans cette fenêtre. La session Clerk capturée est ensuite échangée contre un JWT et stockée localement pour les rafraîchissements. Le login interactif capture aussi le user-agent et les langues acceptées ; les requêtes API dérivent les client hints Chromium du user-agent retenu, envoient les headers de fetch metadata du navigateur et utilisent des fallback champ par champ quand les valeurs réelles manquent.
 
+Les identifiants sont stockés dans un fichier JSON local, pas dans le trousseau du système. Sous Unix, le fichier est créé avec le mode `0600` ; sous Windows, Sunox dépend de l'ACL utilisateur du dossier de configuration. Les valeurs `--cookie` et `--jwt` peuvent apparaître dans l'historique du shell et la liste des processus : préférez `sunox login` sur une machine interactive et ne placez jamais d'identifiants dans des logs, prompts, fichiers de projet ou commits.
+
 Méthodes d'authentification :
 
 1. `sunox login` : extraction automatique depuis le navigateur, avec fallback Chrome/Edge interactif, recommandée.
@@ -218,12 +227,12 @@ Méthodes d'authentification :
 | Paramètre | Rôle | Valeurs |
 |---|---|---|
 | `--title` | Titre du morceau | jusqu'à 100 caractères |
-| `--tags` | Direction de style | par exemple `"pop, synths, upbeat"` |
+| `--tags` | Direction de style | Limite du modèle/compte ; voir `sunox models --json` |
 | `--enhance-tags` | Améliorer les tags via le flux tag upsample de Suno Web avant l'envoi | opt-in explicite |
-| `--exclude` | Styles à éviter | par exemple `"metal, heavy, dark"` |
-| `--lyrics` / `--lyrics-file` | Paroles personnalisées | sections comme `[Verse]` prises en charge |
-| `--prompt` | Prompt du mode description | jusqu'à 500 caractères |
-| `--model` | Version du modèle | v5.5, v5, v4.5+, v4.5, v4, v3.5, v3, v2 |
+| `--exclude` | Styles à éviter | Limite du modèle/compte ; voir `sunox models --json` |
+| `--lyrics` / `--lyrics-file` | Paroles personnalisées | `max_lengths.gpt_description_prompt` |
+| `--prompt` | Prompt du mode description | `max_lengths.prompt` |
+| `--model` | Version du modèle | v5.5, v5, v4.5+, v4.5-all, v4.5, v4, v3.5, v3, v2 |
 | `--vocal` | Genre vocal | male, female |
 | `--persona` | ID de voice persona | UUID de la voix dans Suno |
 | `--weirdness` | Niveau expérimental | 0-100 |
@@ -267,6 +276,7 @@ sunox playlist reorder <playlist_id> --clip-id <clip_id> --index 0
 ```bash
 # Ces commandes peuvent renvoyer un clip submitted/processing ; attendez avant toute action suivante
 sunox clip cover <clip_id> --tags "jazz, smooth piano" --model v5.5
+sunox clip inspire <clip_id> --title "New Song" --tags "garage pop" --lyrics-file lyrics.txt
 sunox clip remaster <clip_id> --model v5.5
 sunox clip speed <clip_id> --multiplier 0.94
 sunox clip reverse <clip_id>
@@ -310,9 +320,11 @@ sunox clip upload-status <upload_id> --json  # lecture seule, sans rejouer la mu
 
 | Version | Codename | Description |
 |---|---|---|
-| **v5.5** | chirp-fenix | Par défaut, meilleure qualité actuelle |
+| auto | réponse du compte | Valeur CLI par défaut ; choisit le modèle utilisable par défaut du compte |
+| v5.5 | chirp-fenix | Génération la plus récente ; fallback uniquement si billing est indisponible |
 | v5 | chirp-crow | Génération précédente |
 | v4.5+ | chirp-bluejay | Capacités étendues |
+| v4.5-all | chirp-auk-turbo | Option gratuite lorsqu'elle est proposée au compte |
 | v4.5 | chirp-auk | Version stable |
 | v4 | chirp-v4 | Ancienne version |
 | v3.5 | chirp-v3-5 | Ancienne version |
@@ -320,6 +332,8 @@ sunox clip upload-status <upload_id> --json  # lecture seule, sans rejouer la mu
 | v2 | chirp-v2-xxl-alpha | Ancienne version |
 
 Modèles de remaster : v5.5 = chirp-flounder, v5 = chirp-carp, v4.5+ = chirp-bass.
+
+La disponibilité, le modèle par défaut du compte et les limites dépendent du compte. `default_model=auto` choisit directement le modèle utilisable par défaut depuis `/api/billing/info/`; `sunox models --json` expose les mêmes données de compte pour inspection. Un modèle explicite est validé avec `can_use` et `max_lengths` lorsque billing est disponible ; v5.5 ne sert de fallback que si cette lecture échoue.
 
 ## Sortie adaptée aux agents
 
@@ -365,6 +379,8 @@ sunox install-skill --target cursor
 ## Notes d'implémentation
 
 Les chemins generate, describe, persona, cover et extend réutilisent `/api/generate/v2-web/` de Suno Web. Le body custom create a été recapturé le 30 juin 2026 : les paroles personnalisées sont envoyées dans `gpt_description_prompt`, tandis que `prompt` reste vide ; avec un challenge token résolu, `token_provider: 1` est aussi envoyé. Sunox renseigne `metadata.user_tier` depuis le `plan.id` de `/api/billing/info/` pour le compte courant quand c'est disponible, sinon il retombe sur la valeur vide compatible Web. Avec `--enhance-tags`, Sunox appelle d'abord `/api/prompts/upsample`, puis place les tags et le `request_id` retournés dans `metadata.last_tags_generation` et marque `override_fields=["tags"]`; le champ `personalization_enabled` suit la forme du submit Web capturé. Sans ce flag, `metadata.last_tags_generation` n'est pas envoyé. Instrumental create utilise aussi custom mode : avec `sunox create --instrumental <prompt>`, le prompt est intégré aux style tags et le champ `prompt` soumis reste vide, comme dans la requête Web recapturée dans `15suno-labs-nostudio-20260630.har`. `task: "playlist_condition"` a également été capturé, mais c'est un flux inspiration séparé qui place les paroles dans `prompt`, donc il ne doit pas reprendre les règles du custom create standard. Extend lit le clip source avant submit ; si `GET /api/feed/?ids` omet les métadonnées de style source, Sunox cherche le titre source via feed/v3 et fusionne seulement les métadonnées du clip id exact. `title` prend le titre source sauf si `--title` est fourni ; `tags`, `negative_tags` et `metadata.make_instrumental` sont hérités quand disponibles. Utilisez `--tags`, `--exclude`, `--instrumental` ou `--no-instrumental` pour remplacer ces valeurs. `clip list` utilise `POST /api/feed/v3` et expose des filtres de requête comme `--liked`, `--public`, `--upload`, `--cover`, `--extend` et `--sort popular`; ce n'est pas un workflow de library sync. Le remaster utilise `/api/generate/upsample`, et speed adjust utilise `/api/clips/adjust-speed/`. Par défaut, `sunox` ne soumet pas de challenge token ; si Suno renvoie required et qu'une session Clerk peut être rafraîchie, Sunox rafraîchit le JWT une fois puis relance le preflight avant de demander `--token <solved>` ou un `--captcha` explicite. Les bodies cover generation et concat edit nécessitent encore une nouvelle capture live. Les mutations de playlists sont implémentées à partir d'indices bundle/live et de tests de contrat endpoint ; `playlist remove` envoie un clip par requête, car les gros lots peuvent retourner Suno 500.
+
+`sunox clip inspire` implémente le `task=playlist_condition` capturé en production : une seule source, tag upsample réel et paroles dans `prompt`. Les variantes multi-source et instrumentales non capturées ne sont pas exposées. Les variables d'environnement publiques utilisent le préfixe `SUNOX_*`.
 
 ## Contribution
 

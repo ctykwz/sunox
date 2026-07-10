@@ -44,19 +44,23 @@ async fn refresh_state_with_lock(
     }
 
     let _refresh_guard = AuthRefreshLockGuard::acquire(auth)?;
-    if let Ok(saved_auth) = AuthState::load()
-        && let Some(reusable_auth) = reusable_saved_auth_after_lock(auth, saved_auth, mode)
-    {
-        *auth = reusable_auth;
-        return Ok(());
+    if let Ok(saved_auth) = AuthState::load() {
+        if !auth.matches_account_material(&saved_auth) {
+            return Err(active_auth_changed_error());
+        }
+        if let Some(reusable_auth) = reusable_saved_auth_after_lock(auth, saved_auth, mode) {
+            *auth = reusable_auth;
+            return Ok(());
+        }
     }
+    let refresh_origin = auth.clone();
 
     if let (Some(cookie), Some(session_id)) = (&auth.clerk_client_cookie, &auth.session_id) {
         eprintln!("{}", refresh_with_session_message(mode));
         match clerk_refresh_jwt(client, cookie, session_id).await {
             Ok(jwt) => {
                 auth.jwt = Some(jwt);
-                auth.save_without_account_lock()?;
+                auth.save_after_refresh(&refresh_origin)?;
                 eprintln!("JWT refreshed successfully");
                 Ok(())
             }
@@ -71,7 +75,7 @@ async fn refresh_state_with_lock(
             Ok((session_id, jwt)) => {
                 auth.session_id = Some(session_id);
                 auth.jwt = Some(jwt);
-                auth.save_without_account_lock()?;
+                auth.save_after_refresh(&refresh_origin)?;
                 eprintln!("JWT refreshed successfully");
                 Ok(())
             }
@@ -83,6 +87,10 @@ async fn refresh_state_with_lock(
     } else {
         Err(CliError::AuthExpired)
     }
+}
+
+fn active_auth_changed_error() -> CliError {
+    CliError::AuthChanged
 }
 
 fn reusable_saved_auth_after_lock(

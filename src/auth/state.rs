@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use crate::core::CliError;
 
-use super::refresh_lock::AuthRefreshLockGuard;
+use super::refresh_lock::AuthStateLockGuard;
 use super::types::BrowserEnvironment;
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
@@ -24,7 +24,7 @@ pub struct AuthState {
 
 impl AuthState {
     pub fn load() -> Result<Self, CliError> {
-        let path = Self::path();
+        let path = Self::path()?;
         if !path.exists() {
             return Err(CliError::AuthMissing);
         }
@@ -33,24 +33,51 @@ impl AuthState {
     }
 
     pub fn save(&self) -> Result<(), CliError> {
-        let path = Self::path();
-        self.save_to_path_with_account_lock(&path)
-    }
-
-    pub(crate) fn save_without_account_lock(&self) -> Result<(), CliError> {
-        let path = Self::path();
+        let path = Self::path()?;
+        let _guard = AuthStateLockGuard::acquire()?;
         self.save_to_path(&path)
     }
 
-    fn save_to_path_with_account_lock(&self, path: &Path) -> Result<(), CliError> {
-        let _guard = AuthRefreshLockGuard::acquire(self)?;
+    pub(crate) fn save_after_refresh(&self, expected: &Self) -> Result<(), CliError> {
+        let path = Self::path()?;
+        let _guard = AuthStateLockGuard::acquire()?;
+        self.save_after_refresh_to_path(expected, &path)
+    }
+
+    fn save_after_refresh_to_path(&self, expected: &Self, path: &Path) -> Result<(), CliError> {
+        let current = Self::load_from_path(path).map_err(|error| match error {
+            CliError::AuthMissing => active_auth_changed_error(),
+            other => other,
+        })?;
+        if !expected.matches_refresh_origin(&current) {
+            return Err(active_auth_changed_error());
+        }
         self.save_to_path(path)
     }
 
     #[cfg(test)]
+    fn save_after_refresh_to_path_with_lock_path(
+        &self,
+        expected: &Self,
+        path: &Path,
+        lock_path: &Path,
+    ) -> Result<(), CliError> {
+        let _guard = AuthStateLockGuard::acquire_path(lock_path)?;
+        self.save_after_refresh_to_path(expected, path)
+    }
+
+    #[cfg(test)]
     fn save_to_path_with_lock_path(&self, path: &Path, lock_path: &Path) -> Result<(), CliError> {
-        let _guard = AuthRefreshLockGuard::acquire_path(lock_path)?;
+        let _guard = AuthStateLockGuard::acquire_path(lock_path)?;
         self.save_to_path(path)
+    }
+
+    fn load_from_path(path: &Path) -> Result<Self, CliError> {
+        if !path.exists() {
+            return Err(CliError::AuthMissing);
+        }
+        let data = std::fs::read_to_string(path)?;
+        serde_json::from_str(&data).map_err(|e| CliError::Config(format!("corrupt auth file: {e}")))
     }
 
     fn save_to_path(&self, path: &Path) -> Result<(), CliError> {
@@ -88,7 +115,8 @@ impl AuthState {
     }
 
     pub fn delete() -> Result<(), CliError> {
-        let path = Self::path();
+        let path = Self::path()?;
+        let _guard = AuthStateLockGuard::acquire()?;
         if path.exists() {
             std::fs::remove_file(path)?;
         }
@@ -162,6 +190,14 @@ impl AuthState {
             || same_non_empty(self.cookie.as_deref(), other.cookie.as_deref())
     }
 
+    fn matches_refresh_origin(&self, other: &Self) -> bool {
+        self.matches_account_material(other)
+            && self.jwt == other.jwt
+            && self.session_id == other.session_id
+            && self.clerk_client_cookie == other.clerk_client_cookie
+            && self.cookie == other.cookie
+    }
+
     fn jwt_account_subject(&self) -> Option<String> {
         let jwt = self.jwt.as_deref()?;
         let claims = decode_jwt_claims(jwt)?;
@@ -174,11 +210,22 @@ impl AuthState {
         })
     }
 
-    fn path() -> PathBuf {
-        directories::ProjectDirs::from("com", "sunox", "sunox")
-            .map(|dirs| dirs.config_dir().join("auth.json"))
-            .unwrap_or_else(|| PathBuf::from("~/.config/sunox/auth.json"))
+    fn path() -> Result<PathBuf, CliError> {
+        auth_path_from_config_dir(
+            directories::ProjectDirs::from("com", "sunox", "sunox")
+                .map(|dirs| dirs.config_dir().to_path_buf()),
+        )
     }
+}
+
+fn active_auth_changed_error() -> CliError {
+    CliError::AuthChanged
+}
+
+fn auth_path_from_config_dir(config_dir: Option<PathBuf>) -> Result<PathBuf, CliError> {
+    config_dir
+        .map(|dir| dir.join("auth.json"))
+        .ok_or_else(|| CliError::Config("cannot resolve sunox config directory".into()))
 }
 
 fn decode_jwt_claims(jwt: &str) -> Option<serde_json::Value> {
@@ -213,6 +260,14 @@ mod tests {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
 
     use super::AuthState;
+
+    #[test]
+    fn auth_path_rejects_an_unresolvable_config_directory() {
+        let error = super::auth_path_from_config_dir(None)
+            .expect_err("missing config directory must not become a literal tilde path");
+
+        assert!(error.to_string().contains("config directory"));
+    }
 
     fn jwt_with_subject(subject: &str) -> String {
         let header = BASE64URL.encode(r#"{"alg":"none","typ":"JWT"}"#);
@@ -273,6 +328,111 @@ mod tests {
         let saved = std::fs::read_to_string(&path).expect("saved auth file");
         let saved = serde_json::from_str::<AuthState>(&saved).expect("valid saved auth json");
         assert_eq!(saved.jwt, auth.jwt);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn refreshed_auth_cannot_overwrite_a_newly_active_account() {
+        let dir =
+            std::env::temp_dir().join(format!("sunox-auth-cas-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("test dir");
+        let path = dir.join("auth.json");
+        let lock_path = dir.join("auth-state.lock");
+        let account_a_before = AuthState {
+            jwt: Some(jwt_with_subject("account-a")),
+            clerk_client_cookie: Some("client-a".into()),
+            ..Default::default()
+        };
+        let account_a_refreshed = AuthState {
+            jwt: Some(jwt_with_subject("account-a")),
+            clerk_client_cookie: Some("client-a".into()),
+            session_id: Some("new-session-a".into()),
+            ..Default::default()
+        };
+        let account_b = AuthState {
+            jwt: Some(jwt_with_subject("account-b")),
+            clerk_client_cookie: Some("client-b".into()),
+            ..Default::default()
+        };
+        account_b.save_to_path(&path).expect("seed account b");
+
+        let error = account_a_refreshed
+            .save_after_refresh_to_path_with_lock_path(&account_a_before, &path, &lock_path)
+            .expect_err("stale refresh must not replace the active account");
+        assert_eq!(error.error_code(), "auth_changed");
+
+        let saved = AuthState::load_from_path(&path).expect("saved account");
+        assert_eq!(saved.jwt, account_b.jwt);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn refreshed_auth_cannot_overwrite_a_new_login_for_the_same_account() {
+        let dir = std::env::temp_dir().join(format!(
+            "sunox-auth-cas-new-session-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("test dir");
+        let path = dir.join("auth.json");
+        let lock_path = dir.join("auth-state.lock");
+        let refresh_origin = AuthState {
+            jwt: Some(jwt_with_subject("account-a")),
+            clerk_client_cookie: Some("old-client".into()),
+            session_id: Some("old-session".into()),
+            ..Default::default()
+        };
+        let refreshed_old_session = AuthState {
+            jwt: Some(jwt_with_subject("account-a")),
+            clerk_client_cookie: Some("old-client".into()),
+            session_id: Some("old-session".into()),
+            ..Default::default()
+        };
+        let new_login = AuthState {
+            jwt: Some(jwt_with_subject("account-a")),
+            clerk_client_cookie: Some("new-client".into()),
+            session_id: Some("new-session".into()),
+            ..Default::default()
+        };
+        new_login.save_to_path(&path).expect("seed new login");
+
+        let error = refreshed_old_session
+            .save_after_refresh_to_path_with_lock_path(&refresh_origin, &path, &lock_path)
+            .expect_err("stale session refresh must not replace a newer login");
+        assert_eq!(error.error_code(), "auth_changed");
+
+        let saved = AuthState::load_from_path(&path).expect("saved account");
+        assert_eq!(saved.session_id.as_deref(), Some("new-session"));
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn refreshed_auth_replaces_the_same_active_account() {
+        let dir = std::env::temp_dir().join(format!(
+            "sunox-auth-cas-same-account-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("test dir");
+        let path = dir.join("auth.json");
+        let lock_path = dir.join("auth-state.lock");
+        let before = AuthState {
+            jwt: Some(jwt_with_subject("account-a")),
+            clerk_client_cookie: Some("client-a".into()),
+            ..Default::default()
+        };
+        let refreshed = AuthState {
+            jwt: Some(jwt_with_subject("account-a")),
+            clerk_client_cookie: Some("client-a".into()),
+            session_id: Some("new-session".into()),
+            ..Default::default()
+        };
+        before.save_to_path(&path).expect("seed account a");
+
+        refreshed
+            .save_after_refresh_to_path_with_lock_path(&before, &path, &lock_path)
+            .expect("same-account refresh");
+
+        let saved = AuthState::load_from_path(&path).expect("saved account");
+        assert_eq!(saved.session_id.as_deref(), Some("new-session"));
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 

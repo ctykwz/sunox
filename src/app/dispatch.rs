@@ -111,6 +111,7 @@ async fn run_clip(command: ClipCommand, ctx: &AppContext) -> Result<(), CliError
         ClipCommand::Extend(args) => commands::create::extend(args, ctx).await,
         ClipCommand::Concat(args) => commands::create::concat(args, ctx).await,
         ClipCommand::Cover(args) => commands::create::cover(args, ctx).await,
+        ClipCommand::Inspire(args) => commands::create::inspire(args, ctx).await,
         ClipCommand::Remaster(args) => commands::create::remaster(args, ctx).await,
         ClipCommand::Speed(args) => commands::create::speed(args, ctx).await,
         ClipCommand::Reverse(args) => commands::create::reverse(args, ctx).await,

@@ -19,12 +19,14 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "v5.5": "chirp-fenix",
             "v5": "chirp-crow",
             "v4.5+": "chirp-bluejay",
+            "v4.5-all": "chirp-auk-turbo",
             "v4.5": "chirp-auk",
             "v4": "chirp-v4",
             "v3.5": "chirp-v3-5",
             "v3": "chirp-v3-0",
             "v2": "chirp-v2-xxl-alpha",
         },
+        "model_selection": "Model availability, the account default, and max_lengths are account-specific. Generation reads `/api/billing/info/` directly; `sunox models --json` exposes the same account data for inspection. default_model=auto selects the account's usable default, while an explicit --model or configured model is validated against can_use and max_lengths when billing info is available. v5.5 is used only when the billing read is unavailable.",
         "remaster_models": {
             "v5.5": "chirp-flounder",
             "v5": "chirp-carp",
@@ -34,7 +36,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "create": "submit generation or description and return clip payload",
             "clip wait": "poll clip ids until complete or error",
             "clip download": "download completed media; default CDN MP3 embeds lyrics; explicit --format supports mp3|m4a|wav|opus and --video. Output directories are created automatically; existing files require explicit --force to replace. Batch downloads remain serial; if a later item fails after any output is written, JSON returns partial_download with error.details.succeeded, failed, and not_attempted_clip_ids.",
-            "post_submit_workflow": "When create or a generation-backed edit returns new or processing clip IDs, call `sunox clip wait <clip_id> --json` before download, quality filtering, or playlist decisions unless the caller explicitly wants submit-only behavior.",
+            "post_submit_workflow": "When create or a generation-backed edit, including clip inspire, returns new or processing clip IDs, call `sunox clip wait <clip_id> --json` before download, quality filtering, or playlist decisions unless the caller explicitly wants submit-only behavior.",
             "audio_analysis": {
                 "simple": "For simple audio analysis, use existing clip media: read audio_url and song-page context from `sunox clip info <clip_id> --json` or run `sunox clip download <clip_id> --json` for the default CDN MP3; non-auth supplemental read failures appear in supplemental_errors. Do not create new Suno resources just to inspect audio.",
                 "deep": "Use heavier WAV, stems, or Studio export workflows only when the user explicitly asks for WAV, stems, lossless audio, or deep spectral analysis; do not silently downgrade a WAV/lossless request to MP3."
@@ -47,7 +49,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
         },
         "execution_policy": {
             "default_mutations": "account-scoped serial execution for Suno create, upload, edit, playlist, persona, and other write commands",
-            "config_disable": "set serial_mutations=false with `sunox config set serial_mutations false`, `-c serial_mutations=false`, or SUNO_SERIAL_MUTATIONS=false to disable the account-scoped mutation lock",
+            "config_disable": "set serial_mutations=false with `sunox config set serial_mutations false`, `-c serial_mutations=false`, or SUNOX_SERIAL_MUTATIONS=false to disable the account-scoped mutation lock",
             "native_batch": "commands may still use a Suno endpoint's native batch body when the endpoint is reliable; playlist remove is intentionally one request per clip because large remove batches can return Suno 500s",
             "partial_failures": "serial multi-clip operations preserve the first semantic error and return partial_mutation after earlier successes. Multi-step workflows also include recovery.resumable and, when safe, a structured recovery command and arguments. Never replay a mutation marked resumable=false.",
             "parallel_override": "pass --parallel for a single invocation override; it takes precedence over serial_mutations",
@@ -68,6 +70,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "sunox clip info <clip_id> --json",
             "sunox clip wait <clip_id> --json",
             "sunox clip upload-status <upload_id> --json",
+            "sunox clip inspire <clip_id> --title <title> --tags <tags> --lyrics-file <path> --json",
             "sunox clip download <clip_id> --json",
             "sunox clip download <clip_id> --format wav --json",
             "sunox playlist add <playlist_id> <clip_id> --json",
@@ -94,7 +97,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
         },
         "agent_safety": {
             "parallel_writes": "do not pass --parallel or disable serial_mutations unless the user explicitly asks to allow same-account concurrent writes",
-            "paid_or_credit_work": "create, cover, extend, stems, remaster, speed, reverse, crop, fade, upload, and explicit non-default download/export workflows can be stateful or credit/plan-sensitive; only run the amount, operation, and format the user requested",
+            "paid_or_credit_work": "create, inspire, cover, extend, stems, remaster, speed, reverse, crop, fade, upload, and explicit non-default download/export workflows can be stateful or credit/plan-sensitive; only run the amount, operation, and format the user requested",
             "download_quality": "current CLI download defaults to CDN MP3 and supports explicit --format mp3|m4a|wav|opus; agents should use an explicit format only when requested",
             "public_visibility": "do not publish clips, playlists, or personas or make them public unless the user explicitly asks",
             "destructive_actions": "do not run delete, trash, purge, empty-trash, or other destructive commands unless the user explicitly asks. clip purge and clip empty-trash are irreversible and require -y/--yes.",
@@ -110,7 +113,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                     "--no-captcha": "do not force the browser-backed solver; generation challenge preflight still runs"
                 },
                 "modes": "description mode when a non-instrumental prompt is provided; custom lyrics mode when --lyrics or --lyrics-file is provided; custom instrumental mode when --instrumental is provided, with the prompt folded into style tags",
-                "web_context": "generation metadata.user_tier is filled from current account /api/billing/info/ plan.id when available, with an empty fallback if that read is unavailable",
+                "web_context": "generation metadata.user_tier and default model are resolved from current account /api/billing/info/ when available; default_model=auto falls back to chirp-fenix only when that read is unavailable",
                 "enhance_tags": "pass --enhance-tags only when the user wants Suno to enhance style tags; it first calls /api/prompts/upsample, carries the returned tags plus request_id into metadata.last_tags_generation, and marks override_fields=[\"tags\"]; personalization_enabled follows the captured web submit shape",
                 "response_derived_metadata": "do not fabricate tag-upsample metadata; metadata.last_tags_generation is only valid after a real /api/prompts/upsample response and should otherwise be omitted",
                 "title": "optional; omitted title is sent as an empty string for description mode because Suno currently requires params.title to be a string"
@@ -181,20 +184,27 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                 "body_constraints": "metadata.create_mode=cover, cover_clip_id=<source clip id>, title=<source title string>",
                 "response": "generation response with submitted cover clips"
             },
+            "clip inspire": {
+                "route": "POST /api/prompts/upsample, then POST /api/generate/v2-web/",
+                "status": "implemented from the live-captured playlist-conditioned Use as Inspiration request",
+                "constraints": "accepts exactly one source clip; requires --title, --tags, and --lyrics or --lyrics-file; does not expose instrumental or multi-source variants because those were not captured",
+                "body_constraints": "task=playlist_condition, mv=chirp-fenix, playlist_id=inspiration, playlist_clip_ids=[<source clip id>], metadata.create_mode=custom, lyrics in prompt, no gpt_description_prompt, upsample response carried in metadata.last_tags_generation, override_fields=[]",
+                "response": "generation response with submitted clips"
+            },
             "clip concat": {
                 "route": "POST /api/generate/concat/v2/",
                 "input_constraint": "use a source with original Suno generation history. A live July 10 validation accepted metadata.type=gen and completed; an edit_fade result was rejected by Suno with Bad history.",
                 "response": "queued or processing clip; wait for the returned ID before downstream work"
             },
             "challenge_capable_generation_commands": {
-                "commands": ["create", "describe", "clip cover", "clip extend", "clip stems"],
+                "commands": ["create", "describe", "clip cover", "clip inspire", "clip extend", "clip stems"],
                 "challenge_flags": "only these commands expose --token, --captcha, and --no-captcha because they submit through /api/generate/v2-web/ and can hit the generation challenge gate"
             },
             "async_clip_edits": {
-                "returns_new_or_processing": ["clip cover", "clip extend", "clip concat", "clip stems", "clip remaster", "clip speed", "clip reverse"],
+                "returns_new_or_processing": ["clip cover", "clip inspire", "clip extend", "clip concat", "clip stems", "clip remaster", "clip speed", "clip reverse"],
                 "waits_for_complete": ["clip crop", "clip fade"],
                 "post_submit_workflow": "commands in returns_new_or_processing require clip wait before downstream work; clip crop and clip fade already wait for the resulting clip to complete and do not require another wait after success",
-                "challenge_note": "only clip cover, clip extend, and clip stems expose challenge flags; clip concat, clip remaster, clip speed, clip reverse, clip crop, and clip fade use their own edit routes and do not expose --token, --captcha, or --no-captcha"
+                "challenge_note": "only clip cover, clip inspire, clip extend, and clip stems expose challenge flags; clip concat, clip remaster, clip speed, clip reverse, clip crop, and clip fade use their own edit routes and do not expose --token, --captcha, or --no-captcha"
             },
             "clip speed": {
                 "route": "POST /api/clips/adjust-speed/",
@@ -238,7 +248,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
         "features": [
             "tags", "enhance_tags", "negative_tags", "vocal_gender",
             "weirdness", "style_influence",
-            "instrumental", "extend", "concat", "cover", "remaster",
+            "instrumental", "extend", "concat", "cover", "clip_inspiration", "remaster",
             "stems", "clip_speed", "clip_reverse", "clip_crop", "clip_fade",
             "download_formats", "lyrics", "timed_lyrics", "set_metadata",
             "set_visibility", "search", "delete", "clip_restore", "clip_purge", "clip_trash_query",
@@ -274,11 +284,6 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                 "status": "stale_or_flow_specific",
                 "reason": "older captures include voice verification paths, but the refreshed non-Studio bundle did not confirm them"
             },
-            "playlist_condition_generation": {
-                "status": "live_captured_not_exposed",
-                "route": "POST /api/generate/v2-web/",
-                "reason": "captured task=playlist_condition uses playlist_id=inspiration and playlist_clip_ids, but it is a separate inspiration/remix surface from normal create"
-            },
             "studio_multitrack_export": {
                 "status": "live_captured_not_exposed",
                 "route": "POST /api/studio/render-state-multitrack",
@@ -287,7 +292,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
         },
         "config": {
             "set": "sunox config set <key> <value> persists to config.toml",
-            "env_override": "SUNO_* environment variables override persisted config values",
+            "env_override": "SUNOX_* environment variables override persisted config values",
             "keys": ["default_model", "poll_interval_secs", "poll_timeout_secs", "output_dir", "serial_mutations"]
         },
         "resource_management": {
@@ -297,7 +302,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                     "clip download", "clip upload", "clip upload-status", "clip delete", "clip restore", "clip purge", "clip empty-trash",
                     "clip like", "clip dislike", "clip set", "clip publish",
                     "clip timed-lyrics", "clip extend", "clip concat",
-                    "clip cover", "clip remaster", "clip speed", "clip reverse",
+                    "clip cover", "clip inspire", "clip remaster", "clip speed", "clip reverse",
                     "clip crop", "clip fade", "clip stems"
                 ],
                 "cover_status": "clip set supports --image-url, --image-file, --remove-cover, and --remove-video-cover; local image files use POST /api/uploads/image/, presigned S3 form upload, POST /api/uploads/image/{id}/upload-finish/, then POST /api/gen/{clip_id}/set_metadata/ with image_url"
@@ -341,7 +346,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "4": "rate limited — wait and retry",
             "5": "not found — verify resource ID"
         },
-        "env_prefix": "SUNO_",
+        "env_prefix": "SUNOX_",
         "auth_path": auth_path,
         "auth": {
             "recommended": "sunox login",
@@ -360,7 +365,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
         },
         "provider": "direct_suno_unofficial",
         "auth_required": true,
-        "default_model": "chirp-fenix (v5.5)",
+        "default_model": "auto (account usable default; chirp-fenix fallback only when billing info is unavailable)",
     });
     println!("{}", serde_json::to_string_pretty(&info)?);
     Ok(())

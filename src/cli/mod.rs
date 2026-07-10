@@ -19,14 +19,14 @@ pub use clip::{ClipArgs, ClipCommand};
 pub use config::{ConfigAction, ConfigArgs};
 pub use create::{
     ConcatArgs, CoverArgs, CreateArgs, CropArgs, DescribeArgs, ExtendArgs, FadeArgs, GenerateArgs,
-    LyricsArgs, RemasterArgs, ReverseArgs, SpeedArgs, StemsArgs,
+    InspireArgs, LyricsArgs, RemasterArgs, ReverseArgs, SpeedArgs, StemsArgs,
 };
 pub use library::{
     DeleteArgs, EmptyTrashArgs, InfoArgs, ListArgs, ListSort, PublishArgs, PurgeArgs, ReactionArgs,
     RestoreArgs, SearchArgs, SetArgs, StatusArgs,
 };
 pub use media::{DownloadArgs, DownloadFormat, TimedLyricsArgs, UploadArgs, UploadStatusArgs};
-pub use models::{ModelVersion, RemasterModel, VocalGender};
+pub use models::{CoverModel, ModelVersion, RemasterModel, VocalGender};
 pub use persona::{
     PersonaArgs, PersonaClipsArgs, PersonaCommand, PersonaCreateArgs, PersonaDeleteArgs,
     PersonaInfoArgs, PersonaListArgs, PersonaListKind, PersonaLoveArgs, PersonaProcessedClipArgs,

@@ -1,4 +1,4 @@
-use super::{ModelVersion, RemasterModel, VocalGender};
+use super::{CoverModel, ModelVersion, RemasterModel, VocalGender};
 
 #[derive(clap::Args)]
 pub struct CreateArgs {
@@ -256,7 +256,7 @@ pub struct CoverArgs {
 
     /// Model version for the cover
     #[arg(short, long)]
-    pub model: Option<ModelVersion>,
+    pub model: Option<CoverModel>,
 
     /// Challenge token (overrides the built-in solver)
     #[arg(long)]
@@ -267,6 +267,52 @@ pub struct CoverArgs {
     pub captcha: bool,
 
     /// Do not force the built-in challenge solver; challenge preflight still runs.
+    #[arg(long)]
+    pub no_captcha: bool,
+}
+
+#[derive(clap::Args)]
+pub struct InspireArgs {
+    /// Source clip ID to use as inspiration
+    pub clip_id: String,
+
+    /// Title for the generated song
+    #[arg(long)]
+    pub title: String,
+
+    /// Starting style tags; Suno expands these through its prompt upsample flow
+    #[arg(long)]
+    pub tags: String,
+
+    /// Styles to exclude
+    #[arg(long)]
+    pub exclude: Option<String>,
+
+    /// Lyrics text
+    #[arg(
+        long,
+        conflicts_with = "lyrics_file",
+        required_unless_present = "lyrics_file"
+    )]
+    pub lyrics: Option<String>,
+
+    /// Read lyrics from file
+    #[arg(long, required_unless_present = "lyrics")]
+    pub lyrics_file: Option<String>,
+
+    /// Weirdness level captured by the inspiration flow (0-100)
+    #[arg(long, default_value_t = 40.0)]
+    pub weirdness: f64,
+
+    /// Challenge token (overrides the built-in solver)
+    #[arg(long)]
+    pub token: Option<String>,
+
+    /// Force the built-in browser challenge solver before submitting
+    #[arg(long, conflicts_with = "no_captcha")]
+    pub captcha: bool,
+
+    /// Do not force the built-in challenge solver; challenge preflight still runs
     #[arg(long)]
     pub no_captcha: bool,
 }

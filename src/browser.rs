@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::core::CliError;
 
-const BROWSER_PATH_ENV: &str = "SUNO_BROWSER_PATH";
+const BROWSER_PATH_ENV: &str = "SUNOX_BROWSER_PATH";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TargetOs {
@@ -25,7 +25,7 @@ pub fn locate_chromium_browser() -> Result<String, CliError> {
     }
 
     Err(CliError::Config(
-        "Could not find a Chrome, Edge, or Chromium binary. Install a Chromium-based browser or set SUNO_BROWSER_PATH."
+        "Could not find a Chrome, Edge, or Chromium binary. Install a Chromium-based browser or set SUNOX_BROWSER_PATH."
             .into(),
     ))
 }
@@ -120,7 +120,7 @@ mod tests {
         std::fs::write(&browser_path, "").expect("browser stub");
 
         let configured = configured_browser_path(|key| match key {
-            BROWSER_PATH_ENV => Some(browser_path.display().to_string()),
+            "SUNOX_BROWSER_PATH" => Some(browser_path.display().to_string()),
             _ => None,
         })
         .expect("configured path")
@@ -131,13 +131,13 @@ mod tests {
     }
 
     #[test]
-    fn chrome_path_env_is_ignored() {
+    fn old_suno_browser_path_env_is_ignored() {
         let browser_path =
             std::env::temp_dir().join(format!("sunox-browser-path-test-{}", uuid::Uuid::new_v4()));
         std::fs::write(&browser_path, "").expect("browser stub");
 
         let configured = configured_browser_path(|key| match key {
-            "SUNO_CHROME_PATH" => Some(browser_path.display().to_string()),
+            "SUNO_BROWSER_PATH" => Some(browser_path.display().to_string()),
             _ => None,
         })
         .expect("configured path");

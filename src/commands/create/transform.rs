@@ -1,16 +1,16 @@
 use crate::app::AppContext;
 use crate::cli::{
-    ConcatArgs, CoverArgs, CropArgs, FadeArgs, ModelVersion, RemasterArgs, ReverseArgs, SpeedArgs,
+    ConcatArgs, CoverArgs, CoverModel, CropArgs, FadeArgs, RemasterArgs, ReverseArgs, SpeedArgs,
     StemsArgs,
 };
 use crate::core::{AppConfig, CliError};
 use crate::output::{self, OutputFormat};
 
-use super::support::{generation_token, output_clips};
+use super::support::{execute_generation_submission, output_clips};
 
 pub async fn concat(args: ConcatArgs, ctx: &AppContext) -> Result<(), CliError> {
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    let clip = ctx.client().await?.concat(&args.clip_id).await?;
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
+    let clip = client.concat(&args.clip_id).await?;
     match ctx.fmt {
         OutputFormat::Json => output::json::success(&clip),
         OutputFormat::Table => output::table::clips(&[clip]),
@@ -19,7 +19,7 @@ pub async fn concat(args: ConcatArgs, ctx: &AppContext) -> Result<(), CliError> 
 }
 
 pub async fn cover(args: CoverArgs, ctx: &AppContext) -> Result<(), CliError> {
-    let model = cover_model_api_key(args.model.as_ref(), &ctx.config);
+    let model = cover_model_api_key(args.model.as_ref(), &ctx.config)?;
     if !ctx.quiet {
         eprintln!(
             "Creating cover ({})...",
@@ -27,34 +27,61 @@ pub async fn cover(args: CoverArgs, ctx: &AppContext) -> Result<(), CliError> {
         );
     }
     let force_captcha = args.captcha && !args.no_captcha;
-    let challenge_token = generation_token(args.token.clone(), force_captcha, ctx).await?;
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    let client = ctx.client().await?;
-    let clips = client
-        .cover(&args.clip_id, model, args.tags.as_deref(), challenge_token)
-        .await?;
+    let token = args.token.clone();
+    let model = model.to_string();
+    let clips = execute_generation_submission(
+        token,
+        force_captcha,
+        ctx,
+        move || async move {
+            let client = ctx.client().await?;
+            let mut req = client
+                .prepare_cover_request(&args.clip_id, &model, args.tags.as_deref(), None)
+                .await?;
+            client.prepare_generation_request(&mut req).await?;
+            Ok((client, req))
+        },
+        |(client, mut req), challenge_token| async move {
+            req.set_challenge_token(challenge_token);
+            client.submit_prepared_generation(&req).await
+        },
+    )
+    .await?;
     output_clips(&clips, ctx);
     Ok(())
 }
 
-fn cover_model_api_key<'a>(model: Option<&'a ModelVersion>, config: &'a AppConfig) -> &'a str {
-    model
-        .map(ModelVersion::to_api_key)
-        .unwrap_or(config.default_model.as_str())
+fn cover_model_api_key<'a>(
+    model: Option<&'a CoverModel>,
+    config: &'a AppConfig,
+) -> Result<&'a str, CliError> {
+    if let Some(model) = model {
+        return Ok(model.to_api_key());
+    }
+    match config.default_model.as_str() {
+        "auto" => Ok("chirp-fenix"),
+        "chirp-auk-turbo" => Err(CliError::Config(
+            "default_model v4.5-all is not verified for cover generation; pass an explicitly supported `sunox clip cover --model` value".into(),
+        )),
+        model => Ok(model),
+    }
 }
 
-fn cover_model_label<'a>(model: Option<&'a ModelVersion>, config: &'a AppConfig) -> &'a str {
-    model
-        .map(ModelVersion::display_name)
-        .unwrap_or(config.default_model.as_str())
+fn cover_model_label<'a>(model: Option<&'a CoverModel>, config: &'a AppConfig) -> &'a str {
+    model.map(CoverModel::display_name).unwrap_or_else(|| {
+        if config.default_model == "auto" {
+            "v5.5"
+        } else {
+            config.default_model.as_str()
+        }
+    })
 }
 
 pub async fn remaster(args: RemasterArgs, ctx: &AppContext) -> Result<(), CliError> {
     if !ctx.quiet {
         eprintln!("Remastering with {}...", args.model.to_api_key());
     }
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    let client = ctx.client().await?;
+    let (client, _mutation_guard) = ctx.mutation_client().await?;
     let clips = client
         .remaster(&args.clip_id, args.model.to_api_key())
         .await?;
@@ -83,7 +110,7 @@ pub async fn speed(args: SpeedArgs, ctx: &AppContext) -> Result<(), CliError> {
             format!("{} ({:.2}x)", source.title, args.multiplier)
         }
     };
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
+    let _mutation_guard = ctx.acquire_mutation_lock_for(&client.auth_state_snapshot())?;
     let clip = client
         .adjust_speed(&args.clip_id, args.multiplier, args.keep_pitch, &title)
         .await?;
@@ -100,7 +127,7 @@ pub async fn reverse(args: ReverseArgs, ctx: &AppContext) -> Result<(), CliError
             format!("{} (Reversed)", source.title)
         }
     };
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
+    let _mutation_guard = ctx.acquire_mutation_lock_for(&client.auth_state_snapshot())?;
     let clip = client.reverse_clip(&args.clip_id, &title).await?;
     output_clips(&[clip], ctx);
     Ok(())
@@ -130,7 +157,7 @@ pub async fn crop(args: CropArgs, ctx: &AppContext) -> Result<(), CliError> {
             format!("{} ({suffix})", source.title)
         }
     };
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
+    let _mutation_guard = ctx.acquire_mutation_lock_for(&client.auth_state_snapshot())?;
     let polling = configured_polling(ctx);
     let clip = client
         .crop_clip(
@@ -177,7 +204,7 @@ pub async fn fade(args: FadeArgs, ctx: &AppContext) -> Result<(), CliError> {
             format!("{} ({suffix})", source.title)
         }
     };
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
+    let _mutation_guard = ctx.acquire_mutation_lock_for(&client.auth_state_snapshot())?;
     let polling = configured_polling(ctx);
     let clip = client
         .fade_clip(&args.clip_id, args.fade_in, args.fade_out, &title, polling)
@@ -208,13 +235,23 @@ async fn require_source_clip(
 
 pub async fn stems(args: StemsArgs, ctx: &AppContext) -> Result<(), CliError> {
     let force_captcha = args.captcha && !args.no_captcha;
-    let challenge_token = generation_token(args.token.clone(), force_captcha, ctx).await?;
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    let clips = ctx
-        .client()
-        .await?
-        .stems(&args.clip_id, challenge_token)
-        .await?;
+    let token = args.token.clone();
+    let clips = execute_generation_submission(
+        token,
+        force_captcha,
+        ctx,
+        move || async move {
+            let client = ctx.client().await?;
+            let mut req = client.prepare_stems_request(&args.clip_id, None).await?;
+            client.prepare_generation_request(&mut req).await?;
+            Ok((client, req))
+        },
+        |(client, mut req), challenge_token| async move {
+            req.set_challenge_token(challenge_token);
+            client.submit_prepared_generation(&req).await
+        },
+    )
+    .await?;
     output_clips(&clips, ctx);
     Ok(())
 }

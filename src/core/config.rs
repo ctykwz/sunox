@@ -1,7 +1,12 @@
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::Path;
+
 use figment::{
     Figment,
     providers::{Format, Serialized, Toml},
 };
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use super::CliError;
@@ -18,7 +23,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            default_model: "chirp-fenix".into(),
+            default_model: "auto".into(),
             poll_interval_secs: 5,
             poll_timeout_secs: 600,
             output_dir: ".".into(),
@@ -69,14 +74,8 @@ impl AppConfig {
     pub fn set_persisted(key: &str, value: &str) -> Result<Self, CliError> {
         let path =
             Self::path().ok_or_else(|| CliError::Config("could not resolve config path".into()))?;
-        let mut stored = StoredConfig::load(&path)?;
-        stored.set(key, value)?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let data = toml::to_string_pretty(&stored)
-            .map_err(|e| CliError::Config(format!("serialize config: {e}")))?;
-        std::fs::write(path, data)?;
+        let lock_path = path.with_extension("lock");
+        update_persisted_config(&path, &lock_path, key, value)?;
         Self::load()
     }
 
@@ -86,17 +85,17 @@ impl AppConfig {
     {
         for (key, value) in vars {
             match key.as_str() {
-                "SUNO_DEFAULT_MODEL" => self.default_model = normalize_model_key(&value)?,
-                "SUNO_POLL_INTERVAL_SECS" => {
+                "SUNOX_DEFAULT_MODEL" => self.default_model = normalize_model_key(&value)?,
+                "SUNOX_POLL_INTERVAL_SECS" => {
                     self.poll_interval_secs =
-                        parse_poll_interval("SUNO_POLL_INTERVAL_SECS", &value)?;
+                        parse_poll_interval("SUNOX_POLL_INTERVAL_SECS", &value)?;
                 }
-                "SUNO_POLL_TIMEOUT_SECS" => {
-                    self.poll_timeout_secs = parse_poll_timeout("SUNO_POLL_TIMEOUT_SECS", &value)?;
+                "SUNOX_POLL_TIMEOUT_SECS" => {
+                    self.poll_timeout_secs = parse_poll_timeout("SUNOX_POLL_TIMEOUT_SECS", &value)?;
                 }
-                "SUNO_OUTPUT_DIR" => self.output_dir = value,
-                "SUNO_SERIAL_MUTATIONS" => {
-                    self.serial_mutations = parse_bool("SUNO_SERIAL_MUTATIONS", &value)?;
+                "SUNOX_OUTPUT_DIR" => self.output_dir = value,
+                "SUNOX_SERIAL_MUTATIONS" => {
+                    self.serial_mutations = parse_bool("SUNOX_SERIAL_MUTATIONS", &value)?;
                 }
                 _ => {}
             }
@@ -131,6 +130,64 @@ impl AppConfig {
         }
         Ok(())
     }
+}
+
+struct ConfigLockGuard {
+    file: File,
+}
+
+impl ConfigLockGuard {
+    fn acquire(path: &Path) -> Result<Self, CliError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        file.lock_exclusive()?;
+        Ok(Self { file })
+    }
+}
+
+impl Drop for ConfigLockGuard {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+fn update_persisted_config(
+    path: &Path,
+    lock_path: &Path,
+    key: &str,
+    value: &str,
+) -> Result<(), CliError> {
+    let _guard = ConfigLockGuard::acquire(lock_path)?;
+    let mut stored = StoredConfig::load(path)?;
+    stored.set(key, value)?;
+    let data = toml::to_string_pretty(&stored)
+        .map_err(|error| CliError::Config(format!("serialize config: {error}")))?;
+    atomic_write(path, data.as_bytes())
+}
+
+fn atomic_write(path: &Path, data: &[u8]) -> Result<(), CliError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| CliError::Config("config path has no parent directory".into()))?;
+    std::fs::create_dir_all(parent)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(data)?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(path)
+        .map_err(|error| CliError::Io(error.error))?;
+
+    #[cfg(unix)]
+    File::open(parent)?.sync_all()?;
+
+    Ok(())
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -177,9 +234,11 @@ impl StoredConfig {
 
 fn normalize_model_key(value: &str) -> Result<String, CliError> {
     let normalized = match value {
+        "auto" => "auto",
         "v5.5" | "chirp-fenix" => "chirp-fenix",
         "v5" | "chirp-crow" => "chirp-crow",
         "v4.5+" | "chirp-bluejay" => "chirp-bluejay",
+        "v4.5-all" | "chirp-auk-turbo" => "chirp-auk-turbo",
         "v4.5" | "chirp-auk" => "chirp-auk",
         "v4" | "chirp-v4" => "chirp-v4",
         "v3.5" | "chirp-v3-5" => "chirp-v3-5",
@@ -187,7 +246,7 @@ fn normalize_model_key(value: &str) -> Result<String, CliError> {
         "v2" | "chirp-v2-xxl-alpha" => "chirp-v2-xxl-alpha",
         _ => {
             return Err(CliError::Config(format!(
-                "unknown model `{value}`; use a CLI model version such as v5.5 or a Suno API model key such as chirp-fenix"
+                "unknown model `{value}`; use auto, a CLI model version such as v5.5, or a Suno API model key such as chirp-fenix"
             )));
         }
     };
@@ -245,9 +304,12 @@ fn parse_bool(key: &str, value: &str) -> Result<bool, CliError> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
     use crate::core::CliError;
 
-    use super::{AppConfig, StoredConfig};
+    use super::{AppConfig, StoredConfig, update_persisted_config};
 
     #[test]
     fn stored_config_sets_known_string_key() {
@@ -256,6 +318,17 @@ mod tests {
         config.set("default_model", "v5.5").expect("set config");
 
         assert_eq!(config.default_model.as_deref(), Some("chirp-fenix"));
+    }
+
+    #[test]
+    fn stored_config_accepts_the_current_free_model() {
+        let mut config = StoredConfig::default();
+
+        config
+            .set("default_model", "v4.5-all")
+            .expect("set free model");
+
+        assert_eq!(config.default_model.as_deref(), Some("chirp-auk-turbo"));
     }
 
     #[test]
@@ -286,6 +359,13 @@ mod tests {
     }
 
     #[test]
+    fn generation_model_defaults_to_account_auto_selection() {
+        let config = AppConfig::default();
+
+        assert_eq!(config.default_model, "auto");
+    }
+
+    #[test]
     fn serial_mutations_can_be_set_persistently() {
         let mut config = StoredConfig::default();
 
@@ -304,19 +384,61 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_persisted_updates_preserve_both_fields() {
+        let dir = tempfile::tempdir().expect("test dir");
+        let path = dir.path().join("config.toml");
+        let lock_path = dir.path().join("config.lock");
+        let barrier = Arc::new(Barrier::new(3));
+        let handles = [
+            ("poll_timeout_secs", "777"),
+            ("output_dir", "/tmp/sunox-concurrent"),
+        ]
+        .into_iter()
+        .map(|(key, value)| {
+            let path = path.clone();
+            let lock_path = lock_path.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                update_persisted_config(&path, &lock_path, key, value).expect("persist config");
+            })
+        })
+        .collect::<Vec<_>>();
+
+        barrier.wait();
+        for handle in handles {
+            handle.join().expect("config writer");
+        }
+
+        let stored = StoredConfig::load(&path).expect("stored config");
+        assert_eq!(stored.poll_timeout_secs, Some(777));
+        assert_eq!(stored.output_dir.as_deref(), Some("/tmp/sunox-concurrent"));
+        assert!(
+            dir.path()
+                .read_dir()
+                .expect("config directory")
+                .all(|entry| !entry
+                    .expect("directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("tmp"))
+        );
+    }
+
+    #[test]
     fn env_overrides_support_underscored_config_keys() {
         let mut config = AppConfig::default();
 
         config
             .apply_env_overrides([
-                ("SUNO_DEFAULT_MODEL".to_string(), "v5".to_string()),
-                ("SUNO_POLL_INTERVAL_SECS".to_string(), "9".to_string()),
-                ("SUNO_POLL_TIMEOUT_SECS".to_string(), "777".to_string()),
+                ("SUNOX_DEFAULT_MODEL".to_string(), "v5".to_string()),
+                ("SUNOX_POLL_INTERVAL_SECS".to_string(), "9".to_string()),
+                ("SUNOX_POLL_TIMEOUT_SECS".to_string(), "777".to_string()),
                 (
-                    "SUNO_OUTPUT_DIR".to_string(),
+                    "SUNOX_OUTPUT_DIR".to_string(),
                     "/tmp/suno-output".to_string(),
                 ),
-                ("SUNO_SERIAL_MUTATIONS".to_string(), "false".to_string()),
+                ("SUNOX_SERIAL_MUTATIONS".to_string(), "false".to_string()),
             ])
             .expect("env overrides");
 
@@ -355,7 +477,7 @@ mod tests {
 
         let err = config
             .apply_env_overrides([(
-                "SUNO_DEFAULT_MODEL".to_string(),
+                "SUNOX_DEFAULT_MODEL".to_string(),
                 "unknown-model".to_string(),
             )])
             .expect_err("unknown model");
@@ -381,7 +503,7 @@ mod tests {
     #[test]
     fn env_override_rejects_zero_poll_timeout() {
         let error =
-            AppConfig::load_from_path(None, [("SUNO_POLL_TIMEOUT_SECS".into(), "0".into())])
+            AppConfig::load_from_path(None, [("SUNOX_POLL_TIMEOUT_SECS".into(), "0".into())])
                 .expect_err("zero poll timeout must be rejected");
 
         assert!(matches!(error, CliError::Config(message) if message.contains("greater than 0")));
@@ -390,7 +512,7 @@ mod tests {
     #[test]
     fn env_override_rejects_zero_poll_interval() {
         let error =
-            AppConfig::load_from_path(None, [("SUNO_POLL_INTERVAL_SECS".into(), "0".into())])
+            AppConfig::load_from_path(None, [("SUNOX_POLL_INTERVAL_SECS".into(), "0".into())])
                 .expect_err("zero poll interval must be rejected");
 
         assert!(
@@ -402,7 +524,7 @@ mod tests {
     fn env_override_rejects_poll_timeout_that_overflows_instant() {
         let error = AppConfig::load_from_path(
             None,
-            [("SUNO_POLL_TIMEOUT_SECS".into(), u64::MAX.to_string())],
+            [("SUNOX_POLL_TIMEOUT_SECS".into(), u64::MAX.to_string())],
         )
         .expect_err("overflowing poll timeout must be rejected");
 

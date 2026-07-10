@@ -15,7 +15,17 @@ pub struct ExtendClipOptions<'a> {
 
 impl SunoClient {
     /// Continue an existing clip from a timestamp via the current web generation route.
+    #[cfg(test)]
     pub async fn extend(&self, options: ExtendClipOptions<'_>) -> Result<Vec<Clip>, CliError> {
+        let req = self.prepare_extend_request(options).await?;
+        self.generate(&req).await
+    }
+
+    pub(crate) async fn prepare_extend_request(
+        &self,
+        options: ExtendClipOptions<'_>,
+    ) -> Result<GenerateRequest, CliError> {
+        crate::core::ensure_non_negative_finite("continue_at", options.continue_at)?;
         let requested = [options.clip_id.to_string()];
         let mut source = self
             .get_clips(&requested)
@@ -23,14 +33,20 @@ impl SunoClient {
             .into_iter()
             .find(|clip| clip.id == options.clip_id)
             .ok_or_else(|| CliError::NotFound(format!("clip: {}", options.clip_id)))?;
-        if extend_source_needs_feed_metadata(&source, &options)
-            && let Ok(feed) = self.search(&source.title).await
-            && let Some(enriched) = feed
-                .clips
-                .into_iter()
-                .find(|clip| clip.id == options.clip_id)
-        {
-            merge_extend_source_metadata(&mut source, enriched);
+        if extend_source_needs_feed_metadata(&source, &options) {
+            match self.search(&source.title).await {
+                Ok(feed) => {
+                    if let Some(enriched) = feed
+                        .clips
+                        .into_iter()
+                        .find(|clip| clip.id == options.clip_id)
+                    {
+                        merge_extend_source_metadata(&mut source, enriched);
+                    }
+                }
+                Err(error) if error.is_auth_or_rate_limit() => return Err(error),
+                Err(_) => {}
+            }
         }
 
         let mut req = GenerateRequest::new("chirp-fenix", "custom");
@@ -67,7 +83,7 @@ impl SunoClient {
         req.metadata.lyrics_updated = Some(true);
         req.set_challenge_token(options.challenge_token);
 
-        self.generate(&req).await
+        Ok(req)
     }
 }
 

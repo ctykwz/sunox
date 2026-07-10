@@ -6,7 +6,7 @@ use crate::cli::{CreateArgs, DescribeArgs, ExtendArgs, GenerateArgs, ModelVersio
 use crate::core::{AppConfig, CliError};
 use crate::workflow::generation::{build_control_sliders, build_tags};
 
-use super::support::{generation_token, output_clips};
+use super::support::{execute_generation_submission, output_clips};
 
 pub async fn create(args: CreateArgs, ctx: &AppContext) -> Result<(), CliError> {
     if args.instrumental || args.lyrics.is_some() || args.lyrics_file.is_some() {
@@ -100,10 +100,9 @@ fn non_empty(value: String) -> Option<String> {
 async fn generate(args: GenerateArgs, ctx: &AppContext) -> Result<(), CliError> {
     let mut req = build_generate_request(&args, &ctx.config)?;
     let force_captcha = args.captcha && !args.no_captcha;
-    req.set_challenge_token(generation_token(args.token.clone(), force_captcha, ctx).await?);
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    let client = ctx.client().await?;
-    maybe_enhance_tags(&mut req, args.enhance_tags, args.instrumental, &client).await?;
+    let token = args.token.clone();
+    let enhance_tags = args.enhance_tags;
+    let instrumental = args.instrumental;
 
     if !ctx.quiet {
         let persona_note = if args.persona.is_some() {
@@ -116,7 +115,22 @@ async fn generate(args: GenerateArgs, ctx: &AppContext) -> Result<(), CliError> 
             model_label(args.model.as_ref(), &ctx.config)
         );
     }
-    let clips = client.generate(&req).await?;
+    let clips = execute_generation_submission(
+        token,
+        force_captcha,
+        ctx,
+        move || async move {
+            let client = ctx.client().await?;
+            maybe_enhance_tags(&mut req, enhance_tags, instrumental, &client).await?;
+            client.prepare_generation_request(&mut req).await?;
+            Ok((client, req))
+        },
+        |(client, mut req), challenge_token| async move {
+            req.set_challenge_token(challenge_token);
+            client.submit_prepared_generation(&req).await
+        },
+    )
+    .await?;
     output_clips(&clips, ctx);
     Ok(())
 }
@@ -136,7 +150,7 @@ fn build_generate_request(
         args.vocal.as_ref()
     };
     let tags = build_tags(args.tags.as_deref(), vocal);
-    let control_sliders = build_control_sliders(args.weirdness, args.style_influence);
+    let control_sliders = build_control_sliders(args.weirdness, args.style_influence)?;
 
     let mut req = GenerateRequest::new(model_api_key(args.model.as_ref(), config), "custom");
     if let (Some(lyrics), false) = (lyrics, args.instrumental) {
@@ -153,12 +167,11 @@ fn build_generate_request(
 }
 
 async fn describe(args: DescribeArgs, ctx: &AppContext) -> Result<(), CliError> {
-    let mut req = build_describe_request(&args, &ctx.config);
+    let mut req = build_describe_request(&args, &ctx.config)?;
     let force_captcha = args.captcha && !args.no_captcha;
-    req.set_challenge_token(generation_token(args.token.clone(), force_captcha, ctx).await?);
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    let client = ctx.client().await?;
-    maybe_enhance_tags(&mut req, args.enhance_tags, args.instrumental, &client).await?;
+    let token = args.token.clone();
+    let enhance_tags = args.enhance_tags;
+    let instrumental = args.instrumental;
 
     if !ctx.quiet {
         eprintln!(
@@ -166,14 +179,32 @@ async fn describe(args: DescribeArgs, ctx: &AppContext) -> Result<(), CliError> 
             model_label(args.model.as_ref(), &ctx.config)
         );
     }
-    let clips = client.generate(&req).await?;
+    let clips = execute_generation_submission(
+        token,
+        force_captcha,
+        ctx,
+        move || async move {
+            let client = ctx.client().await?;
+            maybe_enhance_tags(&mut req, enhance_tags, instrumental, &client).await?;
+            client.prepare_generation_request(&mut req).await?;
+            Ok((client, req))
+        },
+        |(client, mut req), challenge_token| async move {
+            req.set_challenge_token(challenge_token);
+            client.submit_prepared_generation(&req).await
+        },
+    )
+    .await?;
     output_clips(&clips, ctx);
     Ok(())
 }
 
-fn build_describe_request(args: &DescribeArgs, config: &AppConfig) -> GenerateRequest {
+fn build_describe_request(
+    args: &DescribeArgs,
+    config: &AppConfig,
+) -> Result<GenerateRequest, CliError> {
     let tags = build_tags(args.tags.as_deref(), args.vocal.as_ref());
-    let control_sliders = build_control_sliders(args.weirdness, args.style_influence);
+    let control_sliders = build_control_sliders(args.weirdness, args.style_influence)?;
 
     let mut req = GenerateRequest::new(model_api_key(args.model.as_ref(), config), "inspiration");
     req.prompt = args.prompt.clone();
@@ -182,7 +213,7 @@ fn build_describe_request(args: &DescribeArgs, config: &AppConfig) -> GenerateRe
     req.make_instrumental = args.instrumental;
     req.persona_id = args.persona.clone();
     req.metadata.control_sliders = control_sliders;
-    req
+    Ok(req)
 }
 
 async fn maybe_enhance_tags(
@@ -227,8 +258,9 @@ fn model_label<'a>(model: Option<&'a ModelVersion>, config: &'a AppConfig) -> &'
 }
 
 pub async fn extend(args: ExtendArgs, ctx: &AppContext) -> Result<(), CliError> {
+    crate::core::ensure_non_negative_finite("--at", args.at)?;
     let force_captcha = args.captcha && !args.no_captcha;
-    let challenge_token = generation_token(args.token.clone(), force_captcha, ctx).await?;
+    let token = args.token.clone();
     let instrumental = if args.instrumental {
         Some(true)
     } else if args.no_instrumental {
@@ -236,20 +268,33 @@ pub async fn extend(args: ExtendArgs, ctx: &AppContext) -> Result<(), CliError> 
     } else {
         None
     };
-    let _mutation_guard = ctx.acquire_mutation_lock()?;
-    let client = ctx.client().await?;
-    let clips = client
-        .extend(ExtendClipOptions {
-            clip_id: &args.clip_id,
-            continue_at: args.at,
-            tags: args.tags.as_deref(),
-            negative_tags: args.exclude.as_deref(),
-            lyrics: args.lyrics.as_deref(),
-            title: args.title.as_deref(),
-            instrumental,
-            challenge_token,
-        })
-        .await?;
+    let clips = execute_generation_submission(
+        token,
+        force_captcha,
+        ctx,
+        move || async move {
+            let client = ctx.client().await?;
+            let mut req = client
+                .prepare_extend_request(ExtendClipOptions {
+                    clip_id: &args.clip_id,
+                    continue_at: args.at,
+                    tags: args.tags.as_deref(),
+                    negative_tags: args.exclude.as_deref(),
+                    lyrics: args.lyrics.as_deref(),
+                    title: args.title.as_deref(),
+                    instrumental,
+                    challenge_token: None,
+                })
+                .await?;
+            client.prepare_generation_request(&mut req).await?;
+            Ok((client, req))
+        },
+        |(client, mut req), challenge_token| async move {
+            req.set_challenge_token(challenge_token);
+            client.submit_prepared_generation(&req).await
+        },
+    )
+    .await?;
     output_clips(&clips, ctx);
     Ok(())
 }
@@ -293,7 +338,8 @@ mod tests {
     fn describe_request_sends_empty_title_by_default() {
         let config = AppConfig::default();
 
-        let req = build_describe_request(&describe_args(None, Some(ModelVersion::V55)), &config);
+        let req = build_describe_request(&describe_args(None, Some(ModelVersion::V55)), &config)
+            .expect("request");
 
         let body = serde_json::to_value(req).expect("request json");
         assert_eq!(body["title"], "");
@@ -307,7 +353,8 @@ mod tests {
         let req = build_describe_request(
             &describe_args(Some("Morning Reset".into()), Some(ModelVersion::V55)),
             &config,
-        );
+        )
+        .expect("request");
 
         let body = serde_json::to_value(req).expect("request json");
         assert_eq!(body["title"], "Morning Reset");
@@ -317,7 +364,7 @@ mod tests {
     fn describe_request_uses_config_default_model_when_flag_is_omitted() {
         let config = config_with_default_model("chirp-crow");
 
-        let req = build_describe_request(&describe_args(None, None), &config);
+        let req = build_describe_request(&describe_args(None, None), &config).expect("request");
 
         let body = serde_json::to_value(req).expect("request json");
         assert_eq!(body["mv"], "chirp-crow");
