@@ -24,6 +24,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   overwriting a newly active account or recreating credentials after logout.
 - Serialize concurrent config updates and replace `config.toml` atomically so one agent cannot
   silently discard another agent's setting or leave a partially written file.
+- Keep CLI smoke tests isolated and platform-neutral on Windows as well as Unix.
 - Bind each mutation lock, API client, and browser challenge solve to one authentication snapshot.
 - Reject non-finite or out-of-range generation controls and invalid extend timestamps locally.
 - Keep generic `invalid token` responses on the JWT refresh path for ordinary API requests while

@@ -11,6 +11,9 @@ fn isolated_test_home(prefix: &str) -> PathBuf {
 
 fn with_isolated_home<'a>(cmd: &'a mut Command, test_home: &Path) -> &'a mut Command {
     cmd.env("HOME", test_home)
+        .env("USERPROFILE", test_home)
+        .env("APPDATA", test_home.join("AppData").join("Roaming"))
+        .env("LOCALAPPDATA", test_home.join("AppData").join("Local"))
         .env("XDG_CONFIG_HOME", test_home.join(".config"))
         .env("XDG_DATA_HOME", test_home.join(".local").join("share"))
         .env_remove("SUNOX_DEFAULT_MODEL")
@@ -27,7 +30,11 @@ fn help_lists_codex_style_commands() {
     cmd.arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Usage: sunox [OPTIONS] [PROMPT]"))
+        .stdout(
+            predicate::str::contains("Usage: sunox [OPTIONS] [PROMPT]").or(
+                predicate::str::contains("Usage: sunox.exe [OPTIONS] [PROMPT]"),
+            ),
+        )
         .stdout(predicate::str::contains("create"))
         .stdout(predicate::str::contains("download"))
         .stdout(predicate::str::contains("add"))
@@ -47,9 +54,11 @@ fn create_help_accepts_prompt_argument() {
     cmd.args(["create", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Usage: sunox create [OPTIONS] [PROMPT]",
-        ))
+        .stdout(
+            predicate::str::contains("Usage: sunox create [OPTIONS] [PROMPT]").or(
+                predicate::str::contains("Usage: sunox.exe create [OPTIONS] [PROMPT]"),
+            ),
+        )
         .stdout(predicate::str::contains("--title"))
         .stdout(predicate::str::contains("--tags"))
         .stdout(predicate::str::contains("--captcha"));
@@ -480,7 +489,7 @@ fn install_skill_defaults_to_codex_skill_directory() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"target\": \"codex\""))
-        .stdout(predicate::str::contains(".codex/skills/sunox/SKILL.md"));
+        .stdout(predicate::str::contains("SKILL.md"));
 
     let installed = test_home.join(".codex/skills/sunox/SKILL.md");
     let skill = std::fs::read_to_string(installed).expect("installed skill");
@@ -681,9 +690,11 @@ fn top_level_download_help_is_user_facing() {
     cmd.args(["download", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Usage: sunox download [OPTIONS] [IDS]...",
-        ))
+        .stdout(
+            predicate::str::contains("Usage: sunox download [OPTIONS] [IDS]...").or(
+                predicate::str::contains("Usage: sunox.exe download [OPTIONS] [IDS]..."),
+            ),
+        )
         .stdout(predicate::str::contains("--output"))
         .stdout(predicate::str::contains("--force"))
         .stdout(predicate::str::contains("--format"))
@@ -807,9 +818,12 @@ fn top_level_add_help_uses_playlist_language() {
     cmd.args(["add", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Usage: sunox add [OPTIONS] --to <PLAYLIST_ID> [CLIP_IDS]...",
-        ))
+        .stdout(
+            predicate::str::contains("Usage: sunox add [OPTIONS] --to <PLAYLIST_ID> [CLIP_IDS]...")
+                .or(predicate::str::contains(
+                    "Usage: sunox.exe add [OPTIONS] --to <PLAYLIST_ID> [CLIP_IDS]...",
+                )),
+        )
         .stdout(predicate::str::contains("--to <PLAYLIST_ID>"));
 }
 
