@@ -11,8 +11,7 @@ pub async fn install_skill(args: InstallSkillArgs, ctx: &AppContext) -> Result<(
         return Ok(());
     }
 
-    let home = directories::UserDirs::new()
-        .map(|d| d.home_dir().to_path_buf())
+    let home = crate::core::user_home_dir()
         .ok_or_else(|| CliError::Config("could not determine home directory".into()))?;
 
     let dest_path: std::path::PathBuf = if let Some(custom) = args.path {

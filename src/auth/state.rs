@@ -211,10 +211,7 @@ impl AuthState {
     }
 
     fn path() -> Result<PathBuf, CliError> {
-        auth_path_from_config_dir(
-            directories::ProjectDirs::from("com", "sunox", "sunox")
-                .map(|dirs| dirs.config_dir().to_path_buf()),
-        )
+        auth_path_from_config_dir(crate::core::project_config_dir())
     }
 }
 

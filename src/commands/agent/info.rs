@@ -2,8 +2,8 @@ use crate::app::AppContext;
 use crate::core::CliError;
 
 pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
-    let auth_path = directories::ProjectDirs::from("com", "sunox", "sunox")
-        .map(|d| d.config_dir().join("auth.json").display().to_string())
+    let auth_path = crate::core::project_config_dir()
+        .map(|dir| dir.join("auth.json").display().to_string())
         .unwrap_or_else(|| "~/.config/sunox/auth.json".into());
 
     let info = serde_json::json!({

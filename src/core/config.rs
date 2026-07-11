@@ -67,8 +67,7 @@ impl AppConfig {
     }
 
     pub fn path() -> Option<std::path::PathBuf> {
-        directories::ProjectDirs::from("com", "sunox", "sunox")
-            .map(|dirs| dirs.config_dir().join("config.toml"))
+        super::project_config_dir().map(|dir| dir.join("config.toml"))
     }
 
     pub fn set_persisted(key: &str, value: &str) -> Result<Self, CliError> {

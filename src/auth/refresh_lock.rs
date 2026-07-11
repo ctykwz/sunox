@@ -43,8 +43,8 @@ impl Drop for AuthRefreshLockGuard {
 
 impl AuthStateLockGuard {
     pub(crate) fn acquire() -> Result<Self, CliError> {
-        let dir = directories::ProjectDirs::from("com", "sunox", "sunox")
-            .map(|dirs| dirs.config_dir().join("locks"))
+        let dir = crate::core::project_config_dir()
+            .map(|dir| dir.join("locks"))
             .ok_or_else(|| CliError::Config("cannot resolve sunox config directory".into()))?;
         Self::acquire_path(&dir.join("auth-state.lock"))
     }
@@ -72,8 +72,8 @@ impl Drop for AuthStateLockGuard {
 
 fn lock_file_path(auth: &AuthState) -> Result<PathBuf, CliError> {
     let key = auth.account_lock_key()?;
-    let dir = directories::ProjectDirs::from("com", "sunox", "sunox")
-        .map(|dirs| dirs.config_dir().join("locks"))
+    let dir = crate::core::project_config_dir()
+        .map(|dir| dir.join("locks"))
         .ok_or_else(|| CliError::Config("cannot resolve sunox config directory".into()))?;
     Ok(dir.join(format!("auth-refresh-{key}.lock")))
 }
