@@ -595,10 +595,13 @@ mod tests {
         .await;
 
         assert!(result.is_err(), "outer cancellation must win");
-        let files = std::fs::read_dir(&dir)
-            .expect("output directory")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("read output directory");
+        let files = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries
+                .collect::<Result<Vec<_>, _>>()
+                .expect("read output directory"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => panic!("output directory: {error}"),
+        };
         assert!(files.is_empty(), "cancellation must remove staging files");
         let _ = std::fs::remove_dir_all(dir);
     }
