@@ -155,6 +155,34 @@ fn login_logout_and_doctor_help_are_available() {
 }
 
 #[test]
+fn doctor_help_exposes_network_diagnostics() {
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    cmd.args(["doctor", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--network"))
+        .stdout(predicate::str::contains("DNS"))
+        .stdout(predicate::str::contains("direct TCP"))
+        .stdout(predicate::str::contains("HTTPS"));
+}
+
+#[test]
+fn doctor_without_network_preserves_config_and_auth_check() {
+    let test_home = isolated_test_home("sunox-cli-doctor-default-test");
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    with_isolated_home(&mut cmd, &test_home)
+        .args(["doctor", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\": \"success\""))
+        .stdout(predicate::str::contains("\"auth\""))
+        .stdout(predicate::str::contains("\"code\": \"auth_missing\""))
+        .stdout(predicate::str::contains("\"targets\"").not());
+}
+
+#[test]
 fn help_lists_playlist_command() {
     let mut cmd = Command::cargo_bin("sunox").expect("binary");
 

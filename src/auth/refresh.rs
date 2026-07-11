@@ -66,7 +66,7 @@ async fn refresh_state_with_lock(
             }
             Err(e) => {
                 eprintln!("JWT refresh failed: {e}");
-                Err(CliError::AuthExpired)
+                Err(refresh_error(e))
             }
         }
     } else if let Some(cookie) = &auth.clerk_client_cookie {
@@ -81,7 +81,7 @@ async fn refresh_state_with_lock(
             }
             Err(e) => {
                 eprintln!("JWT refresh failed: {e}");
-                Err(CliError::AuthExpired)
+                Err(refresh_error(e))
             }
         }
     } else {
@@ -91,6 +91,20 @@ async fn refresh_state_with_lock(
 
 fn active_auth_changed_error() -> CliError {
     CliError::AuthChanged
+}
+
+fn refresh_error(error: CliError) -> CliError {
+    match error {
+        CliError::Api {
+            code: "clerk_exchange_rejected" | "clerk_refresh_rejected" | "no_jwt" | "no_session",
+            ..
+        } => CliError::AuthExpired,
+        CliError::Api {
+            code: "clerk_rate_limited",
+            ..
+        } => CliError::RateLimited,
+        error => error,
+    }
 }
 
 fn reusable_saved_auth_after_lock(
@@ -138,7 +152,63 @@ mod tests {
 
     use crate::auth::AuthState;
 
-    use super::{RefreshMode, reusable_saved_auth_after_lock};
+    use super::{RefreshMode, refresh_error, reusable_saved_auth_after_lock};
+    use crate::core::CliError;
+
+    #[test]
+    fn refresh_preserves_transport_errors_for_network_diagnosis() {
+        let error = CliError::Http(
+            reqwest::Client::new()
+                .get("http://[::1")
+                .build()
+                .expect_err("invalid URL must fail"),
+        );
+
+        assert!(matches!(refresh_error(error), CliError::Http(_)));
+    }
+
+    #[test]
+    fn refresh_maps_rejected_clerk_sessions_to_auth_expired() {
+        let error = CliError::Api {
+            code: "clerk_refresh_rejected",
+            message: "HTTP 401".into(),
+        };
+
+        assert!(matches!(refresh_error(error), CliError::AuthExpired));
+    }
+
+    #[test]
+    fn refresh_preserves_non_auth_semantic_errors() {
+        let error = CliError::Config("invalid auth state".into());
+
+        assert!(matches!(refresh_error(error), CliError::Config(_)));
+    }
+
+    #[test]
+    fn refresh_preserves_clerk_server_failures() {
+        let error = CliError::Api {
+            code: "clerk_refresh_failed",
+            message: "HTTP 503".into(),
+        };
+
+        assert!(matches!(
+            refresh_error(error),
+            CliError::Api {
+                code: "clerk_refresh_failed",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn refresh_maps_clerk_rate_limit_without_expiring_auth() {
+        let error = CliError::Api {
+            code: "clerk_rate_limited",
+            message: "HTTP 429".into(),
+        };
+
+        assert!(matches!(refresh_error(error), CliError::RateLimited));
+    }
 
     fn jwt(exp: u64, subject: &str, marker: &str) -> String {
         let header = BASE64URL.encode(r#"{"alg":"none","typ":"JWT"}"#);

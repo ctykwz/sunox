@@ -123,6 +123,7 @@ sunox add <clip_ids> --to <id>  Add songs to a playlist
 sunox login                     Set up authentication from browser
 sunox logout                    Remove stored auth and interactive login profile
 sunox doctor                    Diagnose config and auth
+sunox doctor --network          Diagnose DNS, direct TCP, and HTTPS connectivity
 ```
 
 ## Agent & Advanced Commands
@@ -218,12 +219,15 @@ sunox logout         Remove stored auth and interactive login profile
 sunox auth           Advanced auth: refresh, cookie, jwt
 sunox config         show | set | check
 sunox doctor         Diagnose config and auth
+sunox doctor --network Diagnose DNS, direct TCP, and HTTPS connectivity
 sunox agent-info     Machine-readable capabilities JSON
 sunox install-skill  Install agent skill into Codex / Claude Code / Cursor
 sunox update         Self-update from GitHub Releases (--check to peek first)
 ```
 
 ## Features
+
+Studio functionality is outside the scope of this CLI.
 
 ### Zero-Friction Auth
 

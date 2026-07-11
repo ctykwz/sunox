@@ -7,6 +7,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.0.15] - 2026-07-11
+
+### Added
+
+- Added `sunox doctor --network` for structured DNS, direct TCP, and HTTPS reachability diagnostics, with overall health based on the actual HTTPS path so proxy-only networks are represented correctly.
+
+### Fixed
+
+- Preserve transport, server, and transient failures during Clerk refresh; report Clerk rate limits separately instead of treating every failure as expired authentication.
+
 ## [0.0.14] - 2026-07-11
 
 ### Added

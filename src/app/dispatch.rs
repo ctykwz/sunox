@@ -67,7 +67,8 @@ async fn dispatch_command(
         Some(Commands::Clip(args)) => run_clip(args.command, ctx).await,
         Some(Commands::Login) => commands::auth::run(auth_args_login(), ctx).await,
         Some(Commands::Logout) => commands::auth::run(auth_args_logout(), ctx).await,
-        Some(Commands::Doctor) => {
+        Some(Commands::Doctor(args)) if args.network => commands::doctor::network(ctx).await,
+        Some(Commands::Doctor(_)) => {
             commands::config::run(
                 ConfigArgs {
                     action: ConfigAction::Check,

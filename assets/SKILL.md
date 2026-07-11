@@ -27,6 +27,9 @@ sunox login
 
 # Verify it worked
 sunox doctor
+
+# Diagnose DNS/direct-TCP/HTTPS connectivity when auth or API requests cannot connect
+sunox doctor --network
 ```
 
 If `sunox login` fails on a headless box, fall back to:
@@ -101,8 +104,8 @@ also returns song-page context such as attribution, comments,
 non-rate-limit supplemental read fails, the base clip still returns and JSON
 includes `supplemental_errors`; auth and rate-limit errors still abort
 normally. Do not trigger new Suno generation/export work just to inspect audio.
-Reserve WAV, stems, or Studio export workflows for explicit deep-analysis,
-lossless, or stem requests.
+Reserve WAV or generation-backed stems for explicit deep-analysis, lossless,
+or stem requests. Studio functionality is outside this CLI's scope.
 The current CLI download defaults to the existing `clip.audio_url` CDN MP3 and
 supports explicit `--format mp3|m4a|wav|opus` through Suno's official download
 endpoints; `--video` uses `clip.video_url` when present.
@@ -131,6 +134,7 @@ sunox add <clip_id_1> <clip_id_2> --to <playlist_id>
 # Account and health
 sunox login
 sunox doctor
+sunox doctor --network
 ```
 
 ## Agent and advanced commands
@@ -299,7 +303,7 @@ read is unavailable.
 - Every command supports `--json`. JSON is **auto-detected** when stdout is piped.
 - Progress messages and errors go to **stderr** so they don't pollute JSON pipelines.
 - Suno write commands are account-scoped serial by default; do not pass --parallel or disable `serial_mutations` unless the user explicitly allows same-account concurrent writes.
-- For simple audio analysis, prefer clip `audio_url` CDN media from `sunox clip info <clip_id> --json` or use the default CDN `sunox clip download`; `clip info` also includes `attribution`, `comments`, `direct_children_count`, `similar_clips`, and non-fatal `supplemental_errors`. Reserve explicit `--format`, stems, Pro video, or Studio export workflows for requests that name that format or need deep/lossless analysis.
+- For simple audio analysis, prefer clip `audio_url` CDN media from `sunox clip info <clip_id> --json` or use the default CDN `sunox clip download`; `clip info` also includes `attribution`, `comments`, `direct_children_count`, `similar_clips`, and non-fatal `supplemental_errors`. Reserve explicit `--format`, generation-backed stems, or Pro video for requests that name that format or need deep/lossless analysis. Studio functionality is outside this CLI's scope.
 - Download output directories are created automatically. Do not pass `--force` unless the user explicitly requests replacing an existing local download; ordinary downloads refuse to overwrite a matching file.
 - `--quiet` suppresses download progress and ordinary status output. A batch download that has already written any output and then fails returns `partial_download`; inspect `error.details.succeeded`, `error.details.failed`, and `error.details.not_attempted_clip_ids`, then retry only the required IDs.
 - `playlist remove` submits one remove request per clip. If a later clip fails, JSON errors use code `partial_mutation`; inspect `error.details.succeeded_clip_ids`, `error.details.failed`, and `error.details.not_attempted_clip_ids` before retrying.

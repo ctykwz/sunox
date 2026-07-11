@@ -39,7 +39,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "post_submit_workflow": "When create or a generation-backed edit, including clip inspire, returns new or processing clip IDs, call `sunox clip wait <clip_id> --json` before download, quality filtering, or playlist decisions unless the caller explicitly wants submit-only behavior.",
             "audio_analysis": {
                 "simple": "For simple audio analysis, use existing clip media: read audio_url and song-page context from `sunox clip info <clip_id> --json` or run `sunox clip download <clip_id> --json` for the default CDN MP3; non-auth supplemental read failures appear in supplemental_errors. Do not create new Suno resources just to inspect audio.",
-                "deep": "Use heavier WAV, stems, or Studio export workflows only when the user explicitly asks for WAV, stems, lossless audio, or deep spectral analysis; do not silently downgrade a WAV/lossless request to MP3."
+                "deep": "Use heavier WAV or generation-backed stems only when the user explicitly asks for WAV, stems, lossless audio, or deep spectral analysis; do not silently downgrade a WAV/lossless request to MP3."
             },
             "download_formats": {
                 "current_cli": "current CLI download uses clip.audio_url for the default CDN MP3 path; explicit --format mp3|m4a|wav|opus uses Suno's official download endpoints; --video uses clip.video_url when present. Download preparation and edit polling use poll_timeout_secs and poll_interval_secs from config, including in-flight requests and auth retries.",
@@ -61,7 +61,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "sunox download <clip_id>",
             "sunox add <clip_id> --to <playlist_id>",
             "sunox login",
-            "sunox doctor"
+            "sunox doctor [--network]"
         ],
         "machine_commands": [
             "sunox agent-info --json",
@@ -75,7 +75,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "sunox clip download <clip_id> --format wav --json",
             "sunox playlist add <playlist_id> <clip_id> --json",
             "sunox persona list --json",
-            "sunox config show --json"
+            "sunox doctor --network --json"
         ],
         "agent_integration": {
             "recommended_target": "codex",
@@ -90,7 +90,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                 "prefer --json for machine-readable command output",
                 "when create or a command in async_clip_edits.returns_new_or_processing returns clip IDs, call clip wait before downstream work unless submit-only behavior was requested; crop and fade already wait for their result clip to complete",
                 "do not pass --parallel or disable serial_mutations unless the user explicitly opts into same-account concurrent writes",
-                "for simple audio analysis, use existing clip audio_url or the default CDN download; reserve explicit --format, stems, or Studio export workflows for explicit format, deep-analysis, or lossless requests",
+                "for simple audio analysis, use existing clip audio_url or the default CDN download; reserve explicit --format or generation-backed stems for explicit format, deep-analysis, or lossless requests",
                 "do not publish, make public, or run destructive commands unless the user explicitly asked for that action; destructive commands require -y/--yes",
                 "use semantic exit codes to decide retry, auth, and config actions"
             ]
@@ -285,9 +285,8 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                 "reason": "older captures include voice verification paths, but the refreshed non-Studio bundle did not confirm them"
             },
             "studio_multitrack_export": {
-                "status": "live_captured_not_exposed",
-                "route": "POST /api/studio/render-state-multitrack",
-                "reason": "stem zip export requires full Studio arrangement state plus rights-key handling, not just clip download"
+                "status": "out_of_scope",
+                "reason": "Studio functionality is outside this CLI's scope"
             }
         },
         "config": {

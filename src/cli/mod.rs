@@ -5,6 +5,7 @@ mod auth;
 mod clip;
 mod config;
 mod create;
+mod doctor;
 mod library;
 mod media;
 mod models;
@@ -21,6 +22,7 @@ pub use create::{
     ConcatArgs, CoverArgs, CreateArgs, CropArgs, DescribeArgs, ExtendArgs, FadeArgs, GenerateArgs,
     InspireArgs, LyricsArgs, RemasterArgs, ReverseArgs, SpeedArgs, StemsArgs,
 };
+pub use doctor::DoctorArgs;
 pub use library::{
     DeleteArgs, EmptyTrashArgs, InfoArgs, ListArgs, ListSort, PublishArgs, PurgeArgs, ReactionArgs,
     RestoreArgs, SearchArgs, SetArgs, StatusArgs,
@@ -118,7 +120,7 @@ pub enum Commands {
     Config(ConfigArgs),
 
     /// Diagnose local configuration and authentication
-    Doctor,
+    Doctor(DoctorArgs),
 
     /// Machine-readable capabilities (for AI agents)
     AgentInfo,

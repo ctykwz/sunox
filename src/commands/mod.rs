@@ -5,6 +5,7 @@ pub mod agent;
 pub mod auth;
 pub mod config;
 pub mod create;
+pub mod doctor;
 pub mod library;
 pub mod media;
 pub mod persona;

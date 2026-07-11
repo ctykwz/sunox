@@ -37,6 +37,23 @@ fn response_excerpt(body: &str) -> String {
     }
 }
 
+fn clerk_status_code(
+    status: reqwest::StatusCode,
+    rejected: &'static str,
+    failed: &'static str,
+) -> &'static str {
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        "clerk_rate_limited"
+    } else if status.is_client_error()
+        && status != reqwest::StatusCode::REQUEST_TIMEOUT
+        && status != reqwest::StatusCode::TOO_EARLY
+    {
+        rejected
+    } else {
+        failed
+    }
+}
+
 /// Exchange the __client cookie for a session ID and JWT via Clerk.
 pub async fn clerk_token_exchange(
     client: &reqwest::Client,
@@ -51,7 +68,7 @@ pub async fn clerk_token_exchange(
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         return Err(CliError::Api {
-            code: "clerk_exchange_failed",
+            code: clerk_status_code(status, "clerk_exchange_rejected", "clerk_exchange_failed"),
             message: format!(
                 "Clerk token exchange failed ({status}): {}",
                 response_excerpt(&body)
@@ -99,7 +116,7 @@ pub async fn clerk_refresh_jwt(
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         return Err(CliError::Api {
-            code: "clerk_refresh_failed",
+            code: clerk_status_code(status, "clerk_refresh_rejected", "clerk_refresh_failed"),
             message: format!(
                 "Clerk JWT refresh failed ({status}): {}",
                 response_excerpt(&body)
@@ -116,4 +133,31 @@ pub async fn clerk_refresh_jwt(
             message: "Clerk returned no JWT - session may have expired, run `sunox login` again"
                 .into(),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use reqwest::StatusCode;
+
+    use super::clerk_status_code;
+
+    #[test]
+    fn clerk_status_distinguishes_rejection_from_server_failure() {
+        assert_eq!(
+            clerk_status_code(StatusCode::UNAUTHORIZED, "rejected", "failed"),
+            "rejected"
+        );
+        assert_eq!(
+            clerk_status_code(StatusCode::SERVICE_UNAVAILABLE, "rejected", "failed"),
+            "failed"
+        );
+        assert_eq!(
+            clerk_status_code(StatusCode::TOO_MANY_REQUESTS, "rejected", "failed"),
+            "clerk_rate_limited"
+        );
+        assert_eq!(
+            clerk_status_code(StatusCode::REQUEST_TIMEOUT, "rejected", "failed"),
+            "failed"
+        );
+    }
 }
