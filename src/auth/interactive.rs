@@ -139,7 +139,16 @@ pub async fn extract_interactive_browser_auth() -> Result<BrowserAuth, CliError>
 }
 
 pub fn delete_interactive_browser_profile() -> Result<(), CliError> {
-    let profile_dir = interactive_browser_profile_dir()?;
+    let Some(project_dirs) = directories::ProjectDirs::from("com", "sunox", "sunox") else {
+        // Logout must remain usable in headless/minimal environments where the
+        // platform cannot resolve a data directory. In that case no profile
+        // path can have been created by this process, so there is nothing to
+        // remove.
+        return Ok(());
+    };
+    let profile_dir = project_dirs
+        .data_dir()
+        .join("interactive-login-browser-profile");
     delete_interactive_browser_profile_at(&profile_dir)
 }
 
