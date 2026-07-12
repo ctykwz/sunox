@@ -36,7 +36,7 @@ struct ProbeStage {
     error: Option<String>,
 }
 
-pub async fn network(ctx: &AppContext) -> Result<(), CliError> {
+pub async fn network(ctx: &AppContext, strict: bool) -> Result<(), CliError> {
     let client = reqwest::Client::builder()
         .connect_timeout(PROBE_TIMEOUT)
         .timeout(PROBE_TIMEOUT)
@@ -62,27 +62,42 @@ pub async fn network(ctx: &AppContext) -> Result<(), CliError> {
         targets,
     };
 
+    if strict && !report.ok {
+        if matches!(ctx.fmt, OutputFormat::Table) {
+            print_network_report(&report);
+        }
+        return Err(CliError::Diagnostic {
+            code: "network_degraded",
+            message: "one or more Suno network paths are unavailable".into(),
+            details: serde_json::to_value(&report)?,
+        });
+    }
+
     match ctx.fmt {
         OutputFormat::Json => output::json::success(&report),
         OutputFormat::Table => {
-            for target in &report.targets {
-                eprintln!(
-                    "{} ({}): DNS {}, direct TCP {}, HTTPS {}",
-                    target.name,
-                    target.host,
-                    stage_summary(&target.dns),
-                    stage_summary(&target.tcp),
-                    stage_summary(&target.https),
-                );
-            }
-            if report.ok {
-                eprintln!("Network: OK");
-            } else {
-                eprintln!("Network: degraded — inspect failed stages above");
-            }
+            print_network_report(&report);
         }
     }
     Ok(())
+}
+
+fn print_network_report(report: &NetworkReport) {
+    for target in &report.targets {
+        eprintln!(
+            "{} ({}): DNS {}, direct TCP {}, HTTPS {}",
+            target.name,
+            target.host,
+            stage_summary(&target.dns),
+            stage_summary(&target.tcp),
+            stage_summary(&target.https),
+        );
+    }
+    if report.ok {
+        eprintln!("Network: OK");
+    } else {
+        eprintln!("Network: degraded — inspect failed stages above");
+    }
 }
 
 async fn probe_target(

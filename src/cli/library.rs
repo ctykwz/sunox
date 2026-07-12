@@ -63,6 +63,18 @@ pub enum ListSort {
 pub struct SearchArgs {
     /// Search query (matches title and tags)
     pub query: String,
+
+    /// Cursor returned by the previous search response
+    #[arg(long)]
+    pub cursor: Option<String>,
+
+    /// Maximum number of clips to request per page
+    #[arg(long)]
+    pub limit: Option<u32>,
+
+    /// Follow pagination until all matching workspace clips are returned
+    #[arg(long)]
+    pub all: bool,
 }
 
 #[derive(clap::Args)]

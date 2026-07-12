@@ -31,7 +31,7 @@ impl SunoClient {
                 .await?;
             let resp = self.check_response(resp).await?;
             let result: GenerateResponse = resp.json().await?;
-            Ok(result.clips)
+            result.into_clips()
         })
         .await
     }

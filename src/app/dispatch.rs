@@ -67,7 +67,9 @@ async fn dispatch_command(
         Some(Commands::Clip(args)) => run_clip(args.command, ctx).await,
         Some(Commands::Login) => commands::auth::run(auth_args_login(), ctx).await,
         Some(Commands::Logout) => commands::auth::run(auth_args_logout(), ctx).await,
-        Some(Commands::Doctor(args)) if args.network => commands::doctor::network(ctx).await,
+        Some(Commands::Doctor(args)) if args.network => {
+            commands::doctor::network(ctx, args.strict).await
+        }
         Some(Commands::Doctor(_)) => {
             commands::config::run(
                 ConfigArgs {
@@ -127,7 +129,9 @@ fn auth_args_login() -> AuthArgs {
         login: true,
         refresh: false,
         jwt: None,
+        jwt_stdin: false,
         cookie: None,
+        cookie_stdin: false,
         device: None,
         logout: false,
     }
@@ -138,7 +142,9 @@ fn auth_args_logout() -> AuthArgs {
         login: false,
         refresh: false,
         jwt: None,
+        jwt_stdin: false,
         cookie: None,
+        cookie_stdin: false,
         device: None,
         logout: true,
     }

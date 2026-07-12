@@ -12,6 +12,14 @@ struct CompletedDownload {
     path: String,
 }
 
+#[derive(serde::Serialize)]
+struct DownloadWarning {
+    clip_id: String,
+    field: &'static str,
+    code: String,
+    message: String,
+}
+
 struct DownloadFileOptions<'a> {
     output_dir: &'a str,
     video: bool,
@@ -31,6 +39,7 @@ pub async fn download(args: DownloadArgs, ctx: &AppContext) -> Result<(), CliErr
     let clips = tasks::require_found_clips(&args.ids, client.get_clips(&args.ids).await?)?;
     let mut paths = Vec::new();
     let mut completed = Vec::new();
+    let mut warnings = Vec::new();
     let output_dir = args.output.as_deref().unwrap_or(&ctx.config.output_dir);
     let source = audio_download_source(args.format);
     for (index, clip) in clips.iter().enumerate() {
@@ -41,8 +50,8 @@ pub async fn download(args: DownloadArgs, ctx: &AppContext) -> Result<(), CliErr
             quiet: ctx.quiet,
             source,
         };
-        let path = match download_file(clip, options, ctx, &client).await {
-            Ok(path) => path,
+        let (path, warning) = match download_file(clip, options, ctx, &client).await {
+            Ok(result) => result,
             Err(error) => {
                 return Err(partial_download_error(
                     &completed,
@@ -54,6 +63,13 @@ pub async fn download(args: DownloadArgs, ctx: &AppContext) -> Result<(), CliErr
             }
         };
 
+        if let Some(warning) = warning {
+            if !ctx.quiet {
+                eprintln!("Warning: {}", warning.message);
+            }
+            warnings.push(warning);
+        }
+
         if !ctx.quiet {
             eprintln!("Downloaded: {path}");
         }
@@ -64,7 +80,8 @@ pub async fn download(args: DownloadArgs, ctx: &AppContext) -> Result<(), CliErr
         paths.push(path);
     }
     match ctx.fmt {
-        OutputFormat::Json => output::json::success(&paths),
+        OutputFormat::Json if warnings.is_empty() => output::json::success(&paths),
+        OutputFormat::Json => output::json::success_with_warnings(&paths, &warnings),
         OutputFormat::Table => {}
     }
     Ok(())
@@ -75,10 +92,11 @@ async fn download_file(
     options: DownloadFileOptions<'_>,
     ctx: &AppContext,
     client: &crate::api::SunoClient,
-) -> Result<String, CliError> {
+) -> Result<(String, Option<DownloadWarning>), CliError> {
     if options.video {
         return media::download_clip(clip, options.output_dir, true, options.force, options.quiet)
-            .await;
+            .await
+            .map(|path| (path, None));
     }
     match options.source {
         AudioDownloadSource::ClipAudioUrl => {
@@ -118,6 +136,7 @@ async fn download_file(
                     options.quiet,
                 )
                 .await
+                .map(|path| (path, None))
             }
         }
     }
@@ -130,10 +149,25 @@ async fn download_mp3_with_lyrics(
     force: bool,
     quiet: bool,
     client: &crate::api::SunoClient,
-) -> Result<String, CliError> {
+) -> Result<(String, Option<DownloadWarning>), CliError> {
     let staged = media::stage_clip_url(clip, output_dir, url, "mp3", force, quiet).await?;
     let plain_lyrics = clip.metadata.prompt.as_deref();
-    let aligned = client.aligned_lyrics(&clip.id).await.ok();
+    let (aligned, warning) = match client.aligned_lyrics(&clip.id).await {
+        Ok(aligned) => (Some(aligned), None),
+        Err(error) if error.is_auth_or_rate_limit() => return Err(error),
+        Err(error) => {
+            let warning = DownloadWarning {
+                clip_id: clip.id.clone(),
+                field: "aligned_lyrics",
+                code: error.error_code().to_string(),
+                message: format!(
+                    "downloaded {} but timed lyrics could not be embedded: {error}",
+                    clip.id
+                ),
+            };
+            (None, Some(warning))
+        }
+    };
     let path = staged.commit_after(|temporary_path| {
         media::embed_lyrics_in_mp3(
             &temporary_path.to_string_lossy(),
@@ -143,9 +177,13 @@ async fn download_mp3_with_lyrics(
         )
     })?;
     if !quiet {
-        eprintln!("Embedded lyrics into {path}");
+        if aligned.is_some() {
+            eprintln!("Embedded plain and timed lyrics into {path}");
+        } else {
+            eprintln!("Embedded available plain lyrics into {path}");
+        }
     }
-    Ok(path)
+    Ok((path, warning))
 }
 
 fn remaining_clip_ids(clips: &[crate::api::types::Clip]) -> Vec<String> {
@@ -287,8 +325,9 @@ pub async fn upload_status(args: UploadStatusArgs, ctx: &AppContext) -> Result<(
 }
 
 pub async fn timed_lyrics(args: TimedLyricsArgs, ctx: &AppContext) -> Result<(), CliError> {
+    let render = timed_lyrics_render(args.lrc, ctx.fmt, ctx.json_explicit)?;
     let words = ctx.client().await?.aligned_lyrics(&args.id).await?;
-    match timed_lyrics_render(args.lrc, ctx.fmt) {
+    match render {
         TimedLyricsRender::Json => output::json::success(&words),
         TimedLyricsRender::Lrc => {
             for word in &words {
@@ -321,12 +360,23 @@ enum TimedLyricsRender {
     Table,
 }
 
-fn timed_lyrics_render(lrc: bool, fmt: OutputFormat) -> TimedLyricsRender {
-    match fmt {
-        OutputFormat::Json => TimedLyricsRender::Json,
-        OutputFormat::Table if lrc => TimedLyricsRender::Lrc,
-        OutputFormat::Table => TimedLyricsRender::Table,
+fn timed_lyrics_render(
+    lrc: bool,
+    fmt: OutputFormat,
+    json_explicit: bool,
+) -> Result<TimedLyricsRender, CliError> {
+    if lrc && json_explicit {
+        return Err(CliError::Config(
+            "--lrc cannot be combined with explicit --json".into(),
+        ));
     }
+    Ok(if lrc {
+        TimedLyricsRender::Lrc
+    } else if matches!(fmt, OutputFormat::Json) {
+        TimedLyricsRender::Json
+    } else {
+        TimedLyricsRender::Table
+    })
 }
 
 #[cfg(test)]
@@ -393,17 +443,26 @@ mod tests {
     }
 
     #[test]
-    fn timed_lyrics_json_output_takes_priority_over_lrc_flag() {
+    fn timed_lyrics_lrc_overrides_auto_detected_json_output() {
         assert_eq!(
-            timed_lyrics_render(true, OutputFormat::Json),
-            TimedLyricsRender::Json
+            timed_lyrics_render(true, OutputFormat::Json, false)
+                .expect("auto JSON may yield to LRC"),
+            TimedLyricsRender::Lrc
         );
+    }
+
+    #[test]
+    fn timed_lyrics_rejects_explicit_json_with_lrc() {
+        let error = timed_lyrics_render(true, OutputFormat::Json, true)
+            .expect_err("explicit formats conflict");
+
+        assert_eq!(error.error_code(), "config_error");
     }
 
     #[test]
     fn timed_lyrics_lrc_applies_to_table_output() {
         assert_eq!(
-            timed_lyrics_render(true, OutputFormat::Table),
+            timed_lyrics_render(true, OutputFormat::Table, false).expect("LRC"),
             TimedLyricsRender::Lrc
         );
     }
@@ -411,7 +470,7 @@ mod tests {
     #[test]
     fn timed_lyrics_table_output_is_default_human_format() {
         assert_eq!(
-            timed_lyrics_render(false, OutputFormat::Table),
+            timed_lyrics_render(false, OutputFormat::Table, false).expect("table"),
             TimedLyricsRender::Table
         );
     }

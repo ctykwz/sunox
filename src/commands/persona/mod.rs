@@ -7,7 +7,7 @@ use crate::cli::{
     PersonaInfoArgs, PersonaListArgs, PersonaListKind, PersonaLoveArgs, PersonaProcessedClipArgs,
     PersonaPublishArgs, PersonaRestoreArgs, PersonaSetArgs, PersonaToggleLoveArgs,
 };
-use crate::core::{CliError, ensure_destructive_confirmed};
+use crate::core::{CliError, ensure_destructive_confirmed, ensure_time_range};
 use crate::output::{self, OutputFormat};
 
 pub async fn run(args: PersonaArgs, ctx: &AppContext) -> Result<(), CliError> {
@@ -90,25 +90,7 @@ async fn clips(args: PersonaClipsArgs, ctx: &AppContext) -> Result<(), CliError>
 }
 
 async fn create(args: PersonaCreateArgs, ctx: &AppContext) -> Result<(), CliError> {
-    let req = CreatePersonaRequest {
-        root_clip_id: Some(args.root_clip_id),
-        name: args.name,
-        description: args.description,
-        image_s3_id: args.image_s3_id,
-        is_public: Some(!args.private),
-        is_suno_persona: None,
-        persona_type: args.persona_type,
-        vox_audio_id: args.vox_audio_id,
-        vocal_start_s: args.vocal_start,
-        vocal_end_s: args.vocal_end,
-        user_input_styles: args.user_input_styles,
-        source: args.source,
-        singer_skill_level: args.singer_skill_level,
-        clips: None,
-        is_voice_recording: None,
-        voice_recording_id: None,
-        verification_id: None,
-    };
+    let req = build_create_persona_request(args)?;
     let (client, _mutation_guard) = ctx.mutation_client().await?;
     let persona = client.create_persona(&req).await?;
     match ctx.fmt {
@@ -121,7 +103,31 @@ async fn create(args: PersonaCreateArgs, ctx: &AppContext) -> Result<(), CliErro
     Ok(())
 }
 
+fn build_create_persona_request(args: PersonaCreateArgs) -> Result<CreatePersonaRequest, CliError> {
+    ensure_time_range("persona vocal range", args.vocal_start, args.vocal_end)?;
+    Ok(CreatePersonaRequest {
+        root_clip_id: Some(args.root_clip_id),
+        name: args.name,
+        description: args.description,
+        image_s3_id: args.image_s3_id,
+        is_public: Some(args.public),
+        is_suno_persona: None,
+        persona_type: args.persona_type,
+        vox_audio_id: args.vox_audio_id,
+        vocal_start_s: args.vocal_start,
+        vocal_end_s: args.vocal_end,
+        user_input_styles: args.user_input_styles,
+        source: args.source,
+        singer_skill_level: args.singer_skill_level,
+        clips: None,
+        is_voice_recording: None,
+        voice_recording_id: None,
+        verification_id: None,
+    })
+}
+
 async fn set(args: PersonaSetArgs, ctx: &AppContext) -> Result<(), CliError> {
+    ensure_time_range("persona vocal range", args.vocal_start, args.vocal_end)?;
     if args.name.is_none()
         && args.description.is_none()
         && args.public.is_none()
@@ -139,6 +145,7 @@ async fn set(args: PersonaSetArgs, ctx: &AppContext) -> Result<(), CliError> {
     let (client, _mutation_guard) = ctx.mutation_client().await?;
     let current = client.get_persona(&args.id).await?;
     let req = build_edit_persona_request(args, current);
+    ensure_time_range("persona vocal range", req.vocal_start_s, req.vocal_end_s)?;
     let persona = client.edit_persona(&req).await?;
     match ctx.fmt {
         OutputFormat::Json => output::json::success(&persona),
@@ -332,9 +339,30 @@ fn build_edit_persona_request(
 #[cfg(test)]
 mod tests {
     use crate::api::types::PersonaInfo;
-    use crate::cli::PersonaSetArgs;
+    use crate::cli::{PersonaCreateArgs, PersonaSetArgs};
 
-    use super::build_edit_persona_request;
+    use super::{build_create_persona_request, build_edit_persona_request};
+
+    #[test]
+    fn create_request_is_private_by_default() {
+        let request = build_create_persona_request(PersonaCreateArgs {
+            root_clip_id: "clip-1".into(),
+            name: None,
+            description: None,
+            image_s3_id: None,
+            public: false,
+            persona_type: None,
+            vox_audio_id: None,
+            vocal_start: Some(0.0),
+            vocal_end: Some(10.0),
+            user_input_styles: None,
+            source: None,
+            singer_skill_level: None,
+        })
+        .expect("valid create request");
+
+        assert_eq!(request.is_public, Some(false));
+    }
 
     #[test]
     fn edit_request_preserves_existing_web_fields_when_not_overridden() {

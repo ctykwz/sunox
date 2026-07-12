@@ -137,4 +137,12 @@ impl RemasterModel {
             Self::V45Plus => "chirp-bass",
         }
     }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::V55 => "v5.5",
+            Self::V5 => "v5",
+            Self::V45Plus => "v4.5+",
+        }
+    }
 }

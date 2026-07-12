@@ -14,11 +14,19 @@ pub struct AuthArgs {
     #[arg(long)]
     pub jwt: Option<String>,
 
+    /// Read the JWT token from standard input instead of process arguments
+    #[arg(long, conflicts_with_all = ["jwt", "cookie", "cookie_stdin"])]
+    pub jwt_stdin: bool,
+
     /// Clerk __client cookie (manual fallback for headless servers)
     ///
     /// Accepts either the raw __client value or a full browser Cookie header.
     #[arg(long)]
     pub cookie: Option<String>,
+
+    /// Read the Clerk cookie from standard input instead of process arguments
+    #[arg(long, conflicts_with_all = ["cookie", "jwt", "jwt_stdin"])]
+    pub cookie_stdin: bool,
 
     /// Device ID
     #[arg(long)]

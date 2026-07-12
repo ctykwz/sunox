@@ -111,9 +111,9 @@ pub struct PersonaCreateArgs {
     #[arg(long)]
     pub image_s3_id: Option<String>,
 
-    /// Create as private instead of public
+    /// Explicitly make the new persona public (default: private)
     #[arg(long)]
-    pub private: bool,
+    pub public: bool,
 
     /// Persona type to pass through to Suno Web
     #[arg(long)]

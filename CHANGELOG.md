@@ -7,6 +7,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- Added safe stdin authentication inputs, paginated/all library search, strict network diagnostics,
+  account-aware remaster discovery, bounded downloads, structured supplemental download warnings,
+  and graceful Ctrl-C cleanup.
+- Added protected release approvals, release-tag rules, glibc 2.28 builds, platform signing gates,
+  notarized macOS packages, SBOM generation, artifact attestations, and scheduled security audits.
+
+### Fixed
+
+- Made persona creation private by default and validated vocal ranges before mutation.
+- Prevented local CDP hijacking and captcha profile leakage by using an invocation-owned random
+  loopback endpoint, clearing injected cookies, and deleting the temporary browser profile.
+- Prevented verified auth writes from undoing concurrent logout/account switches, bounded Clerk
+  requests, and removed Clerk session identifiers from transport errors.
+- Preserved description-mode exclusions, rejected empty successful generation responses, aligned
+  404 exit semantics, fixed redirected LRC output, and made diagnostic results independent of
+  output format.
+- Resolved account defaults for cover/remaster operations, surfaced remaster availability without
+  treating missing `can_use` as false, and removed stale agent command metadata.
+
 ## [0.0.15] - 2026-07-11
 
 ### Added

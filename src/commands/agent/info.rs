@@ -26,7 +26,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "v3": "chirp-v3-0",
             "v2": "chirp-v2-xxl-alpha",
         },
-        "model_selection": "Model availability, the account default, and max_lengths are account-specific. Generation reads `/api/billing/info/` directly; `sunox models --json` exposes the same account data for inspection. default_model=auto selects the account's usable default, while an explicit --model or configured model is validated against can_use and max_lengths when billing info is available. v5.5 is used only when the billing read is unavailable.",
+        "model_selection": "Model availability, the account default, and max_lengths are account-specific. Generation reads `/api/billing/info/` directly; `sunox models --json` returns generation and remaster arrays from the same account data. default_model=auto selects the account's usable default, while an explicit --model or configured model is validated against account capability data. v5.5 is used only when the billing read itself is unavailable; a successful empty model response is an error.",
         "remaster_models": {
             "v5.5": "chirp-flounder",
             "v5": "chirp-carp",
@@ -35,7 +35,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
         "workflow": {
             "create": "submit generation or description and return clip payload",
             "clip wait": "poll clip ids until complete or error",
-            "clip download": "download completed media; default CDN MP3 embeds lyrics; explicit --format supports mp3|m4a|wav|opus and --video. Output directories are created automatically; existing files require explicit --force to replace. Batch downloads remain serial; if a later item fails after any output is written, JSON returns partial_download with error.details.succeeded, failed, and not_attempted_clip_ids.",
+            "clip download": "download completed media; default CDN MP3 embeds lyrics; explicit --format supports mp3|m4a|wav|opus and --video. Output directories are created automatically; existing files require explicit --force to replace. Downloads have a two-hour total deadline and 2 GiB limit. Non-auth timed-lyrics failures preserve available plain lyrics and appear in the success envelope's warnings; auth/rate-limit errors abort. Batch failures return partial_download details.",
             "post_submit_workflow": "When create or a generation-backed edit, including clip inspire, returns new or processing clip IDs, call `sunox clip wait <clip_id> --json` before download, quality filtering, or playlist decisions unless the caller explicitly wants submit-only behavior.",
             "audio_analysis": {
                 "simple": "For simple audio analysis, use existing clip media: read audio_url and song-page context from `sunox clip info <clip_id> --json` or run `sunox clip download <clip_id> --json` for the default CDN MP3; non-auth supplemental read failures appear in supplemental_errors. Do not create new Suno resources just to inspect audio.",
@@ -61,12 +61,13 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "sunox download <clip_id>",
             "sunox add <clip_id> --to <playlist_id>",
             "sunox login",
-            "sunox doctor [--network]"
+            "sunox doctor [--network] [--strict]"
         ],
         "machine_commands": [
             "sunox agent-info --json",
             "sunox clip list --json",
             "sunox clip list --liked --public --sort popular --json",
+            "sunox clip search <query> --all --json",
             "sunox clip info <clip_id> --json",
             "sunox clip wait <clip_id> --json",
             "sunox clip upload-status <upload_id> --json",
@@ -100,9 +101,10 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "paid_or_credit_work": "create, inspire, cover, extend, stems, remaster, speed, reverse, crop, fade, upload, and explicit non-default download/export workflows can be stateful or credit/plan-sensitive; only run the amount, operation, and format the user requested",
             "download_quality": "current CLI download defaults to CDN MP3 and supports explicit --format mp3|m4a|wav|opus; agents should use an explicit format only when requested",
             "public_visibility": "do not publish clips, playlists, or personas or make them public unless the user explicitly asks",
+            "persona_create_visibility": "persona create is private by default and requires explicit --public to create a public persona",
             "destructive_actions": "do not run delete, trash, purge, empty-trash, or other destructive commands unless the user explicitly asks. clip purge and clip empty-trash are irreversible and require -y/--yes.",
             "captcha": "do not force --captcha unless the user asks for the browser-backed solver; prefer normal challenge preflight and externally supplied --token when provided",
-            "secrets": "never print, persist in project files, or include auth cookies, Clerk values, JWTs, or challenge tokens in prompts, logs, README examples, or commits"
+            "secrets": "never print, persist in project files, or include auth cookies, Clerk values, JWTs, or challenge tokens in prompts, logs, README examples, or commits; prefer auth --cookie-stdin or --jwt-stdin over argv"
         },
         "command_notes": {
             "create": {
@@ -197,7 +199,8 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                 "response": "queued or processing clip; wait for the returned ID before downstream work"
             },
             "challenge_capable_generation_commands": {
-                "commands": ["create", "describe", "clip cover", "clip inspire", "clip extend", "clip stems"],
+                "commands": ["create", "clip cover", "clip inspire", "clip extend", "clip stems"],
+                "create_description_mode": "sunox create <description> is a mode of the create command; there is no standalone describe subcommand",
                 "challenge_flags": "only these commands expose --token, --captcha, and --no-captcha because they submit through /api/generate/v2-web/ and can hit the generation challenge gate"
             },
             "async_clip_edits": {
@@ -343,7 +346,8 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "2": "configuration error — check config",
             "3": "auth error — run `sunox login`",
             "4": "rate limited — wait and retry",
-            "5": "not found — verify resource ID"
+            "5": "not found — verify resource ID",
+            "130": "interrupted — operation cancelled and staging files cleaned up"
         },
         "env_prefix": "SUNOX_",
         "auth_path": auth_path,
@@ -355,11 +359,13 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                 "full_cookie_header",
                 "raw_clerk_client_cookie",
                 "direct_jwt",
+                "cookie_stdin",
+                "jwt_stdin",
                 "stored_clerk_refresh",
             ],
             "login_fallback": "`sunox login` first probes existing browser cookies; if that fails, it opens a dedicated Sunox Chrome/Edge-compatible browser profile and captures the Clerk session after the user logs in.",
-            "logout": "`sunox logout` removes stored auth and the dedicated interactive browser profile",
-            "generation_challenge": "Commands that submit through /api/generate/v2-web/ preflight POST /api/c/check with ctype=generation. If Suno reports a challenge and stored Clerk refresh material exists, Sunox refreshes the JWT once and repeats the preflight before surfacing the challenge. If no challenge is required, submit uses token=null/token_provider=null. Use --token <solved> to supply a token or --captcha to force the browser-backed solver; solved-token submits use token_provider=1.",
+            "logout": "`sunox logout` removes stored auth, the dedicated interactive browser profile, and any legacy captcha profile",
+            "generation_challenge": "Commands that submit through /api/generate/v2-web/ preflight POST /api/c/check with ctype=generation. If Suno reports a challenge and stored Clerk refresh material exists, Sunox refreshes the JWT once and repeats the preflight before surfacing the challenge. If no challenge is required, submit uses token=null/token_provider=null. Use --token <solved> to supply a token or --captcha to force the browser-backed solver; the solver launches an invocation-owned browser on a random loopback CDP port and deletes its temporary profile after use.",
             "browser_environment": "Browser-cookie login records a stable source browser id and best-effort public profile settings such as accept-language, but does not fabricate user-agent from that label. Interactive login captures runtime user-agent and accept-language via CDP. API calls reuse available fields independently, derive Chromium client hints from the selected user-agent, send stable browser fetch metadata headers, and fall back field-by-field when unavailable.",
         },
         "provider": "direct_suno_unofficial",

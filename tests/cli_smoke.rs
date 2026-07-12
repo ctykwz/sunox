@@ -280,6 +280,17 @@ fn playlist_set_help_lists_image_url() {
 }
 
 #[test]
+fn persona_create_is_private_unless_public_is_explicit() {
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    cmd.args(["persona", "create", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--public"))
+        .stdout(predicate::str::contains("--private").not());
+}
+
+#[test]
 fn clip_set_help_lists_cover_options() {
     let mut cmd = Command::cargo_bin("sunox").expect("binary");
 
@@ -1141,7 +1152,6 @@ fn agent_info_separates_challenge_capable_commands_from_async_edits() {
         challenge_commands,
         vec![
             "create",
-            "describe",
             "clip cover",
             "clip inspire",
             "clip extend",
@@ -1209,4 +1219,113 @@ fn agent_info_separates_challenge_capable_commands_from_async_edits() {
             .contains("source.metadata.negative_tags")
     );
     assert!(command_notes.get("generate_backed_clip_edits").is_none());
+}
+
+#[test]
+fn auth_help_exposes_stdin_secret_inputs() {
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    cmd.args(["auth", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--jwt-stdin"))
+        .stdout(predicate::str::contains("--cookie-stdin"));
+}
+
+#[test]
+fn empty_stdin_auth_is_rejected_before_network_access() {
+    let test_home = isolated_test_home("sunox-cli-empty-auth-stdin-test");
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    with_isolated_home(&mut cmd, &test_home)
+        .args(["auth", "--jwt-stdin", "--json"])
+        .write_stdin("")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("\"code\": \"config_error\""))
+        .stderr(predicate::str::contains("JWT must not be empty"));
+}
+
+#[test]
+fn logout_json_emits_a_success_envelope() {
+    let test_home = isolated_test_home("sunox-cli-logout-json-test");
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    with_isolated_home(&mut cmd, &test_home)
+        .args(["logout", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\": \"success\""))
+        .stdout(predicate::str::contains("\"logged_out\": true"));
+}
+
+#[test]
+fn clip_search_help_exposes_pagination_controls() {
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    cmd.args(["clip", "search", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--cursor"))
+        .stdout(predicate::str::contains("--limit"))
+        .stdout(predicate::str::contains("--all"));
+}
+
+#[test]
+fn timed_lyrics_rejects_explicit_json_and_lrc_before_auth() {
+    let test_home = isolated_test_home("sunox-cli-lrc-json-conflict-test");
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    with_isolated_home(&mut cmd, &test_home)
+        .args(["clip", "timed-lyrics", "clip-a", "--lrc", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--lrc cannot be combined"));
+}
+
+#[test]
+fn doctor_help_exposes_strict_network_mode() {
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    cmd.args(["doctor", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--strict"));
+}
+
+#[test]
+fn persona_create_rejects_invalid_vocal_range_before_auth() {
+    let test_home = isolated_test_home("sunox-cli-persona-range-test");
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    with_isolated_home(&mut cmd, &test_home)
+        .args([
+            "persona",
+            "create",
+            "clip-a",
+            "--vocal-start",
+            "2",
+            "--vocal-end",
+            "1",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("\"code\": \"config_error\""))
+        .stderr(predicate::str::contains("start must be less than end"));
+}
+
+#[test]
+fn config_check_reports_corrupt_auth_consistently_in_json() {
+    let test_home = isolated_test_home("sunox-cli-corrupt-auth-json-test");
+    let auth_dir = test_home.join(".config").join("sunox");
+    std::fs::create_dir_all(&auth_dir).expect("auth dir");
+    std::fs::write(auth_dir.join("auth.json"), "not-json").expect("corrupt auth");
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    with_isolated_home(&mut cmd, &test_home)
+        .args(["config", "check", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("\"code\": \"config_error\""));
 }

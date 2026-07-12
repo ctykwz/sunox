@@ -8,7 +8,7 @@ mod lyrics;
 mod persona;
 mod playlist;
 
-pub use account::{billing, models};
+pub use account::{billing, models, remaster_models};
 pub use clip::{clip_detail, clips};
 pub use lyrics::lyrics;
 pub use persona::{persona, personas};

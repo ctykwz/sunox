@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowserEnvironment {
     /// Browser or login flow that produced the stored auth material. This is
     /// diagnostic metadata, not a substitute for runtime browser headers.

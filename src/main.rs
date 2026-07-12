@@ -13,7 +13,14 @@ mod workflow;
 
 #[tokio::main]
 async fn main() {
-    if let Err(e) = app::run().await {
+    let result = tokio::select! {
+        result = app::run() => result,
+        signal = tokio::signal::ctrl_c() => match signal {
+            Ok(()) => Err(core::CliError::Interrupted),
+            Err(error) => Err(core::CliError::Io(error)),
+        },
+    };
+    if let Err(e) = result {
         let json_mode = std::env::args().any(|a| a == "--json")
             || !std::io::IsTerminal::is_terminal(&std::io::stdout());
 

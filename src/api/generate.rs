@@ -48,18 +48,20 @@ impl SunoClient {
             req.metadata.user_tier = user_tier.trim().to_string();
         }
 
-        let uses_account_generation_model =
-            matches!(req.task.as_deref(), None | Some("playlist_condition"));
-        if !uses_account_generation_model || info.models.is_empty() {
-            if req.mv == "auto" {
-                req.mv = "chirp-fenix".into();
-            }
-            return Ok(());
+        if info.models.is_empty() {
+            return Err(CliError::Config(
+                "Suno billing info returned no generation models; refusing to guess after a successful account capability lookup".into(),
+            ));
         }
 
         let model = select_generation_model(&info.models, &req.mv)?;
         req.mv = model.external_key.clone();
-        validate_generation_lengths(req, model)
+        let uses_account_generation_limits =
+            matches!(req.task.as_deref(), None | Some("playlist_condition"));
+        if uses_account_generation_limits {
+            validate_generation_lengths(req, model)?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn submit_prepared_generation(
@@ -97,7 +99,7 @@ impl SunoClient {
                 .check_generation_response(resp, has_challenge_token)
                 .await?;
             let result: GenerateResponse = resp.json().await?;
-            Ok(result.clips)
+            result.into_clips()
         })
         .await
     }
@@ -187,7 +189,7 @@ fn generation_challenge_error(challenge: &super::challenge::GenerationChallenge)
         .captcha_version
         .map(|version| version.to_string())
         .unwrap_or_else(|| "unknown".to_string());
-    CliError::Config(format!(
+    CliError::ChallengeRequired(format!(
         "Suno requires a generation challenge (captcha_version={version}). When stored Clerk refresh material is available, Sunox refreshes the JWT once and repeats the challenge preflight before showing this message. Complete a manual generation challenge in the Suno web app and retry, provide a valid challenge token with --token <token>, or force the browser-backed solver with --captcha."
     ))
 }

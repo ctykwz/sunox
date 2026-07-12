@@ -62,6 +62,6 @@ pub struct RemasterModelInfo {
     pub is_default_model: bool,
     /// Suno's billing/info response for remaster models does not include this
     /// field, so keep it optional for deserialization.
-    #[serde(default)]
-    pub can_use: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can_use: Option<bool>,
 }

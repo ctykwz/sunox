@@ -10,12 +10,19 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          toolchain: stable
+          fetch-depth: 0
+      - name: Verify tag belongs to main
+        shell: bash
+        run: |
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          git merge-base --is-ancestor "${GITHUB_SHA}" refs/remotes/origin/main
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+        with:
           components: clippy, rustfmt
       - name: Verify release metadata
         shell: bash
@@ -27,43 +34,50 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
       - run: cargo package --locked
-      - run: rustup toolchain install 1.88.0 --profile minimal
-      - run: cargo +1.88.0 check --locked
+      - run: cargo check --locked
       - run: cargo install cargo-audit --version 0.22.2 --locked
       - run: cargo audit
 
   platform-tests:
     needs: verify
+    timeout-minutes: 30
     strategy:
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [macos-14, windows-2022]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-        with:
-          toolchain: stable
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
       - run: cargo test --locked
 
   build:
     needs: [verify, platform-tests]
+    environment: release
+    timeout-minutes: 45
     strategy:
       matrix:
         include:
           - target: x86_64-apple-darwin
-            os: macos-latest
+            os: macos-14
+            kind: macos
             name: sunox-x86_64-apple-darwin
           - target: aarch64-apple-darwin
-            os: macos-latest
+            os: macos-14
+            kind: macos
             name: sunox-aarch64-apple-darwin
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            zig_target: x86_64-unknown-linux-gnu.2.28
+            os: ubuntu-24.04
+            kind: linux
             name: sunox-x86_64-unknown-linux-gnu
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            zig_target: aarch64-unknown-linux-gnu.2.28
+            os: ubuntu-24.04
+            kind: linux
             name: sunox-aarch64-unknown-linux-gnu
           - target: x86_64-pc-windows-msvc
-            os: windows-latest
+            os: windows-2022
+            kind: windows
             name: sunox-x86_64-pc-windows-msvc
 
     runs-on: ${{ matrix.os }}
@@ -71,49 +85,167 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
         with:
-          toolchain: stable
           targets: ${{ matrix.target }}
 
-      - name: Install cross-compilation tools (Linux ARM)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+      - name: Install reproducible Linux cross toolchain
+        if: matrix.kind == 'linux'
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          cargo install cargo-zigbuild --version 0.23.0 --locked
+          python3 -m venv "${RUNNER_TEMP}/zig-venv"
+          "${RUNNER_TEMP}/zig-venv/bin/pip" install --disable-pip-version-check 'ziglang==0.15.2'
+          "${RUNNER_TEMP}/zig-venv/bin/python" - <<'PY' >> "${GITHUB_PATH}"
+          import pathlib, ziglang
+          print(pathlib.Path(ziglang.__file__).parent)
+          PY
 
-      - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Build Linux against glibc 2.28
+        if: matrix.kind == 'linux'
+        shell: bash
+        run: cargo zigbuild --release --locked --target '${{ matrix.zig_target }}'
+
+      - name: Build macOS
+        if: matrix.kind == 'macos'
+        shell: bash
+        run: cargo build --release --locked --target '${{ matrix.target }}'
+
+      - name: Build Windows with the static CRT
+        if: matrix.kind == 'windows'
+        shell: pwsh
         env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --release --locked --target '${{ matrix.target }}'
 
-      - name: Package (Unix)
-        if: runner.os != 'Windows'
+      - name: Sign and notarize macOS artifacts
+        if: matrix.kind == 'macos'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_INSTALLER_IDENTITY: ${{ secrets.APPLE_INSTALLER_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czf ../../../${{ matrix.name }}.tar.gz sunox
-          cd ../../..
+          for name in APPLE_CERTIFICATE_P12 APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_INSTALLER_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD; do
+            test -n "${!name}" || { echo "Missing required release secret: ${name}" >&2; exit 1; }
+          done
 
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
+          certificate="${RUNNER_TEMP}/sunox-release.p12"
+          keychain="${RUNNER_TEMP}/sunox-release.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          printf '%s' "${APPLE_CERTIFICATE_P12}" | base64 -D > "${certificate}"
+          security create-keychain -p "${keychain_password}" "${keychain}"
+          security set-keychain-settings -lut 21600 "${keychain}"
+          security unlock-keychain -p "${keychain_password}" "${keychain}"
+          security import "${certificate}" -k "${keychain}" -P "${APPLE_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign -T /usr/bin/productsign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "${keychain_password}" "${keychain}"
+          security list-keychains -d user -s "${keychain}"
+
+          binary="target/${{ matrix.target }}/release/sunox"
+          codesign --force --options runtime --timestamp --sign "${APPLE_SIGNING_IDENTITY}" "${binary}"
+          codesign --verify --deep --strict --verbose=2 "${binary}"
+
+          notary_zip="${RUNNER_TEMP}/${{ matrix.name }}-notary.zip"
+          ditto -c -k --keepParent "${binary}" "${notary_zip}"
+          xcrun notarytool submit "${notary_zip}" --apple-id "${APPLE_ID}" --team-id "${APPLE_TEAM_ID}" --password "${APPLE_APP_PASSWORD}" --wait
+
+          pkgroot="${RUNNER_TEMP}/pkgroot"
+          mkdir -p "${pkgroot}/usr/local/bin"
+          cp "${binary}" "${pkgroot}/usr/local/bin/sunox"
+          version="${GITHUB_REF_NAME#v}"
+          pkgbuild --root "${pkgroot}" --identifier io.github.ctykwz.sunox --version "${version}" --install-location / --sign "${APPLE_INSTALLER_IDENTITY}" "${{ matrix.name }}.pkg"
+          xcrun notarytool submit "${{ matrix.name }}.pkg" --apple-id "${APPLE_ID}" --team-id "${APPLE_TEAM_ID}" --password "${APPLE_APP_PASSWORD}" --wait
+          xcrun stapler staple "${{ matrix.name }}.pkg"
+          xcrun stapler validate "${{ matrix.name }}.pkg"
+          spctl --assess --type install --verbose=2 "${{ matrix.name }}.pkg"
+
+      - name: Sign Windows artifact
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
-          cd target/${{ matrix.target }}/release
-          # Keep Windows release zips uncompressed so older sunox builds without
-          # zip Deflate support can still self-update into the fixed release.
-          Compress-Archive -LiteralPath sunox.exe -DestinationPath ../../../${{ matrix.name }}.zip -CompressionLevel NoCompression -Force
-          cd ../../..
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PFX)) { throw 'Missing required release secret: WINDOWS_CERTIFICATE_PFX' }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) { throw 'Missing required release secret: WINDOWS_CERTIFICATE_PASSWORD' }
+          $pfxPath = Join-Path $env:RUNNER_TEMP 'sunox-release.pfx'
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signTool) { throw 'signtool.exe was not found' }
+          $binary = 'target/${{ matrix.target }}/release/sunox.exe'
+          & $signTool.FullName sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /sha1 $certificate.Thumbprint $binary
+          if ($LASTEXITCODE -ne 0) { throw 'Authenticode signing failed' }
+          & $signTool.FullName verify /pa /v $binary
+          if ($LASTEXITCODE -ne 0) { throw 'Authenticode verification failed' }
+          Remove-Item "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -Force
+
+      - name: Verify Linux compatibility and binary
+        if: matrix.kind == 'linux'
+        shell: bash
+        run: |
+          binary="target/${{ matrix.target }}/release/sunox"
+          file "${binary}"
+          max_glibc="$(readelf --version-info "${binary}" | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1)"
+          test -n "${max_glibc}"
+          test "$(printf '%s\n' GLIBC_2.28 "${max_glibc}" | sort -V | tail -1)" = 'GLIBC_2.28'
+          if [ '${{ matrix.target }}' = 'x86_64-unknown-linux-gnu' ]; then
+            "${binary}" --version
+          fi
+
+      - name: Verify macOS binary
+        if: matrix.kind == 'macos'
+        shell: bash
+        run: |
+          binary="target/${{ matrix.target }}/release/sunox"
+          codesign --verify --deep --strict --verbose=2 "${binary}"
+          "${binary}" --version
+
+      - name: Verify Windows binary and static CRT
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        run: |
+          $binary = 'target/${{ matrix.target }}/release/sunox.exe'
+          & $binary --version
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $install = & $vswhere -latest -products * -property installationPath
+          $dumpbin = Get-ChildItem "$install\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          $dependencies = (& $dumpbin.FullName /dependents $binary) -join "`n"
+          if ($dependencies -match 'VCRUNTIME|MSVCP') { throw 'release binary still depends on the dynamic Visual C++ runtime' }
+          if ((Get-AuthenticodeSignature $binary).Status -ne 'Valid') { throw 'release binary does not have a valid Authenticode signature' }
+
+      - name: Package Unix artifact
+        if: matrix.kind != 'windows'
+        shell: bash
+        run: tar -C 'target/${{ matrix.target }}/release' -czf '${{ matrix.name }}.tar.gz' sunox
+
+      - name: Package Windows artifact
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -LiteralPath 'target/${{ matrix.target }}/release/sunox.exe' -DestinationPath '${{ matrix.name }}.zip' -CompressionLevel NoCompression -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ matrix.name }}
           path: ${{ matrix.name }}.*
+          if-no-files-found: error
 
   release:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: release
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
@@ -124,21 +256,33 @@ jobs:
         with:
           path: artifacts
 
-      - name: Generate release notes
+      - name: Generate CycloneDX SBOM
         shell: bash
         run: |
-          bash scripts/release-notes.sh "${GITHUB_REF_NAME}" > release-notes.md
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          cargo cyclonedx --format json --all --override-filename sunox.cdx
+          mv sunox.cdx.json artifacts/sunox.cdx.json
+
+      - name: Generate release notes
+        shell: bash
+        run: bash scripts/release-notes.sh "${GITHUB_REF_NAME}" > release-notes.md
 
       - name: Generate checksums
         shell: bash
         run: |
+          checksum_file="${RUNNER_TEMP}/SHA256SUMS"
           while IFS= read -r file; do
             printf '%s  %s\n' "$(sha256sum "${file}" | cut -d' ' -f1)" "$(basename "${file}")"
-          done < <(find artifacts -type f | sort) > SHA256SUMS
-          mv SHA256SUMS artifacts/SHA256SUMS
+          done < <(find artifacts -type f | sort) > "${checksum_file}"
+          mv "${checksum_file}" artifacts/SHA256SUMS
+
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: artifacts/**/*
 
       - name: Create release
-        uses: softprops/action-gh-release@7c4723f7a335432393329f8f1c564994ce50185d # v3
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3
         with:
           body_path: release-notes.md
           files: artifacts/**/*
@@ -147,15 +291,15 @@ jobs:
 
   publish-crate:
     needs: release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release
     permissions:
       contents: read
       id-token: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-        with:
-          toolchain: stable
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
       - name: Authenticate with crates.io
         id: auth
         uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
