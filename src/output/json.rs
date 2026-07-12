@@ -19,6 +19,19 @@ pub fn success<T: Serialize>(data: T) {
     );
 }
 
+pub fn success_with_warnings<T: Serialize, W: Serialize>(data: T, warnings: W) {
+    let envelope = serde_json::json!({
+        "version": "1",
+        "status": "success",
+        "data": data,
+        "warnings": warnings,
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&envelope).unwrap_or_default()
+    );
+}
+
 pub fn error_with_details(
     code: &str,
     message: &str,

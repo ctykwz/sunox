@@ -144,6 +144,10 @@ pub struct DescribeArgs {
     #[arg(long)]
     pub tags: Option<String>,
 
+    /// Styles to avoid (negative tags)
+    #[arg(long)]
+    pub exclude: Option<String>,
+
     /// Model version
     #[arg(short, long)]
     pub model: Option<ModelVersion>,
@@ -323,8 +327,8 @@ pub struct RemasterArgs {
     pub clip_id: String,
 
     /// Remaster model version
-    #[arg(long, default_value = "v5.5")]
-    pub model: RemasterModel,
+    #[arg(long)]
+    pub model: Option<RemasterModel>,
 }
 
 #[derive(clap::Args)]

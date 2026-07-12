@@ -213,7 +213,10 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  sunox-x86_64-p
     fn updater_downloads_extracts_and_replaces_the_target_binary() {
         let payload = b"sunox replacement fixture";
         let archive = release_archive(payload);
-        let checksum = format!("{:x}", Sha256::digest(&archive));
+        let checksum = Sha256::digest(&archive)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
         let target = self_update::get_target();
         let asset_name = format!("sunox-{target}.{}", release_archive_extension());
         let (api_base_url, server) = serve_release(&asset_name, archive);

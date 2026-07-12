@@ -5,10 +5,21 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: '23 7 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
@@ -21,7 +32,9 @@ jobs:
       - run: cargo build --release --locked
 
   msrv:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
@@ -30,10 +43,21 @@ jobs:
       - run: cargo check --locked
 
   platform-tests:
+    name: platform-tests (${{ matrix.required_context }})
+    if: github.event_name != 'schedule'
+    timeout-minutes: 30
     strategy:
       matrix:
-        os: [macos-latest, windows-latest]
+        include:
+          - os: macos-14
+            required_context: macos-latest
+            rustflags: ''
+          - os: windows-2022
+            required_context: windows-latest
+            rustflags: -C target-feature=+crt-static
     runs-on: ${{ matrix.os }}
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
@@ -42,7 +66,8 @@ jobs:
       - run: cargo test --locked
 
   security:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
@@ -50,3 +75,38 @@ jobs:
           toolchain: stable
       - run: cargo install cargo-audit --version 0.22.2 --locked
       - run: cargo audit
+
+  workflow-lint:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+
+  release-linux-smoke:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+        with:
+          toolchain: 1.88.0
+          targets: x86_64-unknown-linux-gnu
+      - name: Install pinned Zig toolchain
+        run: |
+          cargo install cargo-zigbuild --version 0.23.0 --locked
+          python3 -m pip install --user --disable-pip-version-check 'ziglang==0.15.2'
+          python3 - <<'PY' >> "${GITHUB_PATH}"
+          import pathlib, ziglang
+          print(pathlib.Path(ziglang.__file__).parent)
+          PY
+      - run: cargo zigbuild --release --locked --target x86_64-unknown-linux-gnu.2.28
+      - name: Verify artifact baseline
+        run: |
+          binary='target/x86_64-unknown-linux-gnu/release/sunox'
+          "${binary}" --version
+          max_glibc="$(readelf --version-info "${binary}" | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1)"
+          test -n "${max_glibc}"
+          test "$(printf '%s\n' GLIBC_2.28 "${max_glibc}" | sort -V | tail -1)" = 'GLIBC_2.28'

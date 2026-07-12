@@ -11,6 +11,8 @@ use crate::core::CliError;
 use crate::net::http;
 
 const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const DOWNLOAD_TOTAL_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
+const MAX_DOWNLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_DOWNLOAD_FILENAME_BYTES: usize = 240;
 
 #[derive(Debug)]
@@ -116,6 +118,32 @@ async fn stage_clip_url_with_idle_timeout(
     quiet: bool,
     idle_timeout: Duration,
 ) -> Result<StagedDownload, CliError> {
+    stage_clip_url_with_limits(
+        clip,
+        output_dir,
+        url,
+        ext,
+        force,
+        quiet,
+        idle_timeout,
+        DOWNLOAD_TOTAL_TIMEOUT,
+        MAX_DOWNLOAD_BYTES,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stage_clip_url_with_limits(
+    clip: &Clip,
+    output_dir: &str,
+    url: &str,
+    ext: &str,
+    force: bool,
+    quiet: bool,
+    idle_timeout: Duration,
+    total_timeout: Duration,
+    max_bytes: u64,
+) -> Result<StagedDownload, CliError> {
     let filename = download_filename(clip, ext);
     let output_dir = Path::new(output_dir);
     tokio::fs::create_dir_all(output_dir).await?;
@@ -130,6 +158,11 @@ async fn stage_clip_url_with_idle_timeout(
         .map_err(CliError::Http)?;
 
     let total = resp.content_length().unwrap_or(0);
+    if total > max_bytes {
+        return Err(CliError::Download(format!(
+            "download is {total} bytes, exceeding the {max_bytes}-byte safety limit: {filename}"
+        )));
+    }
     let pb = download_progress_bar(total, quiet);
     pb.set_style(
         ProgressStyle::default_bar()
@@ -142,20 +175,28 @@ async fn stage_clip_url_with_idle_timeout(
     let temp_path = TempPath::try_from_path(temporary_path(output_dir))?;
     let temp_file_path: &Path = temp_path.as_ref();
     let mut file = tokio::fs::File::create(temp_file_path).await?;
-    let result = async {
+    let result = tokio::time::timeout(total_timeout, async {
         let mut stream = resp.bytes_stream();
+        let mut downloaded = 0_u64;
         while let Some(chunk) = tokio::time::timeout(idle_timeout, stream.next())
             .await
             .map_err(|_| CliError::Download(format!("download stalled: {filename}")))?
         {
             let chunk = chunk.map_err(CliError::Http)?;
+            downloaded = downloaded.saturating_add(chunk.len() as u64);
+            if downloaded > max_bytes {
+                return Err(CliError::Download(format!(
+                    "download exceeded the {max_bytes}-byte safety limit: {filename}"
+                )));
+            }
             pb.inc(chunk.len() as u64);
             file.write_all(&chunk).await?;
         }
         file.flush().await?;
         Ok::<(), CliError>(())
-    }
-    .await;
+    })
+    .await
+    .map_err(|_| CliError::Download(format!("download exceeded its total deadline: {filename}")))?;
     drop(file);
 
     if let Err(error) = result {
@@ -250,7 +291,7 @@ mod tests {
 
     use super::{
         DOWNLOAD_IDLE_TIMEOUT, download_clip_url, download_filename, download_progress_bar,
-        stage_clip_url, stage_clip_url_with_idle_timeout,
+        stage_clip_url, stage_clip_url_with_idle_timeout, stage_clip_url_with_limits,
     };
 
     fn clip() -> Clip {
@@ -547,6 +588,62 @@ mod tests {
             files.is_empty(),
             "stalled download must clean temporary files"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn download_rejects_a_response_larger_than_the_safety_limit() {
+        let dir = test_dir("download-size-limit");
+        let url = audio_server(b"audio").await;
+
+        let error = stage_clip_url_with_limits(
+            &clip(),
+            &dir.to_string_lossy(),
+            &url,
+            "mp3",
+            false,
+            true,
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+            4,
+        )
+        .await
+        .expect_err("content length above the limit must be rejected");
+
+        assert!(matches!(error, CliError::Download(message) if message.contains("safety limit")));
+        let files = std::fs::read_dir(&dir)
+            .expect("output directory")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read output directory");
+        assert!(files.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn download_total_deadline_removes_the_staging_file() {
+        let dir = test_dir("download-total-timeout");
+        let url = stalled_audio_server().await;
+
+        let error = stage_clip_url_with_limits(
+            &clip(),
+            &dir.to_string_lossy(),
+            &url,
+            "mp3",
+            false,
+            true,
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_millis(10),
+            1024,
+        )
+        .await
+        .expect_err("the total deadline must bound a trickle download");
+
+        assert!(matches!(error, CliError::Download(message) if message.contains("total deadline")));
+        let files = std::fs::read_dir(&dir)
+            .expect("output directory")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read output directory");
+        assert!(files.is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 

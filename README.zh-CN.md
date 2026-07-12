@@ -117,6 +117,7 @@ sunox add <clip_ids> --to <id>  添加歌曲到歌单
 sunox login                     从浏览器配置认证
 sunox logout                    删除本地认证和交互登录 profile
 sunox doctor                    诊断配置和认证
+sunox doctor --network          诊断 DNS、TCP 和 HTTPS（`--strict` 可在异常时返回非零）
 ```
 
 ## Agent 与高级命令
@@ -195,12 +196,15 @@ sunox logout
 sunox auth
 sunox config
 sunox doctor
+sunox doctor --network
 sunox agent-info
 sunox install-skill
 sunox update
 ```
 
 ## 功能
+
+Studio 相关功能不在当前 CLI 的范围内。
 
 ### 零摩擦认证
 
@@ -210,16 +214,16 @@ sunox login
 
 `sunox login` 会先从 Chrome、Arc、Brave、Firefox 或 Edge 读取 Clerk cookie；如果读取成功，会记录浏览器来源和可读取的公开 profile 设置，例如接受语言，但不会仅凭浏览器标签伪造 user-agent。如果读取失败，会自动打开一个 Sunox 专用且兼容 Chrome/Edge 的浏览器 profile，等你在里面登录 Suno 后捕获 Clerk session。随后它会换取 JWT，保存可刷新的本地 session，并在 JWT 过期时自动刷新。交互式登录能捕获 user-agent 和接受语言；后续 API 请求会基于选中的 user-agent 派生 Chromium client hints，发送浏览器 fetch metadata header，拿不到真实值时按字段降级。
 
-认证信息以本地 JSON 保存，并未进入系统凭据库。Unix 下认证文件会以 `0600` 创建；Windows 下依赖配置目录的当前用户 ACL。手动传入的 `--cookie` 和 `--jwt` 可能出现在 shell 历史与进程参数中，因此交互式设备优先使用 `sunox login`，不要把认证信息写入日志、prompt、项目文件或 commit。
+认证信息以本地 JSON 保存，并未进入系统凭据库。Unix 下认证文件会以 `0600` 创建；Windows 下依赖配置目录的当前用户 ACL。手动传入的 `--cookie` 和 `--jwt` 可能出现在 shell 历史与进程参数中，因此优先使用 `sunox login`，或通过 `--cookie-stdin` / `--jwt-stdin` 从标准输入传入；不要把认证信息写入日志、prompt、项目文件或 commit。
 
 认证方式：
 
 1. `sunox login`：自动浏览器提取，失败后交互式 Chrome/Edge 登录，推荐。
-2. `sunox auth --cookie <cookie>`：在无头服务器上手动粘贴 cookie。
-3. `sunox auth --jwt <token>`：直接提供 JWT，通常约 1 小时有效。
+2. `printf '%s' "$SUNOX_COOKIE_INPUT" | sunox auth --cookie-stdin`：从标准输入提供 cookie。
+3. `printf '%s' "$SUNOX_JWT_INPUT" | sunox auth --jwt-stdin`：从标准输入提供 JWT。
 4. `sunox auth --refresh`：从已保存 Clerk session 强制刷新 JWT。
 
-`sunox logout` 会删除本地认证和交互式登录使用的专用浏览器 profile。
+`sunox logout` 会删除本地认证、交互式登录 profile 和旧版 captcha profile。
 
 ### 生成参数
 

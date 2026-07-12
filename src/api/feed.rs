@@ -25,9 +25,18 @@ impl SunoClient {
 
     /// Search songs using feed/v3 native searchText filter.
     pub async fn search(&self, query: &str) -> Result<FeedResponse, CliError> {
+        self.search_page(query, None, Some(50)).await
+    }
+
+    pub async fn search_page(
+        &self,
+        query: &str,
+        cursor: Option<String>,
+        limit: Option<u32>,
+    ) -> Result<FeedResponse, CliError> {
         let req = FeedV3Request {
-            cursor: None,
-            limit: Some(50),
+            cursor,
+            limit: Some(limit.unwrap_or(50)),
             filters: Some(FeedFilters::search(query)),
         };
         self.with_auth_retry(|| async {

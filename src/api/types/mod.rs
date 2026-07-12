@@ -16,7 +16,7 @@ mod upload;
 
 #[cfg(test)]
 pub use account::MaxLengths;
-pub use account::{BillingInfo, Model};
+pub use account::{BillingInfo, Model, RemasterModelInfo};
 pub use clip::Clip;
 pub use clip_info::{
     ClipAttribution, ClipComments, ClipInfo, ClipInfoSupplementalError,

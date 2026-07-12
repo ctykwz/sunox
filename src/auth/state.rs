@@ -11,7 +11,7 @@ use crate::core::CliError;
 use super::refresh_lock::AuthStateLockGuard;
 use super::types::BrowserEnvironment;
 
-#[derive(Serialize, Deserialize, Debug, Default, Clone)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq)]
 pub struct AuthState {
     pub jwt: Option<String>,
     pub cookie: Option<String>,
@@ -32,16 +32,38 @@ impl AuthState {
         serde_json::from_str(&data).map_err(|e| CliError::Config(format!("corrupt auth file: {e}")))
     }
 
-    pub fn save(&self) -> Result<(), CliError> {
-        let path = Self::path()?;
-        let _guard = AuthStateLockGuard::acquire()?;
-        self.save_to_path(&path)
-    }
-
     pub(crate) fn save_after_refresh(&self, expected: &Self) -> Result<(), CliError> {
         let path = Self::path()?;
         let _guard = AuthStateLockGuard::acquire()?;
         self.save_after_refresh_to_path(expected, &path)
+    }
+
+    /// Persist an explicitly verified login only when the auth file still
+    /// matches the state observed at command start. If an internal refresh
+    /// already persisted this exact state, the operation is a no-op.
+    pub(crate) fn save_if_unchanged(&self, expected: Option<&Self>) -> Result<(), CliError> {
+        let path = Self::path()?;
+        let _guard = AuthStateLockGuard::acquire()?;
+        self.save_if_unchanged_to_path(expected, &path)
+    }
+
+    fn save_if_unchanged_to_path(
+        &self,
+        expected: Option<&Self>,
+        path: &Path,
+    ) -> Result<(), CliError> {
+        let current = match Self::load_from_path(path) {
+            Ok(current) => Some(current),
+            Err(CliError::AuthMissing) => None,
+            Err(error) => return Err(error),
+        };
+        if current.as_ref() == Some(self) {
+            return Ok(());
+        }
+        if current.as_ref() != expected {
+            return Err(active_auth_changed_error());
+        }
+        self.save_to_path(path)
     }
 
     fn save_after_refresh_to_path(&self, expected: &Self, path: &Path) -> Result<(), CliError> {
@@ -64,6 +86,17 @@ impl AuthState {
     ) -> Result<(), CliError> {
         let _guard = AuthStateLockGuard::acquire_path(lock_path)?;
         self.save_after_refresh_to_path(expected, path)
+    }
+
+    #[cfg(test)]
+    fn save_if_unchanged_to_path_with_lock_path(
+        &self,
+        expected: Option<&Self>,
+        path: &Path,
+        lock_path: &Path,
+    ) -> Result<(), CliError> {
+        let _guard = AuthStateLockGuard::acquire_path(lock_path)?;
+        self.save_if_unchanged_to_path(expected, path)
     }
 
     #[cfg(test)]
@@ -430,6 +463,67 @@ mod tests {
 
         let saved = AuthState::load_from_path(&path).expect("saved account");
         assert_eq!(saved.session_id.as_deref(), Some("new-session"));
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn verified_login_cannot_recreate_auth_after_concurrent_logout() {
+        let dir = std::env::temp_dir().join(format!(
+            "sunox-auth-login-logout-cas-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("test dir");
+        let path = dir.join("auth.json");
+        let lock_path = dir.join("auth-state.lock");
+        let before = AuthState {
+            jwt: Some(jwt_with_subject("account-a")),
+            ..Default::default()
+        };
+        let verified = AuthState {
+            jwt: Some(jwt_with_subject("account-a")),
+            device_id: Some("new-device".into()),
+            ..Default::default()
+        };
+
+        let error = verified
+            .save_if_unchanged_to_path_with_lock_path(Some(&before), &path, &lock_path)
+            .expect_err("a concurrent logout must win");
+
+        assert_eq!(error.error_code(), "auth_changed");
+        assert!(!path.exists());
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn verified_login_cannot_overwrite_a_concurrent_account_switch() {
+        let dir = std::env::temp_dir().join(format!(
+            "sunox-auth-login-switch-cas-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("test dir");
+        let path = dir.join("auth.json");
+        let lock_path = dir.join("auth-state.lock");
+        let before = AuthState {
+            jwt: Some(jwt_with_subject("account-a")),
+            ..Default::default()
+        };
+        let verified = AuthState {
+            jwt: Some(jwt_with_subject("account-a")),
+            device_id: Some("new-device".into()),
+            ..Default::default()
+        };
+        let switched = AuthState {
+            jwt: Some(jwt_with_subject("account-b")),
+            ..Default::default()
+        };
+        switched.save_to_path(&path).expect("seed switched account");
+
+        let error = verified
+            .save_if_unchanged_to_path_with_lock_path(Some(&before), &path, &lock_path)
+            .expect_err("a concurrent account switch must win");
+
+        assert_eq!(error.error_code(), "auth_changed");
+        assert_eq!(AuthState::load_from_path(&path).expect("saved"), switched);
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 

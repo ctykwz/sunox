@@ -26,6 +26,13 @@ pub enum CliError {
         details: serde_json::Value,
     },
 
+    #[error("Diagnostic failed: {message}")]
+    Diagnostic {
+        code: &'static str,
+        message: String,
+        details: serde_json::Value,
+    },
+
     #[error("Authentication required — run `sunox login` first")]
     AuthMissing,
 
@@ -41,6 +48,9 @@ pub enum CliError {
     #[error("Generation failed: {0}")]
     GenerationFailed(String),
 
+    #[error("Generation challenge required: {0}")]
+    ChallengeRequired(String),
+
     #[error("Configuration error: {0}")]
     Config(String),
 
@@ -52,6 +62,9 @@ pub enum CliError {
 
     #[error("Self-update failed: {0}")]
     Update(String),
+
+    #[error("Interrupted by user")]
+    Interrupted,
 
     #[error(transparent)]
     Http(#[from] reqwest::Error),
@@ -76,13 +89,16 @@ impl CliError {
             Self::Config(_) => 2,
             Self::AuthMissing | Self::AuthExpired | Self::AuthChanged => 3,
             Self::RateLimited => 4,
-            Self::NotFound(_) => 5,
+            Self::NotFound(_) | Self::SunoApi { status: 404, .. } => 5,
+            Self::Interrupted => 130,
             Self::Api { .. }
             | Self::SunoApi { .. }
             | Self::PartialMutation { .. }
             | Self::PartialDownload { .. }
+            | Self::Diagnostic { .. }
             | Self::Http(_)
             | Self::GenerationFailed(_)
+            | Self::ChallengeRequired(_)
             | Self::Download(_)
             | Self::Update(_)
             | Self::Io(_)
@@ -96,18 +112,21 @@ impl CliError {
             Self::SunoApi { code, .. } => code,
             Self::PartialMutation { .. } => "partial_mutation",
             Self::PartialDownload { .. } => "partial_download",
+            Self::Diagnostic { code, .. } => code,
             Self::AuthMissing => "auth_missing",
             Self::AuthExpired => "auth_expired",
             Self::AuthChanged => "auth_changed",
             Self::RateLimited => "rate_limited",
             Self::Config(_) => "config_error",
             Self::GenerationFailed(_) => "generation_failed",
+            Self::ChallengeRequired(_) => "challenge_required",
             Self::Download(_) => "download_error",
             Self::NotFound(_) => "not_found",
             Self::Http(_) => "http_error",
             Self::Io(_) => "io_error",
             Self::Json(_) => "json_error",
             Self::Update(_) => "update_error",
+            Self::Interrupted => "interrupted",
         }
     }
 
@@ -129,11 +148,17 @@ impl CliError {
             Self::GenerationFailed(_) => {
                 "Inspect the failure message and retry only after addressing the reported cause"
             }
+            Self::ChallengeRequired(_) => {
+                "Provide a valid challenge token with `--token`, use `--captcha`, or complete a manual generation challenge in the Suno web app"
+            }
             Self::PartialMutation { .. } => {
                 "Inspect error.details before retrying; when recovery is present, follow it only if recovery.resumable is true"
             }
             Self::PartialDownload { .. } => {
                 "Inspect error.details for succeeded paths, the failed clip, and not_attempted IDs before retrying"
+            }
+            Self::Diagnostic { .. } => {
+                "Inspect error.details for the failed diagnostic stages and correct the reported environment problem"
             }
             Self::Api { code, .. } if *code == "schema_drift" => {
                 "Suno changed its web schema or challenge enforcement. Try (1) `sunox auth --refresh` to mint a fresh JWT, (2) `sunox update` to pull the latest fix, (3) supply a challenge token via `--token <solved>`, or (4) see https://github.com/ctykwz/sunox/issues for the current status"
@@ -172,6 +197,7 @@ impl CliError {
             Self::Update(_) => {
                 "Check your network connection or download the binary directly from GitHub Releases"
             }
+            Self::Interrupted => "The operation was cancelled and temporary files were cleaned up",
         }
     }
 
@@ -179,6 +205,7 @@ impl CliError {
         match self {
             Self::PartialMutation { details, .. }
             | Self::PartialDownload { details, .. }
+            | Self::Diagnostic { details, .. }
             | Self::SunoApi {
                 details: Some(details),
                 ..
@@ -228,5 +255,28 @@ mod tests {
             error.details(),
             Some(&serde_json::json!({"retryable": false}))
         );
+    }
+
+    #[test]
+    fn structured_api_not_found_uses_not_found_exit_code() {
+        let error = CliError::SunoApi {
+            code: "not_found",
+            status: 404,
+            message: "HTTP 404: missing".into(),
+            retryable: Some(false),
+            details: None,
+        };
+
+        assert_eq!(error.exit_code(), 5);
+        assert_eq!(error.error_code(), "not_found");
+    }
+
+    #[test]
+    fn generation_challenge_has_a_dedicated_machine_contract() {
+        let error = CliError::ChallengeRequired("captcha_version=4".into());
+
+        assert_eq!(error.error_code(), "challenge_required");
+        assert!(error.suggestion().contains("--captcha"));
+        assert!(!error.suggestion().contains("doctor"));
     }
 }

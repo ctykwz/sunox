@@ -118,6 +118,7 @@ sunox add <clip_ids> --to <id>  Ajouter des morceaux à une playlist
 sunox login                     Configurer l'authentification depuis le navigateur
 sunox logout                    Supprimer l'auth locale et le profil login interactif
 sunox doctor                    Diagnostiquer la configuration et l'auth
+sunox doctor --network          Diagnostiquer DNS, TCP et HTTPS (`--strict` renvoie une erreur en cas de dégradation)
 ```
 
 ## Commandes agent et avancées
@@ -196,12 +197,15 @@ sunox logout
 sunox auth
 sunox config
 sunox doctor
+sunox doctor --network
 sunox agent-info
 sunox install-skill
 sunox update
 ```
 
 ## Fonctionnalités
+
+Les fonctionnalités Studio sont hors du périmètre de ce CLI.
 
 ### Authentification sans friction
 
@@ -211,16 +215,16 @@ sunox login
 
 `sunox login` essaie d'abord de lire le cookie Clerk depuis Chrome, Arc, Brave, Firefox ou Edge. Si cette extraction réussit, Sunox enregistre la source du navigateur et les paramètres publics disponibles, comme les langues acceptées, sans fabriquer de user-agent depuis ce simple libellé. Si cette extraction échoue, il ouvre un profil de navigateur dédié à Sunox et compatible Chrome/Edge, puis attend que vous vous connectiez à Suno dans cette fenêtre. La session Clerk capturée est ensuite échangée contre un JWT et stockée localement pour les rafraîchissements. Le login interactif capture aussi le user-agent et les langues acceptées ; les requêtes API dérivent les client hints Chromium du user-agent retenu, envoient les headers de fetch metadata du navigateur et utilisent des fallback champ par champ quand les valeurs réelles manquent.
 
-Les identifiants sont stockés dans un fichier JSON local, pas dans le trousseau du système. Sous Unix, le fichier est créé avec le mode `0600` ; sous Windows, Sunox dépend de l'ACL utilisateur du dossier de configuration. Les valeurs `--cookie` et `--jwt` peuvent apparaître dans l'historique du shell et la liste des processus : préférez `sunox login` sur une machine interactive et ne placez jamais d'identifiants dans des logs, prompts, fichiers de projet ou commits.
+Les identifiants sont stockés dans un fichier JSON local, pas dans le trousseau du système. Sous Unix, le fichier est créé avec le mode `0600` ; sous Windows, Sunox dépend de l'ACL utilisateur du dossier de configuration. Les valeurs `--cookie` et `--jwt` peuvent apparaître dans l'historique du shell et la liste des processus : préférez `sunox login` ou `--cookie-stdin` / `--jwt-stdin`, et ne placez jamais d'identifiants dans des logs, prompts, fichiers de projet ou commits.
 
 Méthodes d'authentification :
 
 1. `sunox login` : extraction automatique depuis le navigateur, avec fallback Chrome/Edge interactif, recommandée.
-2. `sunox auth --cookie <cookie>` : collage manuel d'un cookie sur serveur headless.
-3. `sunox auth --jwt <token>` : JWT direct, généralement valable environ 1 heure.
+2. `printf '%s' "$SUNOX_COOKIE_INPUT" | sunox auth --cookie-stdin` : lecture du cookie depuis stdin.
+3. `printf '%s' "$SUNOX_JWT_INPUT" | sunox auth --jwt-stdin` : lecture du JWT depuis stdin.
 4. `sunox auth --refresh` : force un nouveau JWT depuis la session Clerk sauvegardée.
 
-`sunox logout` supprime les identifiants locaux et le profil de navigateur dédié au login interactif.
+`sunox logout` supprime les identifiants locaux, le profil de login interactif et l'ancien profil captcha.
 
 ### Paramètres de génération
 

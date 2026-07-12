@@ -117,6 +117,7 @@ sunox add <clip_ids> --to <id>  曲をプレイリストに追加
 sunox login                     ブラウザから認証を設定
 sunox logout                    ローカル認証情報と対話型 login profile を削除
 sunox doctor                    設定と認証を診断
+sunox doctor --network          DNS、TCP、HTTPS を診断（`--strict` は異常時に非ゼロ）
 ```
 
 ## Agent と高度なコマンド
@@ -195,12 +196,15 @@ sunox logout
 sunox auth
 sunox config
 sunox doctor
+sunox doctor --network
 sunox agent-info
 sunox install-skill
 sunox update
 ```
 
 ## 機能
+
+Studio 関連機能はこの CLI の対象外です。
 
 ### 手間の少ない認証
 
@@ -210,16 +214,16 @@ sunox login
 
 `sunox login` はまず Chrome、Arc、Brave、Firefox、Edge から Clerk cookie を読み取ります。成功した場合はブラウザ種別と、取得できる公開 profile 設定（受け入れ言語など）を保存しますが、ブラウザ名だけから user-agent を作ることはありません。失敗した場合は Sunox 専用の Chrome/Edge 互換ブラウザ profile を開き、そこで Suno にログインすると Clerk session を取得します。その session を JWT に交換し、更新可能なローカル session として保存します。対話型 login では user-agent と受け入れ言語も取得し、API request では選択された user-agent から Chromium client hints を派生し、browser fetch metadata header を送り、実値がない項目だけ fallback します。
 
-認証情報は OS keychain ではなくローカル JSON に保存されます。Unix では認証ファイルを `0600` で作成し、Windows では設定ディレクトリのユーザー ACL に依存します。`--cookie` と `--jwt` の値は shell history やプロセス一覧に表示される可能性があるため、対話環境では `sunox login` を優先し、認証情報をログ、prompt、プロジェクトファイル、commit に含めないでください。
+認証情報は OS keychain ではなくローカル JSON に保存されます。Unix では認証ファイルを `0600` で作成し、Windows では設定ディレクトリのユーザー ACL に依存します。`--cookie` と `--jwt` の値は shell history やプロセス一覧に表示される可能性があるため、`sunox login` または標準入力用の `--cookie-stdin` / `--jwt-stdin` を優先し、認証情報をログ、prompt、プロジェクトファイル、commit に含めないでください。
 
 認証方式：
 
 1. `sunox login`：ブラウザから自動抽出。失敗時は対話型 Chrome/Edge login に fallback。推奨。
-2. `sunox auth --cookie <cookie>`：ヘッドレス環境向けに cookie を手動指定。
-3. `sunox auth --jwt <token>`：JWT を直接指定。通常は約 1 時間有効。
+2. `printf '%s' "$SUNOX_COOKIE_INPUT" | sunox auth --cookie-stdin`：標準入力から cookie を指定。
+3. `printf '%s' "$SUNOX_JWT_INPUT" | sunox auth --jwt-stdin`：標準入力から JWT を指定。
 4. `sunox auth --refresh`：保存済み Clerk session から JWT を強制更新。
 
-`sunox logout` はローカル認証情報と対話型 login 用の専用ブラウザ profile を削除します。
+`sunox logout` はローカル認証情報、対話型 login profile、旧 captcha profile を削除します。
 
 ### 生成パラメータ
 

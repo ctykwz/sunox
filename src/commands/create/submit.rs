@@ -24,6 +24,7 @@ fn build_describe_args_from_create(args: CreateArgs) -> Result<DescribeArgs, Cli
         title: args.title,
         prompt,
         tags: args.tags,
+        exclude: args.exclude,
         model: args.model,
         vocal: args.vocal,
         weirdness: args.weirdness,
@@ -210,6 +211,7 @@ fn build_describe_request(
     req.prompt = args.prompt.clone();
     req.title = Some(args.title.clone().unwrap_or_default());
     req.tags = tags;
+    req.negative_tags = args.exclude.clone().unwrap_or_default();
     req.make_instrumental = args.instrumental;
     req.persona_id = args.persona.clone();
     req.metadata.control_sliders = control_sliders;
@@ -321,6 +323,7 @@ mod tests {
             title,
             prompt: "bright city pop about a clean morning".into(),
             tags: Some("city pop, bright".into()),
+            exclude: None,
             model,
             vocal: None,
             weirdness: None,
@@ -397,6 +400,34 @@ mod tests {
         assert!(describe_args.captcha);
         assert!(!describe_args.no_captcha);
         assert!(describe_args.enhance_tags);
+    }
+
+    #[test]
+    fn description_create_preserves_excluded_styles() {
+        let args = CreateArgs {
+            prompt: Some("a warm ballad about starlight".into()),
+            title: None,
+            tags: None,
+            exclude: Some("metal, spoken word".into()),
+            lyrics: None,
+            lyrics_file: None,
+            model: None,
+            vocal: None,
+            weirdness: None,
+            style_influence: None,
+            enhance_tags: false,
+            instrumental: false,
+            token: None,
+            captcha: false,
+            no_captcha: false,
+            persona: None,
+        };
+
+        let describe_args = build_describe_args_from_create(args).expect("describe args");
+        let request = build_describe_request(&describe_args, &AppConfig::default())
+            .expect("description request");
+
+        assert_eq!(request.negative_tags, "metal, spoken word");
     }
 
     #[test]

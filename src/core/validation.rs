@@ -34,9 +34,26 @@ pub fn ensure_non_negative_finite(name: &str, value: f64) -> Result<(), CliError
     Ok(())
 }
 
+pub fn ensure_time_range(name: &str, start: Option<f64>, end: Option<f64>) -> Result<(), CliError> {
+    if let Some(start) = start {
+        ensure_non_negative_finite(&format!("{name} start"), start)?;
+    }
+    if let Some(end) = end {
+        ensure_non_negative_finite(&format!("{name} end"), end)?;
+    }
+    if let (Some(start), Some(end)) = (start, end)
+        && start >= end
+    {
+        return Err(CliError::Config(format!(
+            "{name} start must be less than end"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ensure_non_negative_finite, ensure_percentage};
+    use super::{ensure_non_negative_finite, ensure_percentage, ensure_time_range};
 
     #[test]
     fn percentages_reject_non_finite_and_out_of_range_values() {
@@ -53,5 +70,21 @@ mod tests {
             ensure_non_negative_finite("--at", value).expect_err("invalid timestamp");
         }
         ensure_non_negative_finite("--at", 0.0).expect("zero timestamp");
+    }
+
+    #[test]
+    fn time_ranges_require_finite_non_negative_ordered_bounds() {
+        for (start, end) in [
+            (Some(f64::NAN), Some(1.0)),
+            (Some(0.0), Some(f64::INFINITY)),
+            (Some(-0.1), Some(1.0)),
+            (Some(2.0), Some(1.0)),
+            (Some(1.0), Some(1.0)),
+        ] {
+            ensure_time_range("vocal range", start, end).expect_err("invalid range");
+        }
+
+        ensure_time_range("vocal range", Some(0.0), Some(1.0)).expect("valid range");
+        ensure_time_range("vocal range", Some(0.0), None).expect("partial update");
     }
 }

@@ -30,13 +30,14 @@ sunox doctor
 
 # Diagnose DNS/direct-TCP/HTTPS connectivity when auth or API requests cannot connect
 sunox doctor --network
+sunox doctor --network --strict  # non-zero when a requested network path is degraded
 ```
 
 If `sunox login` fails on a headless box, fall back to:
 
 ```bash
-sunox auth --cookie '<Cookie header or __client value>'  # paste from browser DevTools
-sunox auth --jwt '<jwt>'                                  # ~1 hour lifetime
+printf '%s' "$SUNOX_COOKIE_INPUT" | sunox auth --cookie-stdin
+printf '%s' "$SUNOX_JWT_INPUT" | sunox auth --jwt-stdin
 sunox auth --refresh                                      # force-refresh stored Clerk session
 ```
 
@@ -178,7 +179,8 @@ sunox clip info <clip_id>
 sunox persona list
 sunox persona info <persona_id>
 sunox persona clips <persona_id> --page 1
-sunox persona create <clip_id> --name "My Voice" --description "Warm lead vocal"
+sunox persona create <clip_id> --name "My Voice" --description "Warm lead vocal"  # private by default
+sunox persona create <clip_id> --name "Public Voice" --public                    # explicit opt-in only
 sunox persona set <persona_id> --name "My Voice" --description "Warm lead vocal" --public false
 sunox persona processed-clip <processed_clip_id>
 sunox persona publish <persona_id>        # only when the user explicitly asks to make it public
@@ -195,7 +197,8 @@ sunox clip list
 sunox clip list --cursor <next_cursor>
 sunox clip list --trashed
 sunox clip list --liked --public --sort popular
-sunox clip search "rainy"
+sunox clip search "rainy" --limit 50
+sunox clip search "rainy" --all
 
 # Manage playlists
 sunox playlist list
@@ -294,7 +297,7 @@ Remaster models: v5.5 = chirp-flounder, v5 = chirp-carp, v4.5+ = chirp-bass.
 
 Model availability, the account default, and length limits are account-specific. The default
 `default_model=auto` resolves the account's usable default directly from `/api/billing/info/`.
-`sunox models --json` exposes the same account data for inspection. Explicit models are validated
+`sunox models --json` exposes separate `generation` and `remaster` arrays from the same account data. Explicit models are validated
 against `can_use` and `max_lengths` when billing info is available; v5.5 is used only when that
 read is unavailable.
 
@@ -305,6 +308,7 @@ read is unavailable.
 - Suno write commands are account-scoped serial by default; do not pass --parallel or disable `serial_mutations` unless the user explicitly allows same-account concurrent writes.
 - For simple audio analysis, prefer clip `audio_url` CDN media from `sunox clip info <clip_id> --json` or use the default CDN `sunox clip download`; `clip info` also includes `attribution`, `comments`, `direct_children_count`, `similar_clips`, and non-fatal `supplemental_errors`. Reserve explicit `--format`, generation-backed stems, or Pro video for requests that name that format or need deep/lossless analysis. Studio functionality is outside this CLI's scope.
 - Download output directories are created automatically. Do not pass `--force` unless the user explicitly requests replacing an existing local download; ordinary downloads refuse to overwrite a matching file.
+- MP3 downloads abort on auth/rate-limit failures while fetching timed lyrics. Other timed-lyrics failures preserve the MP3 with available plain lyrics and add a structured `warnings` entry. Downloads have a two-hour total deadline and 2 GiB size limit; Ctrl-C cleans staging files.
 - `--quiet` suppresses download progress and ordinary status output. A batch download that has already written any output and then fails returns `partial_download`; inspect `error.details.succeeded`, `error.details.failed`, and `error.details.not_attempted_clip_ids`, then retry only the required IDs.
 - `playlist remove` submits one remove request per clip. If a later clip fails, JSON errors use code `partial_mutation`; inspect `error.details.succeeded_clip_ids`, `error.details.failed`, and `error.details.not_attempted_clip_ids` before retrying.
 - Multi-clip `publish`, `unpublish`, `like`, and `dislike` also run serially. If a later clip fails, inspect the same `partial_mutation` progress fields and retry only failed or unattempted IDs.

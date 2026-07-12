@@ -43,7 +43,32 @@ fn billing_info_response(plan_id: &str) -> String {
             "plan_key": "pro",
             "usage_plan_features": []
         },
-        "models": [],
+        "models": [
+            {
+                "name": "v5.5",
+                "external_key": "chirp-fenix",
+                "can_use": true,
+                "is_default_model": true,
+                "description": "default test model",
+                "max_lengths": {}
+            },
+            {
+                "name": "v4.5 fixture",
+                "external_key": "chirp-v4-5",
+                "can_use": true,
+                "is_default_model": false,
+                "description": "contract fixture",
+                "max_lengths": {}
+            },
+            {
+                "name": "v3 fixture",
+                "external_key": "chirp-v3-0",
+                "can_use": true,
+                "is_default_model": false,
+                "description": "contract fixture",
+                "max_lengths": {}
+            }
+        ],
         "period": "month",
         "renews_on": null,
         "remaster_model_types": []
@@ -829,6 +854,23 @@ async fn search_posts_v3_search_text_filter_contract() {
 }
 
 #[tokio::test]
+async fn search_page_preserves_cursor_and_limit_contract() {
+    let server = MockServer::json(r#"{"clips":[],"has_more":false}"#).await;
+    let client = server.client();
+
+    client
+        .search_page("summer pop", Some("cursor-2".into()), Some(12))
+        .await
+        .expect("search page");
+
+    let request = server.captured().await;
+    let body = serde_json::from_str::<serde_json::Value>(&request.body).expect("request json");
+    assert_eq!(body["cursor"], "cursor-2");
+    assert_eq!(body["limit"], 12);
+    assert_eq!(body["filters"]["searchText"], "summer pop");
+}
+
+#[tokio::test]
 async fn clip_info_fetches_song_page_supplemental_contract() {
     let server = MockServer::json_sequence(&[
         r#"{"source_clips":[{"clip_id":"source-1","title":"Source Song","image_url":"https://cdn2.suno.ai/image_source-1.jpeg","audio_url":"https://cdn1.suno.ai/source-1.mp3","is_deleted":true,"relationship":"COV","user":{"user_id":"user-1","user_display_name":"Source User","user_handle":"source"}}]}"#,
@@ -1437,6 +1479,23 @@ async fn generate_falls_back_when_billing_info_is_unavailable() {
     assert_eq!(requests[2].path, "/api/generate/v2-web/");
     let body = serde_json::from_str::<serde_json::Value>(&requests[2].body).expect("request json");
     assert_eq!(body["metadata"]["user_tier"], "");
+}
+
+#[tokio::test]
+async fn generate_does_not_guess_when_billing_succeeds_with_no_models() {
+    let billing = billing_info_with_models("tier-pro", serde_json::json!([]));
+    let server = MockServer::json(&billing).await;
+    let client = server.client();
+    let generate = GenerateRequest::new("auto", "custom");
+
+    let error = client
+        .generate(&generate)
+        .await
+        .expect_err("a successful empty capability response must not select a guessed model");
+
+    assert!(matches!(error, CliError::Config(message) if message.contains("no generation models")));
+    let request = server.captured().await;
+    assert_eq!(request.path, "/api/billing/info/");
 }
 
 #[tokio::test]

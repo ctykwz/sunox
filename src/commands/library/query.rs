@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::api::types::FeedFilters;
 use crate::app::AppContext;
 use crate::cli::{InfoArgs, ListArgs, ListSort, SearchArgs, StatusArgs};
@@ -31,9 +33,39 @@ pub async fn list(args: ListArgs, ctx: &AppContext) -> Result<(), CliError> {
 }
 
 pub async fn search(args: SearchArgs, ctx: &AppContext) -> Result<(), CliError> {
-    let feed = ctx.client().await?.search(&args.query).await?;
+    if args.limit == Some(0) {
+        return Err(CliError::Config("--limit must be greater than 0".into()));
+    }
+    let client = ctx.client().await?;
+    let mut feed = client
+        .search_page(&args.query, args.cursor.clone(), args.limit)
+        .await?;
+    if args.all {
+        let mut seen = HashSet::new();
+        if let Some(cursor) = args.cursor {
+            seen.insert(cursor);
+        }
+        while feed.has_more {
+            let cursor = feed.next_cursor.clone().ok_or_else(|| CliError::Api {
+                code: "pagination_error",
+                message: "Suno reported more search results without a next cursor".into(),
+            })?;
+            if !seen.insert(cursor.clone()) {
+                return Err(CliError::Api {
+                    code: "pagination_error",
+                    message: "Suno repeated a search pagination cursor".into(),
+                });
+            }
+            let page = client
+                .search_page(&args.query, Some(cursor), args.limit)
+                .await?;
+            feed.clips.extend(page.clips);
+            feed.next_cursor = page.next_cursor;
+            feed.has_more = page.has_more;
+        }
+    }
     match ctx.fmt {
-        OutputFormat::Json => output::json::success(&feed.clips),
+        OutputFormat::Json => output::json::success(&feed),
         OutputFormat::Table => {
             if feed.clips.is_empty() {
                 eprintln!("No clips matching \"{}\"", args.query);

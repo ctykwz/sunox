@@ -1,25 +1,43 @@
 use std::future::Future;
+use std::io::Read;
 
 use crate::api::SunoClient;
 use crate::app::AppContext;
 use crate::auth::{self, AuthState, BrowserAuth};
 use crate::cli::AuthArgs;
 use crate::core::CliError;
+use crate::output::{self, OutputFormat};
 
-pub async fn run(args: AuthArgs, _ctx: &AppContext) -> Result<(), CliError> {
+pub async fn run(args: AuthArgs, ctx: &AppContext) -> Result<(), CliError> {
     if args.logout {
-        run_logout_with_cleanup(AuthState::delete, auth::delete_interactive_browser_profile)?;
+        run_logout_with_cleanup(
+            AuthState::delete,
+            auth::delete_interactive_browser_profile,
+            crate::captcha::delete_legacy_browser_profile,
+        )?;
+        match ctx.fmt {
+            OutputFormat::Json => output::json::success(serde_json::json!({
+                "logged_out": true,
+                "stored_auth_removed": true,
+            })),
+            OutputFormat::Table => {
+                eprintln!("Logged out; removed stored Suno authentication");
+            }
+        }
         return Ok(());
     }
 
-    let mut state = match AuthState::load() {
-        Ok(s) => s,
-        Err(CliError::AuthMissing) => AuthState::default(),
+    let original_state = match AuthState::load() {
+        Ok(state) => Some(state),
+        Err(CliError::AuthMissing) => None,
         Err(e) => return Err(e),
     };
+    let mut state = original_state.clone().unwrap_or_default();
+    let jwt_input = read_secret_input(args.jwt.clone(), args.jwt_stdin, "JWT")?;
+    let cookie_input = read_secret_input(args.cookie.clone(), args.cookie_stdin, "Clerk cookie")?;
 
     let has_explicit_auth_input =
-        args.login || args.refresh || args.jwt.is_some() || args.cookie.is_some();
+        args.login || args.refresh || jwt_input.is_some() || cookie_input.is_some();
     let should_login = args.login
         || (!has_explicit_auth_input && state.jwt.is_none() && state.clerk_client_cookie.is_none());
 
@@ -27,7 +45,7 @@ pub async fn run(args: AuthArgs, _ctx: &AppContext) -> Result<(), CliError> {
         state.clerk_client_cookie.as_ref().ok_or_else(|| {
             CliError::Config("no Clerk session cookie stored — run `sunox login` first".into())
         })?;
-        let http = reqwest::Client::new();
+        let http = crate::net::http::browser_client()?;
         auth::refresh_state_explicit(&http, &mut state).await?;
     } else if should_login {
         eprintln!("Extracting Suno session from your browser...");
@@ -37,44 +55,57 @@ pub async fn run(args: AuthArgs, _ctx: &AppContext) -> Result<(), CliError> {
         )
         .await?;
 
-        let http = reqwest::Client::new();
+        let http = crate::net::http::browser_client()?;
         eprintln!("Exchanging for access token via Clerk...");
         let (session_id, jwt) =
             auth::clerk_token_exchange(&http, &browser_auth.clerk_client_cookie).await?;
 
         store_browser_auth_state(&mut state, browser_auth, session_id, jwt);
-    } else if let Some(cookie) = args.cookie.as_deref() {
+    } else if let Some(cookie) = cookie_input.as_deref() {
         let browser_auth = auth::normalize_cookie_input(cookie)?;
-        let http = reqwest::Client::new();
+        let http = crate::net::http::browser_client()?;
         eprintln!("Exchanging cookie for access token...");
         let (session_id, jwt) =
             auth::clerk_token_exchange(&http, &browser_auth.clerk_client_cookie).await?;
 
         store_browser_auth_state(&mut state, browser_auth, session_id, jwt);
-    } else if let Some(jwt) = args.jwt.clone() {
+    } else if let Some(jwt) = jwt_input {
         store_direct_jwt_state(&mut state, jwt);
     } else {
         eprintln!("Checking existing authentication...");
     }
 
+    let save_origin = if args.refresh {
+        Some(state.clone())
+    } else {
+        original_state.clone()
+    };
     if let Some(device) = args.device.as_ref() {
         state.device_id = Some(device.clone());
     }
 
     let should_save_after_verify = args.refresh
         || should_login
-        || args.cookie.is_some()
+        || cookie_input.is_some()
         || args.jwt.is_some()
+        || args.jwt_stdin
         || args.device.is_some();
     let client = SunoClient::new_with_refresh(state.clone()).await?;
     let info = client.billing_info().await?;
     if should_save_after_verify {
-        verified_auth_state(&client).save()?;
+        verified_auth_state(&client).save_if_unchanged(save_origin.as_ref())?;
     }
-    eprintln!(
-        "Authenticated! Plan: {}, Credits: {}",
-        info.plan.name, info.total_credits_left
-    );
+    match ctx.fmt {
+        OutputFormat::Json => output::json::success(serde_json::json!({
+            "authenticated": true,
+            "plan": info.plan.name,
+            "credits": info.total_credits_left,
+        })),
+        OutputFormat::Table => eprintln!(
+            "Authenticated! Plan: {}, Credits: {}",
+            info.plan.name, info.total_credits_left
+        ),
+    }
     Ok(())
 }
 
@@ -82,18 +113,44 @@ fn verified_auth_state(client: &SunoClient) -> AuthState {
     client.auth_state_snapshot()
 }
 
-fn run_logout_with_cleanup<D, P>(
+fn run_logout_with_cleanup<D, P, C>(
     delete_auth_state: D,
     delete_interactive_profile: P,
+    delete_captcha_profile: C,
 ) -> Result<(), CliError>
 where
     D: FnOnce() -> Result<(), CliError>,
     P: FnOnce() -> Result<(), CliError>,
+    C: FnOnce() -> Result<(), CliError>,
 {
     delete_auth_state()?;
     delete_interactive_profile()?;
-    eprintln!("Logged out; removed stored Suno authentication");
+    delete_captcha_profile()?;
     Ok(())
+}
+
+fn read_secret_input(
+    value: Option<String>,
+    from_stdin: bool,
+    label: &str,
+) -> Result<Option<String>, CliError> {
+    let value = if from_stdin {
+        let mut input = String::new();
+        std::io::stdin().read_to_string(&mut input)?;
+        Some(input)
+    } else {
+        value
+    };
+    value
+        .map(|value| {
+            let value = value.trim().to_string();
+            if value.is_empty() {
+                Err(CliError::Config(format!("{label} must not be empty")))
+            } else {
+                Ok(value)
+            }
+        })
+        .transpose()
 }
 
 async fn extract_browser_auth_with_fallback<C, I, Fut>(
@@ -359,6 +416,7 @@ mod tests {
     fn logout_removes_stored_auth_and_interactive_browser_profile() {
         let mut deleted_auth = false;
         let mut deleted_profile = false;
+        let mut deleted_captcha_profile = false;
 
         run_logout_with_cleanup(
             || {
@@ -369,10 +427,15 @@ mod tests {
                 deleted_profile = true;
                 Ok(())
             },
+            || {
+                deleted_captcha_profile = true;
+                Ok(())
+            },
         )
         .expect("logout");
 
         assert!(deleted_auth);
         assert!(deleted_profile);
+        assert!(deleted_captcha_profile);
     }
 }

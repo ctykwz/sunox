@@ -204,7 +204,26 @@ pub struct ControlSliders {
 #[derive(Debug, Deserialize)]
 pub struct GenerateResponse {
     #[serde(default)]
-    pub clips: Vec<Clip>,
+    pub clips: Option<Vec<Clip>>,
+}
+
+impl GenerateResponse {
+    pub fn into_clips(self) -> Result<Vec<Clip>, crate::core::CliError> {
+        match self.clips {
+            Some(clips) if !clips.is_empty() => Ok(clips),
+            clips => Err(crate::core::CliError::SunoApi {
+                code: "schema_drift",
+                status: 200,
+                message: "HTTP 200 generation response did not contain any clips".into(),
+                retryable: Some(false),
+                details: Some(serde_json::json!({
+                    "http_status": 200,
+                    "response_field": "clips",
+                    "field_state": if clips.is_some() { "empty" } else { "missing" }
+                })),
+            }),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -267,5 +286,16 @@ mod tests {
 
         assert_eq!(body["token"], "challenge-token");
         assert_eq!(body["token_provider"], 1);
+    }
+
+    #[test]
+    fn generation_response_rejects_missing_or_empty_clips() {
+        for body in [r#"{}"#, r#"{"clips":[]}"#] {
+            let response: GenerateResponse = serde_json::from_str(body).expect("response json");
+            let error = response.into_clips().expect_err("clips must be non-empty");
+
+            assert_eq!(error.error_code(), "schema_drift");
+            assert_eq!(error.details().expect("details")["http_status"], 200);
+        }
     }
 }

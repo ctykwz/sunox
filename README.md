@@ -48,8 +48,8 @@ Requires Rust 1.88 or newer.
 
 ### Pre-built binaries
 
-Download from [GitHub Releases](https://github.com/ctykwz/sunox/releases) — binaries for macOS (Apple Silicon + Intel), Linux (x86_64 + ARM), and Windows.
-Each release includes `SHA256SUMS`; `sunox update` verifies the selected archive before installing it.
+Download from [GitHub Releases](https://github.com/ctykwz/sunox/releases) — binaries for macOS (Apple Silicon + Intel), glibc 2.28+ Linux (x86_64 + ARM), and 64-bit Windows.
+The release gate requires Developer ID signing/notarization on macOS and Authenticode plus a static CRT on Windows. Each release also includes a stapled macOS installer package, CycloneDX SBOM, provenance attestation, and `SHA256SUMS`; `sunox update` verifies the selected archive before installing it.
 
 ### Self-update
 
@@ -60,7 +60,7 @@ sunox update --check    # see what's available
 sunox update            # install the latest release
 ```
 
-> Tip: when Suno changes its web schema mid-cycle, run `sunox update` first — it's faster than `cargo install sunox` or waiting for the Homebrew bottle to refresh.
+> Tip: when Suno changes its web schema mid-cycle, run `sunox update` first — it's faster than reinstalling with `cargo install sunox`.
 
 ## Quick Start
 
@@ -124,6 +124,7 @@ sunox login                     Set up authentication from browser
 sunox logout                    Remove stored auth and interactive login profile
 sunox doctor                    Diagnose config and auth
 sunox doctor --network          Diagnose DNS, direct TCP, and HTTPS connectivity
+sunox doctor --network --strict Return non-zero when a network path is degraded
 ```
 
 ## Agent & Advanced Commands
@@ -156,7 +157,7 @@ sunox clip list            List your songs
 sunox clip list --cursor <next_cursor>
 sunox clip list --trashed  List songs currently in trash
 sunox clip list --liked --public --sort popular
-sunox clip search <query>  Search songs by title or tags
+sunox clip search <query>  Search songs by title or tags (`--cursor`, `--limit`, `--all`)
 sunox clip info <id>       Detailed view plus song-page context
 sunox persona list    List your voice personas
 sunox persona info <id> View a voice persona
@@ -177,7 +178,7 @@ sunox playlist info <id> View playlist details
 sunox clip status <ids> Check generation progress
 sunox clip wait <ids>   Wait for generated clips to complete (use --timeout <secs>)
 sunox credits         Show balance and plan info
-sunox models          List available models with limits
+sunox models          List generation and remaster models with account availability
 ```
 
 ### Manage
@@ -219,7 +220,7 @@ sunox logout         Remove stored auth and interactive login profile
 sunox auth           Advanced auth: refresh, cookie, jwt
 sunox config         show | set | check
 sunox doctor         Diagnose config and auth
-sunox doctor --network Diagnose DNS, direct TCP, and HTTPS connectivity
+sunox doctor --network Diagnose DNS, direct TCP, and HTTPS connectivity (`--strict` for non-zero on degradation)
 sunox agent-info     Machine-readable capabilities JSON
 sunox install-skill  Install agent skill into Codex / Claude Code / Cursor
 sunox update         Self-update from GitHub Releases (--check to peek first)
@@ -237,15 +238,15 @@ sunox login    # Browser-cookie auth, with interactive Chrome/Edge fallback
 
 `sunox login` first tries to read the Clerk auth cookie from Chrome, Arc, Brave, Firefox, or Edge. If that succeeds, Sunox records a stable browser source id for the extractor that produced the session and best-effort public profile settings such as accepted languages; it does not fabricate a user-agent from the browser label. If browser-cookie extraction fails, it opens a dedicated Sunox Chrome/Edge-compatible browser profile and waits for you to log into Suno there. The captured Clerk session is exchanged for a JWT and used to refresh stale JWTs automatically while the underlying session is still valid. When interactive login is used, stable browser runtime headers such as user-agent and accepted languages are saved and reused for later API calls. API requests derive Chromium client hints from the selected user-agent, send browser fetch metadata headers, and fall back field-by-field when real browser values are unavailable.
 
-Credentials are stored as local JSON, not in an OS keychain. Sunox creates the auth file with mode `0600` on Unix; on Windows it relies on the per-user ACL of the configuration directory. Manual `--cookie` and `--jwt` values can be visible in shell history and process listings, so prefer `sunox login` on interactive machines and never include credentials in logs, prompts, project files, or commits.
+Credentials are stored as local JSON, not in an OS keychain. Sunox creates the auth file with mode `0600` on Unix; on Windows it relies on the per-user ACL of the configuration directory. Manual `--cookie` and `--jwt` values can be visible in shell history and process listings, so prefer `sunox login` or pipe secrets through `--cookie-stdin` / `--jwt-stdin`; never include credentials in logs, prompts, project files, or commits.
 
 Auth methods (in order of convenience):
 1. `sunox login` — automatic browser extraction, with interactive Chrome/Edge fallback (recommended)
-2. `sunox auth --cookie <cookie>` — manual paste for headless servers; accepts either raw `__client` or a full browser `Cookie` header
-3. `sunox auth --jwt <token>` — direct JWT, expires in ~1 hour
+2. `printf '%s' "$SUNOX_COOKIE_INPUT" | sunox auth --cookie-stdin` — safe stdin input for headless servers; accepts either raw `__client` or a full browser `Cookie` header
+3. `printf '%s' "$SUNOX_JWT_INPUT" | sunox auth --jwt-stdin` — safe stdin JWT input
 4. `sunox auth --refresh` — force a fresh JWT from the stored Clerk session
 
-`sunox auth` with no flags checks the existing session, or starts browser login if no auth is configured. `sunox logout` removes stored credentials and the dedicated interactive browser profile.
+`sunox auth` with no flags checks the existing session, or starts browser login if no auth is configured. Auth, login, and logout emit normal success envelopes with `--json`. `sunox logout` removes stored credentials, the interactive login profile, and any legacy captcha profile.
 
 ### Generation Parameters
 
@@ -273,7 +274,8 @@ Generate songs using your own voice. Create a voice in Suno's web UI, then use t
 sunox persona list
 sunox persona info <persona_id>
 sunox persona clips <persona_id> --page 1
-sunox persona create <clip_id> --name "My Voice" --description "Warm lead vocal"
+sunox persona create <clip_id> --name "My Voice" --description "Warm lead vocal"  # private by default
+sunox persona create <clip_id> --name "Public Voice" --public                    # explicit opt-in
 sunox persona set <persona_id> --name "My Voice" --description "Warm lead vocal" --public false
 sunox persona processed-clip <processed_clip_id>
 sunox persona publish <persona_id>        # only when you explicitly want it public
@@ -404,6 +406,8 @@ Downloads automatically embed lyrics into MP3 files via ID3 tags:
 - **USLT** (plain lyrics) — shown in most music players
 - **SYLT** (synced word-by-word timestamps) — shown in Apple Music with timing
 
+Authentication and rate-limit failures while fetching timed lyrics abort the download. Other supplemental failures keep the MP3 with available plain lyrics and add a structured `warnings` entry in JSON output. Downloads have a two-hour total deadline and a 2 GiB safety limit; Ctrl-C removes staging files.
+
 ```bash
 sunox download <id1> <id2> --output ./songs/
 
@@ -459,7 +463,7 @@ Remaster models: v5.5 = chirp-flounder, v5 = chirp-carp, v4.5+ = chirp-bass.
 
 Model availability, the account default, and length limits are account-specific. The default
 `default_model=auto` resolves the current usable account default directly from
-`/api/billing/info/`; `sunox models --json` exposes the same account data for inspection. Explicit
+`/api/billing/info/`; `sunox models --json` returns separate `generation` and `remaster` arrays from the same account data. Explicit
 models are validated against `can_use` and `max_lengths` when billing info is available; v5.5 is
 used only when that read is unavailable.
 

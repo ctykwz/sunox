@@ -4,17 +4,13 @@ use crate::cli::{
     StemsArgs,
 };
 use crate::core::{AppConfig, CliError};
-use crate::output::{self, OutputFormat};
 
 use super::support::{execute_generation_submission, output_clips};
 
 pub async fn concat(args: ConcatArgs, ctx: &AppContext) -> Result<(), CliError> {
     let (client, _mutation_guard) = ctx.mutation_client().await?;
     let clip = client.concat(&args.clip_id).await?;
-    match ctx.fmt {
-        OutputFormat::Json => output::json::success(&clip),
-        OutputFormat::Table => output::table::clips(&[clip]),
-    }
+    output_clips(&[clip], ctx);
     Ok(())
 }
 
@@ -59,7 +55,7 @@ fn cover_model_api_key<'a>(
         return Ok(model.to_api_key());
     }
     match config.default_model.as_str() {
-        "auto" => Ok("chirp-fenix"),
+        "auto" => Ok("auto"),
         "chirp-auk-turbo" => Err(CliError::Config(
             "default_model v4.5-all is not verified for cover generation; pass an explicitly supported `sunox clip cover --model` value".into(),
         )),
@@ -70,7 +66,7 @@ fn cover_model_api_key<'a>(
 fn cover_model_label<'a>(model: Option<&'a CoverModel>, config: &'a AppConfig) -> &'a str {
     model.map(CoverModel::display_name).unwrap_or_else(|| {
         if config.default_model == "auto" {
-            "v5.5"
+            "account default"
         } else {
             config.default_model.as_str()
         }
@@ -78,15 +74,59 @@ fn cover_model_label<'a>(model: Option<&'a CoverModel>, config: &'a AppConfig) -
 }
 
 pub async fn remaster(args: RemasterArgs, ctx: &AppContext) -> Result<(), CliError> {
+    let client = ctx.client().await?;
+    let model = match client.billing_info().await {
+        Ok(info) => select_remaster_model(&info.remaster_model_types, args.model.as_ref())?,
+        Err(error) if error.is_auth_or_rate_limit() => return Err(error),
+        Err(_) => args
+            .model
+            .as_ref()
+            .map(|model| model.to_api_key().to_string())
+            .unwrap_or_else(|| "chirp-flounder".into()),
+    };
     if !ctx.quiet {
-        eprintln!("Remastering with {}...", args.model.to_api_key());
+        eprintln!("Remastering with {model}...");
     }
-    let (client, _mutation_guard) = ctx.mutation_client().await?;
-    let clips = client
-        .remaster(&args.clip_id, args.model.to_api_key())
-        .await?;
+    let _mutation_guard = ctx.acquire_mutation_lock_for(&client.auth_state_snapshot())?;
+    let clips = client.remaster(&args.clip_id, &model).await?;
     output_clips(&clips, ctx);
     Ok(())
+}
+
+fn select_remaster_model(
+    models: &[crate::api::types::RemasterModelInfo],
+    requested: Option<&crate::cli::RemasterModel>,
+) -> Result<String, CliError> {
+    if models.is_empty() {
+        return Err(CliError::Config(
+            "Suno billing info returned no remaster models; refusing to guess after a successful account capability lookup".into(),
+        ));
+    }
+    let selected = if let Some(requested) = requested {
+        models
+            .iter()
+            .find(|model| model.external_key == requested.to_api_key())
+    } else {
+        models
+            .iter()
+            .find(|model| model.is_default_model && model.can_use != Some(false))
+            .or_else(|| models.iter().find(|model| model.can_use != Some(false)))
+    };
+    let selected = selected.ok_or_else(|| {
+        let requested = requested
+            .map(|model| model.display_name())
+            .unwrap_or("an account default remaster model");
+        CliError::Config(format!(
+            "Suno account does not report {requested} as an available remaster model; run `sunox models --json`"
+        ))
+    })?;
+    if selected.can_use == Some(false) {
+        return Err(CliError::Config(format!(
+            "Suno account reports remaster model {} as unavailable",
+            selected.external_key
+        )));
+    }
+    Ok(selected.external_key.clone())
 }
 
 pub async fn speed(args: SpeedArgs, ctx: &AppContext) -> Result<(), CliError> {
@@ -254,4 +294,39 @@ pub async fn stems(args: StemsArgs, ctx: &AppContext) -> Result<(), CliError> {
     .await?;
     output_clips(&clips, ctx);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::api::types::RemasterModelInfo;
+    use crate::cli::RemasterModel;
+
+    use super::select_remaster_model;
+
+    #[test]
+    fn remaster_auto_uses_account_default_without_treating_unknown_as_unavailable() {
+        let models = vec![RemasterModelInfo {
+            name: "v5".into(),
+            external_key: "chirp-carp".into(),
+            is_default_model: true,
+            can_use: None,
+        }];
+
+        assert_eq!(
+            select_remaster_model(&models, None).expect("account default"),
+            "chirp-carp"
+        );
+    }
+
+    #[test]
+    fn remaster_rejects_an_explicitly_unavailable_model() {
+        let models = vec![RemasterModelInfo {
+            name: "v5.5".into(),
+            external_key: "chirp-flounder".into(),
+            is_default_model: true,
+            can_use: Some(false),
+        }];
+
+        assert!(select_remaster_model(&models, Some(&RemasterModel::V55)).is_err());
+    }
 }

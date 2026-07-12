@@ -8,6 +8,7 @@ use super::mutation_lock::MutationLockGuard;
 
 pub struct AppContext {
     pub fmt: OutputFormat,
+    pub json_explicit: bool,
     pub quiet: bool,
     pub parallel: bool,
     pub config: AppConfig,
@@ -22,6 +23,7 @@ impl AppContext {
     ) -> Result<Self, CliError> {
         Ok(Self {
             fmt: OutputFormat::detect(json),
+            json_explicit: json,
             quiet,
             parallel,
             config: AppConfig::load_with_overrides(config_overrides)?,
@@ -71,6 +73,7 @@ mod tests {
         };
         AppContext {
             fmt: OutputFormat::Json,
+            json_explicit: true,
             quiet: true,
             parallel,
             config,

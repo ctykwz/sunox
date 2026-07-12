@@ -1,41 +1,54 @@
+use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::OnceLock;
 use std::time::Duration;
 
+use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::Mutex;
 use tokio::time::sleep;
 
-use super::{CDP_PORT, cdp};
+use super::cdp;
 use crate::browser::locate_chromium_browser;
 use crate::core::CliError;
 
-static BROWSER: OnceLock<Mutex<Option<Child>>> = OnceLock::new();
-
-fn browser_slot() -> &'static Mutex<Option<Child>> {
-    BROWSER.get_or_init(|| Mutex::new(None))
+pub(super) struct BrowserSession {
+    child: Child,
+    _profile: TempDir,
+    port: u16,
 }
 
-/// Either reuse a Chromium-family browser already listening on `CDP_PORT` or
-/// spawn a new hidden one with the captcha browser profile. Idempotent.
-pub(super) async fn ensure_running() -> Result<(), CliError> {
-    if cdp::cdp_version().await.is_ok() {
-        return Ok(());
+impl BrowserSession {
+    pub(super) fn port(&self) -> u16 {
+        self.port
     }
 
-    let browser_path = locate_chromium_browser()?;
-    let profile_dir = directories::ProjectDirs::from("com", "sunox", "sunox")
-        .map(|d| d.data_dir().join("captcha-browser-profile"))
-        .ok_or_else(|| CliError::Config("could not resolve data dir for browser profile".into()))?;
-    std::fs::create_dir_all(&profile_dir)?;
+    pub(super) async fn shutdown(mut self) -> Result<(), CliError> {
+        if self.child.try_wait()?.is_none() {
+            self.child.kill().await?;
+        }
+        self.child.wait().await?;
+        Ok(())
+    }
+}
 
-    eprintln!("Launching browser for captcha solver (one-time per session)...");
+/// Launch a browser owned by this invocation. Chrome chooses an unused CDP
+/// port and records it inside the invocation's private temporary profile.
+pub(super) async fn launch() -> Result<BrowserSession, CliError> {
+    let browser_path = locate_chromium_browser()?;
+    let profile = tempfile::Builder::new()
+        .prefix("sunox-captcha-")
+        .tempdir()
+        .map_err(CliError::Io)?;
+    let active_port_path = profile.path().join("DevToolsActivePort");
+
+    eprintln!("Launching browser for captcha solver...");
 
     // Do not use --headless. hCaptcha's bot-detection trips on headless mode.
-    let mut child = Command::new(&browser_path)
-        .arg(format!("--remote-debugging-port={CDP_PORT}"))
-        .arg(format!("--user-data-dir={}", profile_dir.display()))
+    let mut command = Command::new(&browser_path);
+    command
+        .arg("--remote-debugging-address=127.0.0.1")
+        .arg("--remote-debugging-port=0")
+        .arg(format!("--user-data-dir={}", profile.path().display()))
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
         .arg("--disable-search-engine-choice-screen")
@@ -46,27 +59,64 @@ pub(super) async fn ensure_running() -> Result<(), CliError> {
         .arg("about:blank")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            CliError::Config(format!("failed to spawn browser at {browser_path:?}: {e}"))
-        })?;
+        .kill_on_drop(true);
+    let mut child = command.spawn().map_err(|error| {
+        CliError::Config(format!(
+            "failed to spawn browser at {browser_path:?}: {error}"
+        ))
+    })?;
     drain_stderr(&mut child);
 
-    {
-        let mut slot = browser_slot().lock().await;
-        *slot = Some(child);
-    }
-
-    for _ in 0..20 {
-        sleep(Duration::from_millis(500)).await;
-        if cdp::cdp_version().await.is_ok() {
-            return Ok(());
+    for _ in 0..40 {
+        if let Some(status) = child.try_wait()? {
+            return Err(CliError::Config(format!(
+                "captcha browser exited before CDP became ready: {status}"
+            )));
         }
+        if let Ok(port) = read_owned_cdp_port(&active_port_path)
+            && cdp::cdp_version(port).await.is_ok()
+        {
+            return Ok(BrowserSession {
+                child,
+                _profile: profile,
+                port,
+            });
+        }
+        sleep(Duration::from_millis(250)).await;
     }
 
+    let _ = child.kill().await;
+    let _ = child.wait().await;
     Err(CliError::Config(
-        "Browser was spawned but never opened the CDP port. Check that Chrome or Edge can start normally, or set SUNOX_BROWSER_PATH to a Chromium-family browser binary.".into(),
+        "Browser was spawned but never exposed its owned CDP endpoint. Check that Chrome or Edge can start normally, or set SUNOX_BROWSER_PATH to a Chromium-family browser binary.".into(),
     ))
+}
+
+fn read_owned_cdp_port(path: &std::path::Path) -> Result<u16, CliError> {
+    let contents = std::fs::read_to_string(path)?;
+    let port = contents
+        .lines()
+        .next()
+        .ok_or_else(|| CliError::Config("DevToolsActivePort was empty".into()))?
+        .parse::<u16>()
+        .map_err(|_| CliError::Config("DevToolsActivePort contained an invalid port".into()))?;
+    if port == 0 {
+        return Err(CliError::Config(
+            "DevToolsActivePort contained port zero".into(),
+        ));
+    }
+    Ok(port)
+}
+
+pub(crate) fn delete_legacy_profile() -> Result<(), CliError> {
+    let Some(project_dirs) = directories::ProjectDirs::from("com", "sunox", "sunox") else {
+        return Ok(());
+    };
+    let path: PathBuf = project_dirs.data_dir().join("captcha-browser-profile");
+    if path.exists() {
+        std::fs::remove_dir_all(path)?;
+    }
+    Ok(())
 }
 
 fn drain_stderr(child: &mut Child) {
@@ -77,5 +127,28 @@ fn drain_stderr(child: &mut Child) {
                 // discard
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::read_owned_cdp_port;
+
+    #[test]
+    fn owned_cdp_port_comes_from_private_profile_file() {
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
+        writeln!(file, "43123\n/devtools/browser/owned").expect("write port");
+
+        assert_eq!(read_owned_cdp_port(file.path()).expect("port"), 43123);
+    }
+
+    #[test]
+    fn owned_cdp_port_rejects_invalid_values() {
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
+        writeln!(file, "not-a-port").expect("write invalid port");
+
+        assert!(read_owned_cdp_port(file.path()).is_err());
     }
 }

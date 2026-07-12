@@ -14,6 +14,21 @@ pub(in crate::captcha) async fn render_and_execute(
 ) -> Result<String, CliError> {
     let mut session = CdpSession::connect(ws_url).await?;
 
+    let result = execute_with_session(&mut session, auth).await;
+    let cleanup = session
+        .call("Network.clearBrowserCookies", serde_json::json!({}))
+        .await;
+    match (result, cleanup) {
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Ok(token), Ok(_)) => Ok(token),
+    }
+}
+
+async fn execute_with_session(
+    session: &mut CdpSession,
+    auth: &AuthState,
+) -> Result<String, CliError> {
     session
         .call("Network.enable", serde_json::json!({}))
         .await?;
@@ -54,7 +69,7 @@ pub(in crate::captcha) async fn render_and_execute(
         )
         .await?;
 
-    wait_for_hcaptcha(&mut session).await?;
+    wait_for_hcaptcha(session).await?;
     sleep(Duration::from_secs(2)).await;
 
     let result = session

@@ -58,13 +58,11 @@ async fn check(ctx: &AppContext) -> Result<(), CliError> {
                 })
             }
             Err(e) => {
+                if !matches!(e, CliError::AuthExpired) {
+                    return Err(e);
+                }
                 if matches!(ctx.fmt, OutputFormat::Table) {
-                    match &e {
-                        CliError::AuthExpired => {
-                            eprintln!("Auth: expired — run `sunox login`");
-                        }
-                        _ => return Err(e),
-                    }
+                    eprintln!("Auth: expired — run `sunox login`");
                 }
                 serde_json::json!({
                     "config": {
@@ -79,7 +77,7 @@ async fn check(ctx: &AppContext) -> Result<(), CliError> {
                 })
             }
         },
-        Err(e) => {
+        Err(e @ CliError::AuthMissing) => {
             if matches!(ctx.fmt, OutputFormat::Table) {
                 eprintln!("Auth: not configured — run `sunox login`");
             }
@@ -95,6 +93,7 @@ async fn check(ctx: &AppContext) -> Result<(), CliError> {
                 }
             })
         }
+        Err(e) => return Err(e),
     };
 
     if matches!(ctx.fmt, OutputFormat::Json) {

@@ -37,6 +37,18 @@ fn response_excerpt(body: &str) -> String {
     }
 }
 
+fn redacted_response_excerpt(body: &str, secrets: &[&str]) -> String {
+    let mut redacted = body.to_string();
+    for secret in secrets.iter().copied().filter(|secret| !secret.is_empty()) {
+        redacted = redacted.replace(secret, "[REDACTED]");
+    }
+    response_excerpt(&redacted)
+}
+
+fn transport_error(error: reqwest::Error) -> CliError {
+    CliError::Http(error.without_url())
+}
+
 fn clerk_status_code(
     status: reqwest::StatusCode,
     rejected: &'static str,
@@ -62,7 +74,7 @@ pub async fn clerk_token_exchange(
     let resp = apply_clerk_headers(client.get(clerk_client_url()), clerk_cookie)
         .send()
         .await
-        .map_err(CliError::Http)?;
+        .map_err(transport_error)?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -71,12 +83,12 @@ pub async fn clerk_token_exchange(
             code: clerk_status_code(status, "clerk_exchange_rejected", "clerk_exchange_failed"),
             message: format!(
                 "Clerk token exchange failed ({status}): {}",
-                response_excerpt(&body)
+                redacted_response_excerpt(&body, &[clerk_cookie])
             ),
         });
     }
 
-    let body: serde_json::Value = resp.json().await.map_err(CliError::Http)?;
+    let body: serde_json::Value = resp.json().await.map_err(transport_error)?;
     let session_id = body
         .get("response")
         .and_then(|r| {
@@ -110,7 +122,7 @@ pub async fn clerk_refresh_jwt(
         .header("content-type", "application/x-www-form-urlencoded")
         .send()
         .await
-        .map_err(CliError::Http)?;
+        .map_err(transport_error)?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -119,12 +131,12 @@ pub async fn clerk_refresh_jwt(
             code: clerk_status_code(status, "clerk_refresh_rejected", "clerk_refresh_failed"),
             message: format!(
                 "Clerk JWT refresh failed ({status}): {}",
-                response_excerpt(&body)
+                redacted_response_excerpt(&body, &[clerk_cookie, session_id])
             ),
         });
     }
 
-    let body: serde_json::Value = resp.json().await.map_err(CliError::Http)?;
+    let body: serde_json::Value = resp.json().await.map_err(transport_error)?;
     body.get("jwt")
         .and_then(|j| j.as_str())
         .map(String::from)
@@ -139,7 +151,7 @@ pub async fn clerk_refresh_jwt(
 mod tests {
     use reqwest::StatusCode;
 
-    use super::clerk_status_code;
+    use super::{clerk_status_code, redacted_response_excerpt};
 
     #[test]
     fn clerk_status_distinguishes_rejection_from_server_failure() {
@@ -159,5 +171,17 @@ mod tests {
             clerk_status_code(StatusCode::REQUEST_TIMEOUT, "rejected", "failed"),
             "failed"
         );
+    }
+
+    #[test]
+    fn clerk_error_excerpt_redacts_cookie_and_session_material() {
+        let excerpt = redacted_response_excerpt(
+            "cookie=super-secret-cookie session=session-secret",
+            &["super-secret-cookie", "session-secret"],
+        );
+
+        assert!(!excerpt.contains("super-secret-cookie"));
+        assert!(!excerpt.contains("session-secret"));
+        assert!(excerpt.contains("[REDACTED]"));
     }
 }
