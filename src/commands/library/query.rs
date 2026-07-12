@@ -72,6 +72,11 @@ pub async fn search(args: SearchArgs, ctx: &AppContext) -> Result<(), CliError> 
             } else {
                 output::table::clips(&feed.clips);
             }
+            if let Some(cursor) = &feed.next_cursor {
+                eprintln!("Next cursor: {cursor}");
+            } else if feed.has_more {
+                eprintln!("More results available, but Suno did not return a cursor");
+            }
         }
     }
     Ok(())

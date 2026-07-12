@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
+use sysinfo::{ProcessesToUpdate, System};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -113,10 +114,47 @@ pub(crate) fn delete_legacy_profile() -> Result<(), CliError> {
         return Ok(());
     };
     let path: PathBuf = project_dirs.data_dir().join("captcha-browser-profile");
+    terminate_legacy_browsers(&path)?;
     if path.exists() {
         std::fs::remove_dir_all(path)?;
     }
     Ok(())
+}
+
+fn terminate_legacy_browsers(profile_path: &std::path::Path) -> Result<(), CliError> {
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::All, true);
+    let matching = system
+        .processes()
+        .iter()
+        .filter_map(|(pid, process)| {
+            is_legacy_captcha_command(process.cmd(), profile_path).then_some(*pid)
+        })
+        .collect::<Vec<_>>();
+
+    for pid in matching {
+        let Some(process) = system.process(pid) else {
+            continue;
+        };
+        process.kill_and_wait().map_err(|error| {
+            CliError::Config(format!(
+                "failed to terminate legacy captcha browser process {pid}: {error:?}"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+fn is_legacy_captcha_command(
+    command: &[std::ffi::OsString],
+    profile_path: &std::path::Path,
+) -> bool {
+    let expected_profile =
+        std::ffi::OsString::from(format!("--user-data-dir={}", profile_path.display()));
+    command
+        .iter()
+        .any(|argument| argument == "--remote-debugging-port=9233")
+        && command.iter().any(|argument| argument == &expected_profile)
 }
 
 fn drain_stderr(child: &mut Child) {
@@ -134,7 +172,7 @@ fn drain_stderr(child: &mut Child) {
 mod tests {
     use std::io::Write;
 
-    use super::read_owned_cdp_port;
+    use super::{is_legacy_captcha_command, read_owned_cdp_port};
 
     #[test]
     fn owned_cdp_port_comes_from_private_profile_file() {
@@ -150,5 +188,29 @@ mod tests {
         writeln!(file, "not-a-port").expect("write invalid port");
 
         assert!(read_owned_cdp_port(file.path()).is_err());
+    }
+
+    #[test]
+    fn legacy_cleanup_matches_only_the_exact_sunox_profile_and_port() {
+        let profile = std::path::Path::new("/tmp/sunox/captcha-browser-profile");
+        let owned = vec![
+            "chrome".into(),
+            "--remote-debugging-port=9233".into(),
+            "--user-data-dir=/tmp/sunox/captcha-browser-profile".into(),
+        ];
+        let wrong_port = vec![
+            "chrome".into(),
+            "--remote-debugging-port=9234".into(),
+            "--user-data-dir=/tmp/sunox/captcha-browser-profile".into(),
+        ];
+        let prefix_collision = vec![
+            "chrome".into(),
+            "--remote-debugging-port=9233".into(),
+            "--user-data-dir=/tmp/sunox/captcha-browser-profile-other".into(),
+        ];
+
+        assert!(is_legacy_captcha_command(&owned, profile));
+        assert!(!is_legacy_captcha_command(&wrong_port, profile));
+        assert!(!is_legacy_captcha_command(&prefix_collision, profile));
     }
 }

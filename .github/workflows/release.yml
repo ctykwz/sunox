@@ -98,8 +98,9 @@ jobs:
         shell: bash
         run: |
           cargo install cargo-zigbuild --version 0.23.0 --locked
-          python3 -m pip install --user --disable-pip-version-check 'ziglang==0.15.2'
-          python3 - <<'PY' >> "${GITHUB_PATH}"
+          python3 -m venv "${RUNNER_TEMP}/zig-venv"
+          "${RUNNER_TEMP}/zig-venv/bin/pip" install --disable-pip-version-check 'ziglang==0.15.2'
+          "${RUNNER_TEMP}/zig-venv/bin/python" - <<'PY' >> "${GITHUB_PATH}"
           import pathlib, ziglang
           print(pathlib.Path(ziglang.__file__).parent)
           PY
@@ -273,9 +274,11 @@ jobs:
       - name: Generate checksums
         shell: bash
         run: |
+          checksum_file="${RUNNER_TEMP}/SHA256SUMS"
           while IFS= read -r file; do
             printf '%s  %s\n' "$(sha256sum "${file}" | cut -d' ' -f1)" "$(basename "${file}")"
-          done < <(find artifacts -type f | sort) > artifacts/SHA256SUMS
+          done < <(find artifacts -type f | sort) > "${checksum_file}"
+          mv "${checksum_file}" artifacts/SHA256SUMS
 
       - name: Attest release artifacts
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3

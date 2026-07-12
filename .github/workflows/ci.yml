@@ -97,8 +97,9 @@ jobs:
       - name: Install pinned Zig toolchain
         run: |
           cargo install cargo-zigbuild --version 0.23.0 --locked
-          python3 -m pip install --user --disable-pip-version-check 'ziglang==0.15.2'
-          python3 - <<'PY' >> "${GITHUB_PATH}"
+          python3 -m venv "${RUNNER_TEMP}/zig-venv"
+          "${RUNNER_TEMP}/zig-venv/bin/pip" install --disable-pip-version-check 'ziglang==0.15.2'
+          "${RUNNER_TEMP}/zig-venv/bin/python" - <<'PY' >> "${GITHUB_PATH}"
           import pathlib, ziglang
           print(pathlib.Path(ziglang.__file__).parent)
           PY
