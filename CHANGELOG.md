@@ -7,13 +7,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.0.16] - 2026-07-13
+
 ### Added
 
 - Added safe stdin authentication inputs, paginated/all library search, strict network diagnostics,
   account-aware remaster discovery, bounded downloads, structured supplemental download warnings,
   and graceful Ctrl-C cleanup.
-- Added protected release approvals, release-tag rules, glibc 2.28 builds, platform signing gates,
-  notarized macOS packages, SBOM generation, artifact attestations, and scheduled security audits.
+- Added protected release approvals, release-tag rules, glibc 2.28 builds, unsigned platform
+  archives, SBOM generation, artifact attestations, and scheduled security audits.
 
 ### Fixed
 
@@ -27,6 +29,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   output format.
 - Resolved account defaults for cover/remaster operations, surfaced remaster availability without
   treating missing `can_use` as false, and removed stale agent command metadata.
+- Published unsigned platform archives so releases do not require paid Apple or Windows signing
+  certificates; checksums, SBOM, and provenance attestations remain enabled.
 
 ## [0.0.15] - 2026-07-11
 

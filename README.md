@@ -49,7 +49,7 @@ Requires Rust 1.88 or newer.
 ### Pre-built binaries
 
 Download from [GitHub Releases](https://github.com/ctykwz/sunox/releases) — binaries for macOS (Apple Silicon + Intel), glibc 2.28+ Linux (x86_64 + ARM), and 64-bit Windows.
-The release gate requires Developer ID signing/notarization on macOS and Authenticode plus a static CRT on Windows. Each release also includes a stapled macOS installer package, CycloneDX SBOM, provenance attestation, and `SHA256SUMS`; `sunox update` verifies the selected archive before installing it.
+Releases include unsigned platform archives for macOS (Apple Silicon + Intel), Linux, and Windows, plus a static CRT Windows build, CycloneDX SBOM, provenance attestation, and `SHA256SUMS`; `sunox update` verifies the selected archive before installing it. macOS and Windows may show their platform's unsigned-download warnings.
 
 ### Self-update
 

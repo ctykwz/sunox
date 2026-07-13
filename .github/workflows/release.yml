@@ -118,73 +118,6 @@ jobs:
           RUSTFLAGS: -C target-feature=+crt-static
         run: cargo build --release --locked --target '${{ matrix.target }}'
 
-      - name: Sign and notarize macOS artifacts
-        if: matrix.kind == 'macos'
-        shell: bash
-        env:
-          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_INSTALLER_IDENTITY: ${{ secrets.APPLE_INSTALLER_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-        run: |
-          for name in APPLE_CERTIFICATE_P12 APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_INSTALLER_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD; do
-            test -n "${!name}" || { echo "Missing required release secret: ${name}" >&2; exit 1; }
-          done
-
-          certificate="${RUNNER_TEMP}/sunox-release.p12"
-          keychain="${RUNNER_TEMP}/sunox-release.keychain-db"
-          keychain_password="$(openssl rand -hex 24)"
-          printf '%s' "${APPLE_CERTIFICATE_P12}" | base64 -D > "${certificate}"
-          security create-keychain -p "${keychain_password}" "${keychain}"
-          security set-keychain-settings -lut 21600 "${keychain}"
-          security unlock-keychain -p "${keychain_password}" "${keychain}"
-          security import "${certificate}" -k "${keychain}" -P "${APPLE_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign -T /usr/bin/productsign
-          security set-key-partition-list -S apple-tool:,apple: -s -k "${keychain_password}" "${keychain}"
-          security list-keychains -d user -s "${keychain}"
-
-          binary="target/${{ matrix.target }}/release/sunox"
-          codesign --force --options runtime --timestamp --sign "${APPLE_SIGNING_IDENTITY}" "${binary}"
-          codesign --verify --deep --strict --verbose=2 "${binary}"
-
-          notary_zip="${RUNNER_TEMP}/${{ matrix.name }}-notary.zip"
-          ditto -c -k --keepParent "${binary}" "${notary_zip}"
-          xcrun notarytool submit "${notary_zip}" --apple-id "${APPLE_ID}" --team-id "${APPLE_TEAM_ID}" --password "${APPLE_APP_PASSWORD}" --wait
-
-          pkgroot="${RUNNER_TEMP}/pkgroot"
-          mkdir -p "${pkgroot}/usr/local/bin"
-          cp "${binary}" "${pkgroot}/usr/local/bin/sunox"
-          version="${GITHUB_REF_NAME#v}"
-          pkgbuild --root "${pkgroot}" --identifier io.github.ctykwz.sunox --version "${version}" --install-location / --sign "${APPLE_INSTALLER_IDENTITY}" "${{ matrix.name }}.pkg"
-          xcrun notarytool submit "${{ matrix.name }}.pkg" --apple-id "${APPLE_ID}" --team-id "${APPLE_TEAM_ID}" --password "${APPLE_APP_PASSWORD}" --wait
-          xcrun stapler staple "${{ matrix.name }}.pkg"
-          xcrun stapler validate "${{ matrix.name }}.pkg"
-          spctl --assess --type install --verbose=2 "${{ matrix.name }}.pkg"
-
-      - name: Sign Windows artifact
-        if: matrix.kind == 'windows'
-        shell: pwsh
-        env:
-          WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PFX)) { throw 'Missing required release secret: WINDOWS_CERTIFICATE_PFX' }
-          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) { throw 'Missing required release secret: WINDOWS_CERTIFICATE_PASSWORD' }
-          $pfxPath = Join-Path $env:RUNNER_TEMP 'sunox-release.pfx'
-          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX))
-          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
-          $certificate = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $password
-          $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $signTool) { throw 'signtool.exe was not found' }
-          $binary = 'target/${{ matrix.target }}/release/sunox.exe'
-          & $signTool.FullName sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /sha1 $certificate.Thumbprint $binary
-          if ($LASTEXITCODE -ne 0) { throw 'Authenticode signing failed' }
-          & $signTool.FullName verify /pa /v $binary
-          if ($LASTEXITCODE -ne 0) { throw 'Authenticode verification failed' }
-          Remove-Item "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -Force
-
       - name: Verify Linux compatibility and binary
         if: matrix.kind == 'linux'
         shell: bash
@@ -203,7 +136,6 @@ jobs:
         shell: bash
         run: |
           binary="target/${{ matrix.target }}/release/sunox"
-          codesign --verify --deep --strict --verbose=2 "${binary}"
           "${binary}" --version
 
       - name: Verify Windows binary and static CRT
@@ -217,7 +149,6 @@ jobs:
           $dumpbin = Get-ChildItem "$install\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Sort-Object FullName -Descending | Select-Object -First 1
           $dependencies = (& $dumpbin.FullName /dependents $binary) -join "`n"
           if ($dependencies -match 'VCRUNTIME|MSVCP') { throw 'release binary still depends on the dynamic Visual C++ runtime' }
-          if ((Get-AuthenticodeSignature $binary).Status -ne 'Valid') { throw 'release binary does not have a valid Authenticode signature' }
 
       - name: Package Unix artifact
         if: matrix.kind != 'windows'
@@ -281,7 +212,7 @@ jobs:
         with:
           subject-path: artifacts/**/*
 
-      - name: Create release
+      - name: Create unsigned release
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3
         with:
           body_path: release-notes.md
