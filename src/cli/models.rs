@@ -129,6 +129,24 @@ pub enum RemasterModel {
     V45Plus,
 }
 
+#[derive(ValueEnum, Clone, Debug, Default)]
+pub enum RemasterVariation {
+    Subtle,
+    #[default]
+    Normal,
+    High,
+}
+
+impl RemasterVariation {
+    pub fn to_api_value(&self) -> &'static str {
+        match self {
+            Self::Subtle => "subtle",
+            Self::Normal => "normal",
+            Self::High => "high",
+        }
+    }
+}
+
 impl RemasterModel {
     pub fn to_api_key(&self) -> &'static str {
         match self {

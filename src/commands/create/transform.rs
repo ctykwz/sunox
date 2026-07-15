@@ -88,7 +88,9 @@ pub async fn remaster(args: RemasterArgs, ctx: &AppContext) -> Result<(), CliErr
         eprintln!("Remastering with {model}...");
     }
     let _mutation_guard = ctx.acquire_mutation_lock_for(&client.auth_state_snapshot())?;
-    let clips = client.remaster(&args.clip_id, &model).await?;
+    let clips = client
+        .remaster(&args.clip_id, &model, args.variation.to_api_value())
+        .await?;
     output_clips(&clips, ctx);
     Ok(())
 }

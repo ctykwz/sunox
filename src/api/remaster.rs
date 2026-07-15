@@ -7,7 +7,7 @@ use serde::Serialize;
 struct RemasterRequest<'a> {
     clip_id: &'a str,
     model_name: &'a str,
-    variation_category: &'static str,
+    variation_category: &'a str,
 }
 
 impl SunoClient {
@@ -17,11 +17,12 @@ impl SunoClient {
         &self,
         clip_id: &str,
         remaster_model_key: &str,
+        variation_category: &str,
     ) -> Result<Vec<Clip>, CliError> {
         let req = RemasterRequest {
             clip_id,
             model_name: remaster_model_key,
-            variation_category: "normal",
+            variation_category,
         };
         self.with_auth_retry(|| async {
             let resp = self

@@ -158,8 +158,9 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                 "body": {
                     "clip_id": "<source clip id>",
                     "model_name": "chirp-flounder|chirp-carp|chirp-bass",
-                    "variation_category": "normal"
+                    "variation_category": "subtle|normal|high"
                 },
+                "defaults": "--variation defaults to normal; use subtle to preserve more of the source or high for the strongest variation",
                 "response": "generation response with submitted clips"
             },
             "clip download": {

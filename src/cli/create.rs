@@ -1,4 +1,4 @@
-use super::{CoverModel, ModelVersion, RemasterModel, VocalGender};
+use super::{CoverModel, ModelVersion, RemasterModel, RemasterVariation, VocalGender};
 
 #[derive(clap::Args)]
 pub struct CreateArgs {
@@ -329,6 +329,10 @@ pub struct RemasterArgs {
     /// Remaster model version
     #[arg(long)]
     pub model: Option<RemasterModel>,
+
+    /// How strongly the remaster may vary from the source
+    #[arg(long, value_enum, default_value_t)]
+    pub variation: RemasterVariation,
 }
 
 #[derive(clap::Args)]

@@ -1685,7 +1685,7 @@ async fn remaster_posts_generate_v2_remaster_contract() {
     let client = server.client();
 
     let clips = client
-        .remaster("clip-a", "chirp-flounder")
+        .remaster("clip-a", "chirp-flounder", "high")
         .await
         .expect("remaster");
 
@@ -1698,7 +1698,7 @@ async fn remaster_posts_generate_v2_remaster_contract() {
         serde_json::json!({
             "clip_id": "clip-a",
             "model_name": "chirp-flounder",
-            "variation_category": "normal"
+            "variation_category": "high"
         })
     );
 }

@@ -28,7 +28,7 @@ pub use library::{
     RestoreArgs, SearchArgs, SetArgs, StatusArgs,
 };
 pub use media::{DownloadArgs, DownloadFormat, TimedLyricsArgs, UploadArgs, UploadStatusArgs};
-pub use models::{CoverModel, ModelVersion, RemasterModel, VocalGender};
+pub use models::{CoverModel, ModelVersion, RemasterModel, RemasterVariation, VocalGender};
 pub use persona::{
     PersonaArgs, PersonaClipsArgs, PersonaCommand, PersonaCreateArgs, PersonaDeleteArgs,
     PersonaInfoArgs, PersonaListArgs, PersonaListKind, PersonaLoveArgs, PersonaProcessedClipArgs,

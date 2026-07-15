@@ -86,6 +86,19 @@ fn cover_help_does_not_advertise_the_unverified_free_model() {
 }
 
 #[test]
+fn remaster_help_exposes_variation_strengths() {
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    cmd.args(["clip", "remaster", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--variation <VARIATION>"))
+        .stdout(predicate::str::contains("subtle"))
+        .stdout(predicate::str::contains("normal"))
+        .stdout(predicate::str::contains("high"));
+}
+
+#[test]
 fn clip_help_groups_clip_subcommands() {
     let mut cmd = Command::cargo_bin("sunox").expect("binary");
 
