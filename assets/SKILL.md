@@ -218,7 +218,7 @@ sunox playlist delete <playlist_id> -y
 
 # Cover or remaster an existing clip
 sunox clip cover <clip_id> --tags "jazz, smooth piano" --model v5.5
-sunox clip remaster <clip_id> --model v5.5
+sunox clip remaster <clip_id> --model v5.5 --variation subtle # subtle, normal, or high
 
 # Adjust playback speed while keeping pitch
 sunox clip speed <clip_id> --multiplier 0.94

@@ -475,6 +475,12 @@ Current web remaster route, captured from
   "variation_category": "normal"
 }
 ```
+The July 15, 2026 first-party web bundle still posts the selected value as
+`variation_category`. Suno's current official UI exposes Subtle, Normal
+(default), and High; sunox sends the corresponding lowercase values
+`subtle|normal|high`. The existing HAR directly captures `normal`; the other
+two values were verified from the current first-party UI plus its direct
+pass-through code path, without submitting a paid remaster job.
 Response shape matches generation response with two submitted remaster clips,
 top-level `metadata`, `status`, `batch_size`, and `created_at`.
 
