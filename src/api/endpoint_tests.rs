@@ -1704,6 +1704,28 @@ async fn remaster_posts_generate_v2_remaster_contract() {
 }
 
 #[tokio::test]
+async fn remaster_default_variation_posts_normal() {
+    let server = MockServer::json(
+        r#"{"clips":[{"id":"remaster-1","title":"Remaster","status":"submitted","model_name":"chirp-flounder","created_at":"2026-06-30T00:00:00Z"}]}"#,
+    )
+    .await;
+    let client = server.client();
+
+    client
+        .remaster(
+            "clip-a",
+            "chirp-flounder",
+            crate::cli::RemasterVariation::default().to_api_value(),
+        )
+        .await
+        .expect("remaster");
+
+    let request = server.captured().await;
+    let body = serde_json::from_str::<serde_json::Value>(&request.body).expect("request json");
+    assert_eq!(body["variation_category"], "normal");
+}
+
+#[tokio::test]
 async fn concat_posts_current_web_contract() {
     let server = MockServer::json(
         r#"{"id":"concat-1","title":"Concat","status":"submitted","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z"}"#,

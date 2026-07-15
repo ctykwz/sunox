@@ -131,3 +131,23 @@ pub enum Commands {
     /// Self-update from GitHub Releases
     Update(UpdateArgs),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, ClipCommand, Commands, RemasterVariation};
+    use clap::Parser;
+
+    #[test]
+    fn remaster_defaults_to_normal_variation() {
+        let cli = Cli::try_parse_from(["sunox", "clip", "remaster", "clip-a"])
+            .expect("valid remaster command");
+
+        let Some(Commands::Clip(clip)) = cli.command else {
+            panic!("expected clip command");
+        };
+        let ClipCommand::Remaster(args) = clip.command else {
+            panic!("expected remaster command");
+        };
+        assert!(matches!(args.variation, RemasterVariation::Normal));
+    }
+}
