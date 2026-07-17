@@ -688,6 +688,16 @@ Labs index config. Returns an array of lab config objects with keys such as
 ### GET /api/playlist/me?page={page}
 User's playlists. Returns `{"num_total_results": N, "current_page": N, "playlists": [...]}`.
 
+### GET /api/playlist/v2/{playlist_id}
+The live July 17, 2026 detail response is deferred: its top-level keys are
+`bio`, `deferred_fields`, `metadata`, `relationship`, and `stats`. Identity,
+name, cover, visibility, and `song_count` are inside `metadata`; trash state is
+inside `relationship`; `stats.track_count` is the count fallback. `playlist
+info --json` keeps the existing normalized top-level fields and also returns
+the three nested objects without rebuilding them, preserving unknown fields,
+explicit nulls, and their original nesting. Other unknown top-level fields are
+kept under `extra`.
+
 ### Playlist management routes
 Suno Web bundle exposes these non-Studio playlist operations:
 

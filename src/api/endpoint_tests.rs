@@ -2571,7 +2571,7 @@ async fn list_playlists_gets_me_page_contract() {
 #[tokio::test]
 async fn playlist_detail_reads_v2_cover_metadata_contract() {
     let server = MockServer::json(
-        r#"{"id":"playlist-1","metadata":{"name":"Road Trip","description":"Drive set","cover_url":"https://cdn2.suno.ai/image_upload-1.jpeg","cover_image_s3_id":"image_upload-1","cover_is_user_set":true,"is_public":true}}"#,
+        r#"{"metadata":{"id":"playlist-1","name":"Road Trip","description":"Drive set","cover_url":"https://cdn2.suno.ai/image_upload-1.jpeg","cover_image_s3_id":"image_upload-1","cover_is_user_set":true,"is_public":true,"owner":{"handle":"owner"}},"relationship":{"is_trashed":false,"can_edit":true},"stats":{"track_count":3,"save_count":2},"deferred_fields":[]}"#,
     )
     .await;
     let client = server.client();
@@ -2594,6 +2594,14 @@ async fn playlist_detail_reads_v2_cover_metadata_contract() {
     );
     assert_eq!(playlist.cover_is_user_set, Some(true));
     assert!(playlist.is_public);
+    assert_eq!(playlist.song_count, Some(3));
+    assert_eq!(
+        playlist.metadata.as_ref().unwrap()["owner"]["handle"],
+        "owner"
+    );
+    assert_eq!(playlist.relationship.as_ref().unwrap()["can_edit"], true);
+    assert_eq!(playlist.stats.as_ref().unwrap()["save_count"], 2);
+    assert_eq!(playlist.extra["deferred_fields"], serde_json::json!([]));
 }
 
 #[tokio::test]

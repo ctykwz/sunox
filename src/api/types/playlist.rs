@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
+use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 
 use super::clip::Clip;
 
@@ -29,32 +31,19 @@ pub struct PlaylistInfo {
     pub num_total_results: Option<u64>,
     pub clip_ids: Vec<String>,
     pub playlist_clips: Vec<PlaylistClip>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relationship: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stats: Option<Value>,
     pub extra: BTreeMap<String, serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct PlaylistMetadata {
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub image_url: Option<String>,
-    #[serde(default)]
-    pub cover_url: Option<String>,
-    #[serde(default)]
-    pub cover_image_s3_id: Option<String>,
-    #[serde(default)]
-    pub cover_is_user_set: Option<bool>,
-    #[serde(default)]
-    pub is_public: Option<bool>,
-    #[serde(default)]
-    pub is_trashed: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RawPlaylistInfo {
-    pub id: String,
+    #[serde(default)]
+    pub id: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
@@ -74,7 +63,11 @@ struct RawPlaylistInfo {
     #[serde(default)]
     pub playlist_clips: Vec<PlaylistClip>,
     #[serde(default)]
-    pub metadata: Option<PlaylistMetadata>,
+    pub metadata: Option<Value>,
+    #[serde(default)]
+    relationship: Option<Value>,
+    #[serde(default)]
+    stats: Option<Value>,
     #[serde(default, flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -85,34 +78,67 @@ impl<'de> Deserialize<'de> for PlaylistInfo {
         D: Deserializer<'de>,
     {
         let mut raw = RawPlaylistInfo::deserialize(deserializer)?;
-        let metadata = raw.metadata.take().unwrap_or_default();
-        let cover_url = metadata.cover_url.or_else(|| raw.image_url.clone());
+        let metadata = raw.metadata.take();
+        let relationship = raw.relationship.take();
+        let stats = raw.stats.take();
+        let cover_url =
+            string_field(metadata.as_ref(), "cover_url").or_else(|| raw.image_url.clone());
         let image_url = raw
             .image_url
             .or_else(|| cover_url.clone())
-            .or(metadata.image_url);
+            .or_else(|| string_field(metadata.as_ref(), "image_url"));
 
         Ok(Self {
-            id: raw.id,
+            id: raw
+                .id
+                .or_else(|| string_field(metadata.as_ref(), "id"))
+                .ok_or_else(|| D::Error::missing_field("id"))?,
             name: raw
                 .name
                 .filter(|name| !name.trim().is_empty())
-                .or(metadata.name)
+                .or_else(|| string_field(metadata.as_ref(), "name"))
                 .unwrap_or_default(),
-            description: raw.description.or(metadata.description),
+            description: raw
+                .description
+                .or_else(|| string_field(metadata.as_ref(), "description")),
             image_url,
             cover_url,
-            cover_image_s3_id: metadata.cover_image_s3_id,
-            cover_is_user_set: metadata.cover_is_user_set,
-            is_public: raw.is_public.or(metadata.is_public).unwrap_or(false),
-            is_trashed: raw.is_trashed.or(metadata.is_trashed).unwrap_or(false),
-            song_count: raw.song_count,
+            cover_image_s3_id: string_field(metadata.as_ref(), "cover_image_s3_id"),
+            cover_is_user_set: bool_field(metadata.as_ref(), "cover_is_user_set"),
+            is_public: raw
+                .is_public
+                .or_else(|| bool_field(metadata.as_ref(), "is_public"))
+                .unwrap_or(false),
+            is_trashed: raw
+                .is_trashed
+                .or_else(|| bool_field(metadata.as_ref(), "is_trashed"))
+                .or_else(|| bool_field(relationship.as_ref(), "is_trashed"))
+                .unwrap_or(false),
+            song_count: raw
+                .song_count
+                .or_else(|| u64_field(metadata.as_ref(), "song_count"))
+                .or_else(|| u64_field(stats.as_ref(), "track_count")),
             num_total_results: raw.num_total_results,
             clip_ids: raw.clip_ids,
             playlist_clips: raw.playlist_clips,
+            metadata,
+            relationship,
+            stats,
             extra: raw.extra,
         })
     }
+}
+
+fn string_field(object: Option<&Value>, field: &str) -> Option<String> {
+    object?.get(field)?.as_str().map(ToOwned::to_owned)
+}
+
+fn bool_field(object: Option<&Value>, field: &str) -> Option<bool> {
+    object?.get(field)?.as_bool()
+}
+
+fn u64_field(object: Option<&Value>, field: &str) -> Option<u64> {
+    object?.get(field)?.as_u64()
 }
 
 impl PlaylistInfo {
@@ -316,10 +342,67 @@ pub struct TrashPlaylistRequest {
 #[cfg(test)]
 mod tests {
     use super::{
-        CreatePlaylistRequest, PlaylistReorderRequest, PlaylistTracksRequest,
+        CreatePlaylistRequest, PlaylistInfo, PlaylistReorderRequest, PlaylistTracksRequest,
         SetPlaylistCoverRequest, SetPlaylistMetadataRequest, SetPlaylistReactionRequest,
         SetPlaylistVisibilityRequest, TrashPlaylistRequest,
     };
+
+    #[test]
+    fn playlist_info_accepts_v2_deferred_metadata_shape() {
+        let playlist: PlaylistInfo = serde_json::from_value(serde_json::json!({
+            "metadata": {
+                "id": "playlist-1",
+                "name": "番茄",
+                "description": null,
+                "song_count": 9,
+                "cover_url": "https://cdn2.suno.ai/image_cover.jpeg",
+                "cover_image_s3_id": "image_cover",
+                "cover_is_user_set": false,
+                "is_public": false,
+                "cover_image_grid": ["https://cdn2.suno.ai/image_cover.jpeg"],
+                "owner": {
+                    "display_name": "Owner",
+                    "handle": "owner-handle"
+                },
+                "created_at": "2026-07-16T09:25:33.434Z"
+            },
+            "relationship": {
+                "is_trashed": false,
+                "is_owned": true,
+                "can_edit": true
+            },
+            "stats": {
+                "track_count": 9,
+                "save_count": 2,
+                "total_duration_seconds": 2056
+            },
+            "bio": {},
+            "deferred_fields": []
+        }))
+        .expect("deserialize deferred playlist response");
+
+        assert_eq!(playlist.id, "playlist-1");
+        assert_eq!(playlist.name, "番茄");
+        assert_eq!(playlist.song_count, Some(9));
+        assert_eq!(playlist.clip_count(), 9);
+        assert!(!playlist.is_public);
+        assert!(!playlist.is_trashed);
+
+        let output = serde_json::to_value(&playlist).expect("serialize normalized playlist");
+        assert_eq!(output["metadata"]["owner"]["handle"], "owner-handle");
+        assert!(output["metadata"].get("description").is_some());
+        assert!(output["metadata"]["description"].is_null());
+        assert_eq!(
+            output["metadata"]["cover_image_grid"][0],
+            "https://cdn2.suno.ai/image_cover.jpeg"
+        );
+        assert_eq!(output["relationship"]["is_owned"], true);
+        assert_eq!(output["relationship"]["can_edit"], true);
+        assert_eq!(output["stats"]["save_count"], 2);
+        assert_eq!(output["stats"]["total_duration_seconds"], 2056);
+        assert_eq!(output["extra"]["bio"], serde_json::json!({}));
+        assert_eq!(output["extra"]["deferred_fields"], serde_json::json!([]));
+    }
 
     #[test]
     fn create_playlist_request_matches_web_shape() {
