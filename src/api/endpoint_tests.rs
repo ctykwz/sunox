@@ -2553,7 +2553,7 @@ async fn playlist_reaction_posts_current_web_contract() {
 #[tokio::test]
 async fn list_playlists_gets_me_page_contract() {
     let server = MockServer::json(
-        r#"{"playlists":[{"id":"playlist-1","name":"Road Trip"}],"numTotalResults":1,"currentPage":2}"#,
+        r#"{"playlists":[{"id":"playlist-1","name":"Road Trip","description":null,"is_public":false,"is_trashed":false,"song_count":3,"num_total_results":1,"current_page":2,"playlist_clips":[],"entity_type":"playlist","play_count":42}],"num_total_results":1,"current_page":2}"#,
     )
     .await;
     let client = server.client();
@@ -2561,7 +2561,12 @@ async fn list_playlists_gets_me_page_contract() {
     let response = client.list_playlists(2).await.expect("list playlists");
 
     assert_eq!(response.current_page, 2);
+    assert_eq!(response.num_total_results, 1);
     assert_eq!(response.playlists[0].id, "playlist-1");
+    assert_eq!(response.playlists[0].name, "Road Trip");
+    assert_eq!(response.playlists[0].song_count, Some(3));
+    assert_eq!(response.playlists[0].extra["entity_type"], "playlist");
+    assert_eq!(response.playlists[0].extra["play_count"], 42);
     let request = server.captured().await;
     assert_eq!(request.method, "GET");
     assert_eq!(request.path, "/api/playlist/me?page=2");
