@@ -20,8 +20,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - Preserved complete `metadata`, `relationship`, and `stats` objects from deferred playlist detail
   responses while retaining the existing normalized JSON fields for compatibility.
-- Updated playlist parsing for the current deferred detail schema and live snake_case list schema
-  without dropping unknown response fields.
+- Updated playlist parsing for the current deferred detail schema without dropping unknown response
+  fields, and added contract coverage for the live snake_case list schema.
 - Enforced remaster variation values at the API boundary instead of accepting arbitrary strings.
 
 ## [0.0.16] - 2026-07-13
