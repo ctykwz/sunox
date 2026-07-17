@@ -280,7 +280,7 @@ sunox playlist reorder <playlist_id> --clip-id <clip_id> --index 0
 # 以下のコマンドは submitted/processing の clip を返す場合があります。後続処理の前に wait します
 sunox clip cover <clip_id> --tags "jazz, smooth piano" --model v5.5
 sunox clip inspire <clip_id> --title "New Song" --tags "garage pop" --lyrics-file lyrics.txt
-sunox clip remaster <clip_id> --model v5.5
+sunox clip remaster <clip_id> --model v5.5 --variation subtle # subtle、normal、high
 sunox clip speed <clip_id> --multiplier 0.94
 sunox clip reverse <clip_id>
 sunox clip wait <new_clip_id>

@@ -475,6 +475,12 @@ Current web remaster route, captured from
   "variation_category": "normal"
 }
 ```
+The July 15, 2026 first-party web bundle still posts the selected value as
+`variation_category`. Suno's current official UI exposes Subtle, Normal
+(default), and High; sunox sends the corresponding lowercase values
+`subtle|normal|high`. The existing HAR directly captures `normal`; the other
+two values were verified from the current first-party UI plus its direct
+pass-through code path, without submitting a paid remaster job.
 Response shape matches generation response with two submitted remaster clips,
 top-level `metadata`, `status`, `batch_size`, and `created_at`.
 
@@ -681,6 +687,16 @@ Labs index config. Returns an array of lab config objects with keys such as
 
 ### GET /api/playlist/me?page={page}
 User's playlists. Returns `{"num_total_results": N, "current_page": N, "playlists": [...]}`.
+
+### GET /api/playlist/v2/{playlist_id}
+The live July 17, 2026 detail response is deferred: its top-level keys are
+`bio`, `deferred_fields`, `metadata`, `relationship`, and `stats`. Identity,
+name, cover, visibility, and `song_count` are inside `metadata`; trash state is
+inside `relationship`; `stats.track_count` is the count fallback. `playlist
+info --json` keeps the existing normalized top-level fields and also returns
+the three nested objects without rebuilding them, preserving unknown fields,
+explicit nulls, and their original nesting. Other unknown top-level fields are
+kept under `extra`.
 
 ### Playlist management routes
 Suno Web bundle exposes these non-Studio playlist operations:

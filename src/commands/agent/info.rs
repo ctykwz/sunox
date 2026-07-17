@@ -158,8 +158,9 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                 "body": {
                     "clip_id": "<source clip id>",
                     "model_name": "chirp-flounder|chirp-carp|chirp-bass",
-                    "variation_category": "normal"
+                    "variation_category": "subtle|normal|high"
                 },
+                "defaults": "--variation defaults to normal; use subtle to preserve more of the source or high for the strongest variation",
                 "response": "generation response with submitted clips"
             },
             "clip download": {
@@ -336,6 +337,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                 ],
                 "cover_status": "playlist set/create support --image-file for local image upload; uploaded covers use POST /api/uploads/image/, presigned S3 form upload, POST /api/uploads/image/{id}/upload-finish/, then PATCH /api/playlist/v2/{id} with metadata.cover_url, metadata.cover_image_s3_id, and metadata.cover_is_user_set=true",
                 "cover_url_status": "playlist set --image-url accepts existing Suno uploaded image URLs such as https://cdn2.suno.ai/image_<upload_id>.jpeg and maps them to the same v2 cover metadata patch; arbitrary external URLs still use the legacy set_metadata route",
+                "info_json_shape": "playlist info keeps normalized top-level fields for compatibility and also preserves the complete metadata, relationship, and stats objects from the v2 response; unknown top-level response fields remain under extra",
                 "multi_step_failure": "playlist create/set expose completed_steps, playlist_id, and failed.step/code/message through partial_mutation when an earlier server mutation succeeded",
                 "remove_status": "playlist remove accepts multiple clip IDs but submits one POST /api/playlist/v2/{playlist_id}/tracks/remove request per clip ID because larger batch remove requests can return Suno 500s. If a later item fails, the command returns partial_mutation with error.details containing requested_clip_ids, succeeded_clip_ids, failed, and not_attempted_clip_ids."
             }

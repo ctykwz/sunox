@@ -332,8 +332,9 @@ Create covers, remaster clips, or apply non-generation clip edits:
 sunox clip cover <clip_id> --tags "jazz, smooth piano" --model v5.5
 sunox clip inspire <clip_id> --title "New Song" --tags "garage pop" --lyrics-file lyrics.txt
 
-# Remaster an old clip with the latest model
-sunox clip remaster <clip_id> --model v5.5
+# Remaster an old clip with the latest model. Variation defaults to normal.
+sunox clip remaster <clip_id> --model v5.5 --variation subtle
+sunox clip remaster <clip_id> --model v5.5 --variation high
 sunox clip wait <new_clip_id>
 sunox clip download <new_clip_id> --output ./remastered/
 

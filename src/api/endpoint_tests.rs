@@ -1685,7 +1685,11 @@ async fn remaster_posts_generate_v2_remaster_contract() {
     let client = server.client();
 
     let clips = client
-        .remaster("clip-a", "chirp-flounder")
+        .remaster(
+            "clip-a",
+            "chirp-flounder",
+            crate::api::types::RemasterVariation::High,
+        )
         .await
         .expect("remaster");
 
@@ -1698,9 +1702,31 @@ async fn remaster_posts_generate_v2_remaster_contract() {
         serde_json::json!({
             "clip_id": "clip-a",
             "model_name": "chirp-flounder",
-            "variation_category": "normal"
+            "variation_category": "high"
         })
     );
+}
+
+#[tokio::test]
+async fn remaster_default_variation_posts_normal() {
+    let server = MockServer::json(
+        r#"{"clips":[{"id":"remaster-1","title":"Remaster","status":"submitted","model_name":"chirp-flounder","created_at":"2026-06-30T00:00:00Z"}]}"#,
+    )
+    .await;
+    let client = server.client();
+
+    client
+        .remaster(
+            "clip-a",
+            "chirp-flounder",
+            crate::api::types::RemasterVariation::default(),
+        )
+        .await
+        .expect("remaster");
+
+    let request = server.captured().await;
+    let body = serde_json::from_str::<serde_json::Value>(&request.body).expect("request json");
+    assert_eq!(body["variation_category"], "normal");
 }
 
 #[tokio::test]
@@ -2531,7 +2557,7 @@ async fn playlist_reaction_posts_current_web_contract() {
 #[tokio::test]
 async fn list_playlists_gets_me_page_contract() {
     let server = MockServer::json(
-        r#"{"playlists":[{"id":"playlist-1","name":"Road Trip"}],"numTotalResults":1,"currentPage":2}"#,
+        r#"{"playlists":[{"id":"playlist-1","name":"Road Trip","description":null,"is_public":false,"is_trashed":false,"song_count":3,"num_total_results":1,"current_page":2,"playlist_clips":[],"entity_type":"playlist","play_count":42}],"num_total_results":1,"current_page":2}"#,
     )
     .await;
     let client = server.client();
@@ -2539,7 +2565,12 @@ async fn list_playlists_gets_me_page_contract() {
     let response = client.list_playlists(2).await.expect("list playlists");
 
     assert_eq!(response.current_page, 2);
+    assert_eq!(response.num_total_results, 1);
     assert_eq!(response.playlists[0].id, "playlist-1");
+    assert_eq!(response.playlists[0].name, "Road Trip");
+    assert_eq!(response.playlists[0].song_count, Some(3));
+    assert_eq!(response.playlists[0].extra["entity_type"], "playlist");
+    assert_eq!(response.playlists[0].extra["play_count"], 42);
     let request = server.captured().await;
     assert_eq!(request.method, "GET");
     assert_eq!(request.path, "/api/playlist/me?page=2");
@@ -2549,7 +2580,7 @@ async fn list_playlists_gets_me_page_contract() {
 #[tokio::test]
 async fn playlist_detail_reads_v2_cover_metadata_contract() {
     let server = MockServer::json(
-        r#"{"id":"playlist-1","metadata":{"name":"Road Trip","description":"Drive set","cover_url":"https://cdn2.suno.ai/image_upload-1.jpeg","cover_image_s3_id":"image_upload-1","cover_is_user_set":true,"is_public":true}}"#,
+        r#"{"metadata":{"id":"playlist-1","name":"Road Trip","description":"Drive set","cover_url":"https://cdn2.suno.ai/image_upload-1.jpeg","cover_image_s3_id":"image_upload-1","cover_is_user_set":true,"is_public":true,"owner":{"handle":"owner"}},"relationship":{"is_trashed":false,"can_edit":true},"stats":{"track_count":3,"save_count":2},"deferred_fields":[]}"#,
     )
     .await;
     let client = server.client();
@@ -2572,6 +2603,14 @@ async fn playlist_detail_reads_v2_cover_metadata_contract() {
     );
     assert_eq!(playlist.cover_is_user_set, Some(true));
     assert!(playlist.is_public);
+    assert_eq!(playlist.song_count, Some(3));
+    assert_eq!(
+        playlist.metadata.as_ref().unwrap()["owner"]["handle"],
+        "owner"
+    );
+    assert_eq!(playlist.relationship.as_ref().unwrap()["can_edit"], true);
+    assert_eq!(playlist.stats.as_ref().unwrap()["save_count"], 2);
+    assert_eq!(playlist.extra["deferred_fields"], serde_json::json!([]));
 }
 
 #[tokio::test]
