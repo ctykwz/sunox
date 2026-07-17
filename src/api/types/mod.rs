@@ -27,7 +27,7 @@ pub use feed::{FeedFilters, FeedResponse, FeedV3Request};
 pub use generation::{ControlSliders, GenerateRequest, GenerateResponse, LastTagsGeneration};
 pub use lyrics::{AlignedWord, LyricsResult, LyricsSubmitResponse};
 pub use metadata::{SetMetadataRequest, SetVisibilityRequest};
-pub use operations::ConcatRequest;
+pub use operations::{ConcatRequest, RemasterVariation};
 pub use persona::{
     CreatePersonaRequest, EditPersonaRequest, PersonaClipsResponse, PersonaInfo,
     PersonaListResponse, PersonaListScope, ProcessedClipInfo,

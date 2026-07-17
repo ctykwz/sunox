@@ -1685,7 +1685,11 @@ async fn remaster_posts_generate_v2_remaster_contract() {
     let client = server.client();
 
     let clips = client
-        .remaster("clip-a", "chirp-flounder", "high")
+        .remaster(
+            "clip-a",
+            "chirp-flounder",
+            crate::api::types::RemasterVariation::High,
+        )
         .await
         .expect("remaster");
 
@@ -1715,7 +1719,7 @@ async fn remaster_default_variation_posts_normal() {
         .remaster(
             "clip-a",
             "chirp-flounder",
-            crate::cli::RemasterVariation::default().to_api_value(),
+            crate::api::types::RemasterVariation::default(),
         )
         .await
         .expect("remaster");

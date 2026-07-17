@@ -14,6 +14,7 @@ mod playlist;
 mod update;
 mod wait;
 
+pub use crate::api::types::RemasterVariation;
 pub use agent::{InstallSkillArgs, SkillTarget};
 pub use auth::AuthArgs;
 pub use clip::{ClipArgs, ClipCommand};
@@ -28,7 +29,7 @@ pub use library::{
     RestoreArgs, SearchArgs, SetArgs, StatusArgs,
 };
 pub use media::{DownloadArgs, DownloadFormat, TimedLyricsArgs, UploadArgs, UploadStatusArgs};
-pub use models::{CoverModel, ModelVersion, RemasterModel, RemasterVariation, VocalGender};
+pub use models::{CoverModel, ModelVersion, RemasterModel, VocalGender};
 pub use persona::{
     PersonaArgs, PersonaClipsArgs, PersonaCommand, PersonaCreateArgs, PersonaDeleteArgs,
     PersonaInfoArgs, PersonaListArgs, PersonaListKind, PersonaLoveArgs, PersonaProcessedClipArgs,

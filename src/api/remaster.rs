@@ -1,5 +1,5 @@
 use super::SunoClient;
-use super::types::{Clip, GenerateResponse};
+use super::types::{Clip, GenerateResponse, RemasterVariation};
 use crate::core::CliError;
 use serde::Serialize;
 
@@ -7,7 +7,7 @@ use serde::Serialize;
 struct RemasterRequest<'a> {
     clip_id: &'a str,
     model_name: &'a str,
-    variation_category: &'a str,
+    variation_category: RemasterVariation,
 }
 
 impl SunoClient {
@@ -17,7 +17,7 @@ impl SunoClient {
         &self,
         clip_id: &str,
         remaster_model_key: &str,
-        variation_category: &str,
+        variation_category: RemasterVariation,
     ) -> Result<Vec<Clip>, CliError> {
         let req = RemasterRequest {
             clip_id,
