@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::core::CliError;
 
@@ -11,8 +11,8 @@ enum TargetOs {
     Windows,
 }
 
-pub fn locate_chromium_browser() -> Result<String, CliError> {
-    if let Some(path) = configured_browser_path(|key| std::env::var(key).ok())? {
+pub fn locate_chromium_browser() -> Result<PathBuf, CliError> {
+    if let Some(path) = configured_browser_path(|key| std::env::var_os(key))? {
         return Ok(path);
     }
 
@@ -20,7 +20,7 @@ pub fn locate_chromium_browser() -> Result<String, CliError> {
         std::env::var_os(key).map(PathBuf::from)
     }) {
         if candidate.exists() {
-            return Ok(candidate.display().to_string());
+            return Ok(candidate);
         }
     }
 
@@ -30,23 +30,28 @@ pub fn locate_chromium_browser() -> Result<String, CliError> {
     ))
 }
 
-fn configured_browser_path<F>(env_var: F) -> Result<Option<String>, CliError>
+fn configured_browser_path<F>(env_var: F) -> Result<Option<PathBuf>, CliError>
 where
-    F: Fn(&str) -> Option<String>,
+    F: Fn(&str) -> Option<std::ffi::OsString>,
 {
     let Some(path) = env_var(BROWSER_PATH_ENV) else {
         return Ok(None);
     };
-    let path = path.trim();
-    if path.is_empty() {
+    let path = path
+        .to_str()
+        .map(str::trim)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(path));
+    if path.as_os_str().is_empty() {
         return Ok(None);
     }
-    if Path::new(path).exists() {
-        return Ok(Some(path.to_string()));
+    if path.exists() {
+        return Ok(Some(path));
     }
 
     Err(CliError::Config(format!(
-        "{BROWSER_PATH_ENV} points to a missing file: {path}"
+        "{BROWSER_PATH_ENV} points to a missing file: {}",
+        path.display()
     )))
 }
 
@@ -89,20 +94,30 @@ where
         TargetOs::Windows => {
             let mut candidates = Vec::new();
             if let Some(local_app_data) = env_var("LOCALAPPDATA") {
-                candidates.push(PathBuf::from(format!(
-                    r"{}\Google\Chrome\Application\chrome.exe",
-                    local_app_data.display()
-                )));
-                candidates.push(PathBuf::from(format!(
-                    r"{}\Microsoft\Edge\Application\msedge.exe",
-                    local_app_data.display()
-                )));
+                candidates.extend([
+                    local_app_data.join(r"Google\Chrome\Application\chrome.exe"),
+                    local_app_data.join(r"Google\Chrome Beta\Application\chrome.exe"),
+                    local_app_data.join(r"Google\Chrome Dev\Application\chrome.exe"),
+                    local_app_data.join(r"Google\Chrome SxS\Application\chrome.exe"),
+                    local_app_data.join(r"Microsoft\Edge\Application\msedge.exe"),
+                    local_app_data.join(r"Microsoft\Edge Beta\Application\msedge.exe"),
+                    local_app_data.join(r"Microsoft\Edge Dev\Application\msedge.exe"),
+                    local_app_data.join(r"Microsoft\Edge SxS\Application\msedge.exe"),
+                    local_app_data.join(r"BraveSoftware\Brave-Browser\Application\brave.exe"),
+                    local_app_data.join(r"Chromium\Application\chrome.exe"),
+                ]);
             }
             candidates.extend([
                 PathBuf::from(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
                 PathBuf::from(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
                 PathBuf::from(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
                 PathBuf::from(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+                PathBuf::from(
+                    r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+                ),
+                PathBuf::from(
+                    r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
+                ),
             ]);
             candidates
         }
@@ -120,13 +135,13 @@ mod tests {
         std::fs::write(&browser_path, "").expect("browser stub");
 
         let configured = configured_browser_path(|key| match key {
-            "SUNOX_BROWSER_PATH" => Some(browser_path.display().to_string()),
+            "SUNOX_BROWSER_PATH" => Some(browser_path.clone().into_os_string()),
             _ => None,
         })
         .expect("configured path")
         .expect("path");
 
-        assert_eq!(configured, browser_path.display().to_string());
+        assert_eq!(configured, browser_path);
         let _ = std::fs::remove_file(browser_path);
     }
 
@@ -137,12 +152,28 @@ mod tests {
         std::fs::write(&browser_path, "").expect("browser stub");
 
         let configured = configured_browser_path(|key| match key {
-            "SUNO_BROWSER_PATH" => Some(browser_path.display().to_string()),
+            "SUNO_BROWSER_PATH" => Some(browser_path.clone().into_os_string()),
             _ => None,
         })
         .expect("configured path");
 
         assert!(configured.is_none());
+        let _ = std::fs::remove_file(browser_path);
+    }
+
+    #[test]
+    fn browser_path_env_trims_accidental_whitespace() {
+        let browser_path =
+            std::env::temp_dir().join(format!("sunox-browser-path-test-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&browser_path, "").expect("browser stub");
+        let configured = configured_browser_path(|key| match key {
+            "SUNOX_BROWSER_PATH" => Some(format!("  {}  ", browser_path.display()).into()),
+            _ => None,
+        })
+        .expect("configured path")
+        .expect("path");
+
+        assert_eq!(configured, browser_path);
         let _ = std::fs::remove_file(browser_path);
     }
 
@@ -176,6 +207,27 @@ mod tests {
         )));
         assert!(candidates.contains(&PathBuf::from(
             r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+        )));
+        assert!(candidates.contains(&PathBuf::from(
+            r"C:\Users\alice\AppData\Local\Microsoft\Edge Beta\Application\msedge.exe"
+        )));
+    }
+
+    #[test]
+    fn windows_browser_candidates_include_brave_chromium_and_preview_channels() {
+        let candidates = chromium_browser_candidates(TargetOs::Windows, |key| match key {
+            "LOCALAPPDATA" => Some(PathBuf::from(r"C:\Users\alice\AppData\Local")),
+            _ => None,
+        });
+
+        assert!(candidates.contains(&PathBuf::from(
+            r"C:\Users\alice\AppData\Local\BraveSoftware\Brave-Browser\Application\brave.exe"
+        )));
+        assert!(candidates.contains(&PathBuf::from(
+            r"C:\Users\alice\AppData\Local\Chromium\Application\chrome.exe"
+        )));
+        assert!(candidates.contains(&PathBuf::from(
+            r"C:\Users\alice\AppData\Local\Google\Chrome Dev\Application\chrome.exe"
         )));
     }
 

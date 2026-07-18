@@ -4,6 +4,7 @@ use crate::core::CliError;
 use crate::output::{self, OutputFormat};
 
 pub async fn run(args: UpdateArgs, ctx: &AppContext) -> Result<(), CliError> {
+    let _proxy_guard = crate::net::proxy::UpdateProxyEnvGuard::activate();
     let current = env!("CARGO_PKG_VERSION");
     let updater = build_updater(current, !ctx.quiet, |_| {})?;
 
@@ -56,6 +57,7 @@ pub async fn run(args: UpdateArgs, ctx: &AppContext) -> Result<(), CliError> {
         } else {
             format!("v{}", latest.version())
         };
+        ensure_install_directory_writable()?;
         let verified_updater = build_updater(current, !ctx.quiet, |builder| {
             builder
                 .release_tag(release_tag)
@@ -74,6 +76,24 @@ pub async fn run(args: UpdateArgs, ctx: &AppContext) -> Result<(), CliError> {
         output_update_result(current, &v, v == current, ctx);
     }
 
+    Ok(())
+}
+
+fn ensure_install_directory_writable() -> Result<(), CliError> {
+    let executable = std::env::current_exe()
+        .map_err(|error| CliError::Update(format!("cannot locate current executable: {error}")))?;
+    let install_dir = executable.parent().ok_or_else(|| {
+        CliError::Update("current executable has no parent installation directory".into())
+    })?;
+    tempfile::Builder::new()
+        .prefix(".sunox-update-write-test-")
+        .tempfile_in(install_dir)
+        .map_err(|error| {
+            CliError::Update(format!(
+                "installation directory is not writable ({}): {error}. Re-run from an elevated terminal or install sunox in a user-writable directory",
+                install_dir.display()
+            ))
+        })?;
     Ok(())
 }
 
@@ -156,6 +176,13 @@ fn build_updater(
         .show_download_progress(show_download_progress)
         .no_confirm(true)
         .current_version(current);
+    if let Some(token) = ["GITHUB_TOKEN", "GH_TOKEN"].into_iter().find_map(|key| {
+        std::env::var(key)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    }) {
+        builder.auth_token(token);
+    }
     configure(&mut builder);
     builder
         .build()
@@ -251,6 +278,7 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  sunox-x86_64-p
             "x86_64-unknown-linux-gnu",
             "aarch64-unknown-linux-gnu",
             "x86_64-pc-windows-msvc",
+            "aarch64-pc-windows-msvc",
         ];
         let assets = targets
             .iter()

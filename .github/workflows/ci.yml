@@ -63,6 +63,30 @@ jobs:
           toolchain: stable
       - run: cargo test --locked
 
+  windows-arm64-build:
+    name: windows-arm64-build
+    if: github.event_name != 'schedule'
+    runs-on: windows-2022
+    timeout-minutes: 30
+    env:
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+          targets: aarch64-pc-windows-msvc
+      - run: cargo build --release --locked --target aarch64-pc-windows-msvc
+      - name: Verify static CRT dependencies
+        shell: pwsh
+        run: |
+          $binary = 'target/aarch64-pc-windows-msvc/release/sunox.exe'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $install = & $vswhere -latest -products * -property installationPath
+          $dumpbin = Get-ChildItem "$install\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          $dependencies = (& $dumpbin.FullName /dependents $binary) -join "`n"
+          if ($dependencies -match 'VCRUNTIME|MSVCP') { throw 'ARM64 binary still depends on the dynamic Visual C++ runtime' }
+
   security:
     runs-on: ubuntu-24.04
     timeout-minutes: 15

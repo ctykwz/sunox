@@ -49,18 +49,22 @@ pub async fn run(args: AuthArgs, ctx: &AppContext) -> Result<(), CliError> {
         auth::refresh_state_explicit(&http, &mut state).await?;
     } else if should_login {
         eprintln!("Extracting Suno session from your browser...");
-        let browser_auth = extract_browser_auth_with_fallback(
+        let login = extract_browser_auth_with_fallback(
             auth::extract_browser_auth,
             auth::extract_interactive_browser_auth,
         )
         .await?;
 
-        let http = crate::net::http::browser_client()?;
-        eprintln!("Exchanging for access token via Clerk...");
-        let (session_id, jwt) =
-            auth::clerk_token_exchange(&http, &browser_auth.clerk_client_cookie).await?;
+        let (session_id, jwt) = match login.verified_clerk {
+            Some(verified) => (verified.session_id, verified.jwt),
+            None => {
+                let http = crate::net::http::browser_client()?;
+                eprintln!("Exchanging for access token via Clerk...");
+                auth::clerk_token_exchange(&http, &login.browser_auth.clerk_client_cookie).await?
+            }
+        };
 
-        store_browser_auth_state(&mut state, browser_auth, session_id, jwt);
+        store_browser_auth_state(&mut state, login.browser_auth, session_id, jwt);
     } else if let Some(cookie) = cookie_input.as_deref() {
         let browser_auth = auth::normalize_cookie_input(cookie)?;
         let http = crate::net::http::browser_client()?;
@@ -156,24 +160,42 @@ fn read_secret_input(
 async fn extract_browser_auth_with_fallback<C, I, Fut>(
     browser_cookie_probe: C,
     interactive_login: I,
-) -> Result<BrowserAuth, CliError>
+) -> Result<LoginAuth, CliError>
 where
     C: FnOnce() -> Result<BrowserAuth, CliError>,
     I: FnOnce() -> Fut,
-    Fut: Future<Output = Result<BrowserAuth, CliError>>,
+    Fut: Future<Output = Result<(BrowserAuth, String, String), CliError>>,
 {
     match browser_cookie_probe() {
-        Ok(auth) => Ok(auth),
+        Ok(browser_auth) => Ok(LoginAuth {
+            browser_auth,
+            verified_clerk: None,
+        }),
         Err(cookie_error) => {
             eprintln!("Browser cookie extraction failed: {cookie_error}");
             eprintln!("Falling back to interactive browser login...");
-            interactive_login().await.map_err(|interactive_error| {
-                CliError::Config(format!(
-                    "browser cookie extraction failed ({cookie_error}); interactive browser login failed ({interactive_error})"
-                ))
+            let (browser_auth, session_id, jwt) =
+                interactive_login().await.map_err(|interactive_error| {
+                    CliError::Config(format!(
+                        "browser cookie extraction failed ({cookie_error}); interactive browser login failed ({interactive_error})"
+                    ))
+                })?;
+            Ok(LoginAuth {
+                browser_auth,
+                verified_clerk: Some(VerifiedClerkSession { session_id, jwt }),
             })
         }
     }
+}
+
+struct LoginAuth {
+    browser_auth: BrowserAuth,
+    verified_clerk: Option<VerifiedClerkSession>,
+}
+
+struct VerifiedClerkSession {
+    session_id: String,
+    jwt: String,
 }
 
 fn store_browser_auth_state(
@@ -228,13 +250,18 @@ mod tests {
             || Ok(auth_with_client("browser-cookie")),
             || async {
                 interactive_called.set(true);
-                Ok(auth_with_client("interactive"))
+                Ok((
+                    auth_with_client("interactive"),
+                    "session".into(),
+                    "jwt".into(),
+                ))
             },
         )
         .await
         .expect("auth");
 
-        assert_eq!(auth.clerk_client_cookie, "browser-cookie");
+        assert_eq!(auth.browser_auth.clerk_client_cookie, "browser-cookie");
+        assert!(auth.verified_clerk.is_none());
         assert!(!interactive_called.get());
     }
 
@@ -253,12 +280,18 @@ mod tests {
                     }),
                 })
             },
-            || async { Ok(auth_with_client("interactive")) },
+            || async {
+                Ok((
+                    auth_with_client("interactive"),
+                    "session".into(),
+                    "jwt".into(),
+                ))
+            },
         )
         .await
         .expect("auth");
 
-        let environment = auth.browser_environment.expect("environment");
+        let environment = auth.browser_auth.browser_environment.expect("environment");
         assert_eq!(environment.browser_source.as_deref(), Some("chrome"));
         assert_eq!(
             environment.accept_language.as_deref(),
@@ -270,12 +303,21 @@ mod tests {
     async fn login_auth_falls_back_to_interactive_browser_when_cookie_probe_fails() {
         let auth = extract_browser_auth_with_fallback(
             || Err(CliError::Config("cookie blocked".into())),
-            || async { Ok(auth_with_client("interactive")) },
+            || async {
+                Ok((
+                    auth_with_client("interactive"),
+                    "verified-session".into(),
+                    "verified-jwt".into(),
+                ))
+            },
         )
         .await
         .expect("auth");
 
-        assert_eq!(auth.clerk_client_cookie, "interactive");
+        assert_eq!(auth.browser_auth.clerk_client_cookie, "interactive");
+        let verified = auth.verified_clerk.expect("verified Clerk session");
+        assert_eq!(verified.session_id, "verified-session");
+        assert_eq!(verified.jwt, "verified-jwt");
     }
 
     #[test]

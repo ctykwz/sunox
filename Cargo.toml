@@ -1,6 +1,6 @@
 [package]
 name = "sunox"
-version = "0.0.17"
+version = "0.0.18"
 edition = "2024"
 rust-version = "1.88"
 description = "Generate AI music from your terminal via direct Suno web workflows"
@@ -39,6 +39,10 @@ uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
 self_update = { version = "1.0.0-rc.3", default-features = false, features = ["ureq", "rustls", "progress-bar", "github", "checksums", "compression-tar-gz", "compression-zip-deflate"] }
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
+
+[target.'cfg(windows)'.dependencies]
+reqwest = { version = "0.12", features = ["system-proxy"], default-features = false }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 assert_cmd = "2"

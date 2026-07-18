@@ -149,7 +149,7 @@ pub(crate) fn non_empty_header_value(value: Option<&str>) -> Option<String> {
     }
 }
 
-fn chromium_user_data_dirs(browser_source: &str) -> Vec<PathBuf> {
+pub(super) fn chromium_user_data_dirs(browser_source: &str) -> Vec<PathBuf> {
     let Some(base_dirs) = directories::BaseDirs::new() else {
         return Vec::new();
     };
@@ -169,24 +169,37 @@ fn chromium_user_data_dirs(browser_source: &str) -> Vec<PathBuf> {
             return Vec::new();
         };
         match browser_source {
-            "chrome" => vec![
-                local_app_data
-                    .join("Google")
-                    .join("Chrome")
-                    .join("User Data"),
-            ],
-            "edge" => vec![
-                local_app_data
-                    .join("Microsoft")
-                    .join("Edge")
-                    .join("User Data"),
-            ],
-            "brave" => vec![
+            "chrome" => ["Chrome", "Chrome Beta", "Chrome Dev", "Chrome SxS"]
+                .into_iter()
+                .map(|channel| {
+                    local_app_data
+                        .join("Google")
+                        .join(channel)
+                        .join("User Data")
+                })
+                .collect(),
+            "edge" => ["Edge", "Edge Beta", "Edge Dev", "Edge SxS"]
+                .into_iter()
+                .map(|channel| {
+                    local_app_data
+                        .join("Microsoft")
+                        .join(channel)
+                        .join("User Data")
+                })
+                .collect(),
+            "brave" => [
+                "Brave-Browser",
+                "Brave-Browser-Beta",
+                "Brave-Browser-Nightly",
+            ]
+            .into_iter()
+            .map(|channel| {
                 local_app_data
                     .join("BraveSoftware")
-                    .join("Brave-Browser")
-                    .join("User Data"),
-            ],
+                    .join(channel)
+                    .join("User Data")
+            })
+            .collect(),
             _ => Vec::new(),
         }
     } else {

@@ -5,6 +5,7 @@ use tokio::time::sleep;
 
 use crate::captcha::CDP_HOST;
 use crate::core::CliError;
+use crate::net::http;
 
 #[derive(Debug, Deserialize)]
 pub(in crate::captcha) struct Target {
@@ -17,7 +18,7 @@ pub(in crate::captcha) struct Target {
 
 pub(in crate::captcha) async fn cdp_version(port: u16) -> Result<serde_json::Value, CliError> {
     let url = format!("http://{CDP_HOST}:{port}/json/version");
-    let resp = reqwest::Client::new()
+    let resp = http::loopback_client()?
         .get(&url)
         .timeout(Duration::from_secs(2))
         .send()
@@ -32,7 +33,7 @@ pub(in crate::captcha) async fn cdp_version(port: u16) -> Result<serde_json::Val
 
 async fn cdp_list(port: u16) -> Result<Vec<Target>, CliError> {
     let url = format!("http://{CDP_HOST}:{port}/json/list");
-    let resp = reqwest::Client::new()
+    let resp = http::loopback_client()?
         .get(&url)
         .timeout(Duration::from_secs(5))
         .send()
@@ -61,7 +62,7 @@ pub(in crate::captcha) async fn find_or_create_suno_tab(port: u16) -> Result<Tar
         "http://{CDP_HOST}:{port}/json/new?{}",
         urlencode("about:blank")
     );
-    let resp = reqwest::Client::new()
+    let resp = http::loopback_client()?
         .put(&url)
         .timeout(Duration::from_secs(10))
         .send()

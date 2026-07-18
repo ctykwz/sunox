@@ -19,18 +19,19 @@ pub(crate) const BROWSER_USER_AGENT: &str =
 pub(crate) const BROWSER_ACCEPT_LANGUAGE: &str = "en";
 
 pub fn browser_client() -> Result<Client, CliError> {
-    Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .user_agent(BROWSER_USER_AGENT)
-        .build()
-        .map_err(|e| CliError::Config(format!("HTTP client: {e}")))
+    crate::net::proxy::apply_to_client_builder(
+        Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .user_agent(BROWSER_USER_AGENT),
+    )?
+    .build()
+    .map_err(|e| CliError::Config(format!("HTTP client: {e}")))
 }
 
 /// CDN media can legitimately take longer than an API response. Keep the
 /// connection bounded but do not impose Reqwest's total-body deadline.
 pub fn download_client() -> Result<Client, CliError> {
-    Client::builder()
-        .connect_timeout(REQUEST_TIMEOUT)
+    crate::net::proxy::apply_to_client_builder(Client::builder().connect_timeout(REQUEST_TIMEOUT))?
         .build()
         .map_err(|e| CliError::Config(format!("HTTP client: {e}")))
 }
@@ -39,10 +40,21 @@ pub fn download_client() -> Result<Client, CliError> {
 /// idle-read, and total deadlines explicit without inheriting the API's 30s
 /// total timeout.
 pub fn transfer_client() -> Result<Client, CliError> {
+    crate::net::proxy::apply_to_client_builder(
+        Client::builder()
+            .connect_timeout(REQUEST_TIMEOUT)
+            .read_timeout(TRANSFER_IDLE_TIMEOUT)
+            .timeout(TRANSFER_TIMEOUT),
+    )?
+    .build()
+    .map_err(|e| CliError::Config(format!("HTTP transfer client: {e}")))
+}
+
+/// Browser control endpoints are always owned loopback services. Never allow
+/// environment or operating-system proxy settings to intercept CDP traffic.
+pub fn loopback_client() -> Result<Client, CliError> {
     Client::builder()
-        .connect_timeout(REQUEST_TIMEOUT)
-        .read_timeout(TRANSFER_IDLE_TIMEOUT)
-        .timeout(TRANSFER_TIMEOUT)
+        .no_proxy()
         .build()
-        .map_err(|e| CliError::Config(format!("HTTP transfer client: {e}")))
+        .map_err(|e| CliError::Config(format!("loopback HTTP client: {e}")))
 }

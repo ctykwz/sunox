@@ -11,6 +11,9 @@ use crate::core::CliError;
 use super::refresh_lock::AuthStateLockGuard;
 use super::types::BrowserEnvironment;
 
+#[cfg(windows)]
+const WINDOWS_AUTH_PREFIX: &[u8] = b"sunox-dpapi-v1\n";
+
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq)]
 pub struct AuthState {
     pub jwt: Option<String>,
@@ -25,11 +28,7 @@ pub struct AuthState {
 impl AuthState {
     pub fn load() -> Result<Self, CliError> {
         let path = Self::path()?;
-        if !path.exists() {
-            return Err(CliError::AuthMissing);
-        }
-        let data = std::fs::read_to_string(&path)?;
-        serde_json::from_str(&data).map_err(|e| CliError::Config(format!("corrupt auth file: {e}")))
+        Self::load_from_path(&path)
     }
 
     pub(crate) fn save_after_refresh(&self, expected: &Self) -> Result<(), CliError> {
@@ -109,15 +108,18 @@ impl AuthState {
         if !path.exists() {
             return Err(CliError::AuthMissing);
         }
-        let data = std::fs::read_to_string(path)?;
-        serde_json::from_str(&data).map_err(|e| CliError::Config(format!("corrupt auth file: {e}")))
+        let stored = std::fs::read(path)?;
+        let data = decode_auth_file(&stored)?;
+        serde_json::from_slice(&data)
+            .map_err(|e| CliError::Config(format!("corrupt auth file: {e}")))
     }
 
     fn save_to_path(&self, path: &Path) -> Result<(), CliError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let data = serde_json::to_string_pretty(self)?;
+        let data = serde_json::to_vec_pretty(self)?;
+        let stored = encode_auth_file(&data)?;
         let tmp = path.with_extension(format!(
             "json.{}.{}.tmp",
             std::process::id(),
@@ -134,13 +136,19 @@ impl AuthState {
                 .write(true)
                 .mode(0o600)
                 .open(&tmp)?;
-            file.write_all(data.as_bytes())?;
+            file.write_all(&stored)?;
             file.sync_all()?;
         }
 
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            std::fs::write(&tmp, &data)?;
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&tmp)?;
+            file.write_all(&stored)?;
+            file.sync_all()?;
         }
 
         std::fs::rename(&tmp, path)?;
@@ -248,6 +256,106 @@ impl AuthState {
     }
 }
 
+#[cfg(not(windows))]
+fn encode_auth_file(data: &[u8]) -> Result<Vec<u8>, CliError> {
+    Ok(data.to_vec())
+}
+
+#[cfg(not(windows))]
+fn decode_auth_file(data: &[u8]) -> Result<Vec<u8>, CliError> {
+    Ok(data.to_vec())
+}
+
+#[cfg(windows)]
+fn encode_auth_file(data: &[u8]) -> Result<Vec<u8>, CliError> {
+    use std::ptr::null;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Cryptography::{
+        CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData,
+    };
+
+    let data_len = u32::try_from(data.len())
+        .map_err(|_| CliError::Config("auth state is too large to protect with DPAPI".into()))?;
+    let input = CRYPT_INTEGER_BLOB {
+        cbData: data_len,
+        pbData: data.as_ptr().cast_mut(),
+    };
+    let mut output = CRYPT_INTEGER_BLOB::default();
+    let ok = unsafe {
+        CryptProtectData(
+            &input,
+            null(),
+            null(),
+            null(),
+            null(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut output,
+        )
+    };
+    if ok == 0 {
+        return Err(CliError::Config(format!(
+            "could not protect auth state with Windows DPAPI: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let encrypted = unsafe {
+        let bytes = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
+        LocalFree(output.pbData.cast());
+        bytes
+    };
+    let mut stored = WINDOWS_AUTH_PREFIX.to_vec();
+    stored.extend_from_slice(BASE64URL.encode(encrypted).as_bytes());
+    Ok(stored)
+}
+
+#[cfg(windows)]
+fn decode_auth_file(data: &[u8]) -> Result<Vec<u8>, CliError> {
+    use std::ptr::{null, null_mut};
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Cryptography::{
+        CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptUnprotectData,
+    };
+
+    // Backward compatibility: old versions stored JSON in plaintext. It is
+    // rewritten in DPAPI format on the next successful refresh/login save.
+    let Some(encoded) = data.strip_prefix(WINDOWS_AUTH_PREFIX) else {
+        return Ok(data.to_vec());
+    };
+    let encrypted = BASE64URL
+        .decode(encoded)
+        .map_err(|error| CliError::Config(format!("corrupt DPAPI auth file encoding: {error}")))?;
+    let encrypted_len = u32::try_from(encrypted.len())
+        .map_err(|_| CliError::Config("protected auth state is too large".into()))?;
+    let input = CRYPT_INTEGER_BLOB {
+        cbData: encrypted_len,
+        pbData: encrypted.as_ptr().cast_mut(),
+    };
+    let mut output = CRYPT_INTEGER_BLOB::default();
+    let ok = unsafe {
+        CryptUnprotectData(
+            &input,
+            null_mut(),
+            null(),
+            null(),
+            null(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut output,
+        )
+    };
+    if ok == 0 {
+        return Err(CliError::Config(format!(
+            "could not decrypt auth state with Windows DPAPI for the current user: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let plaintext = unsafe {
+        let bytes = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
+        LocalFree(output.pbData.cast());
+        bytes
+    };
+    Ok(plaintext)
+}
+
 fn active_auth_changed_error() -> CliError {
     CliError::AuthChanged
 }
@@ -333,8 +441,7 @@ mod tests {
             handle.join().expect("save thread").expect("save result");
         }
 
-        let saved = std::fs::read_to_string(&path).expect("saved auth file");
-        serde_json::from_str::<AuthState>(&saved).expect("valid saved auth json");
+        AuthState::load_from_path(&path).expect("valid saved auth state");
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
@@ -355,8 +462,7 @@ mod tests {
             .expect("locked save");
 
         assert!(lock_path.exists());
-        let saved = std::fs::read_to_string(&path).expect("saved auth file");
-        let saved = serde_json::from_str::<AuthState>(&saved).expect("valid saved auth json");
+        let saved = AuthState::load_from_path(&path).expect("valid saved auth state");
         assert_eq!(saved.jwt, auth.jwt);
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
@@ -646,5 +752,32 @@ mod tests {
         };
 
         assert!(first.matches_account_material(&second));
+    }
+
+    #[test]
+    fn auth_file_codec_round_trips() {
+        let plaintext = br#"{"jwt":"secret-token"}"#;
+        let stored = super::encode_auth_file(plaintext).expect("encode auth state");
+        let decoded = super::decode_auth_file(&stored).expect("decode auth state");
+
+        assert_eq!(decoded, plaintext);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_auth_file_is_dpapi_protected_and_accepts_legacy_json() {
+        let plaintext = br#"{"jwt":"secret-token"}"#;
+        let stored = super::encode_auth_file(plaintext).expect("protect auth state");
+
+        assert!(stored.starts_with(super::WINDOWS_AUTH_PREFIX));
+        assert!(
+            !stored
+                .windows(b"secret-token".len())
+                .any(|part| part == b"secret-token")
+        );
+        assert_eq!(
+            super::decode_auth_file(plaintext).expect("legacy plaintext"),
+            plaintext
+        );
     }
 }

@@ -33,6 +33,17 @@ impl SunoClient {
         })
     }
 
+    /// Build a client for login verification without refreshing or persisting
+    /// authentication. Interactive login uses this while its browser window is
+    /// still open, so only a token accepted by the Suno API completes login.
+    pub(crate) fn new_for_auth_validation(auth: AuthState) -> Result<Self, CliError> {
+        Ok(Self {
+            client: http::browser_client()?,
+            base_url: BASE_URL.to_string(),
+            auth: Mutex::new(auth),
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn new_for_tests(base_url: String, auth: AuthState) -> Result<Self, CliError> {
         Ok(Self {
