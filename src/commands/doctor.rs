@@ -14,6 +14,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Serialize)]
 struct NetworkReport {
     ok: bool,
+    proxy: crate::net::proxy::ProxyReport,
     targets: Vec<NetworkTarget>,
 }
 
@@ -37,11 +38,13 @@ struct ProbeStage {
 }
 
 pub async fn network(ctx: &AppContext, strict: bool) -> Result<(), CliError> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(PROBE_TIMEOUT)
-        .timeout(PROBE_TIMEOUT)
-        .build()
-        .map_err(|error| CliError::Config(format!("network diagnostic client: {error}")))?;
+    let client = crate::net::proxy::apply_to_client_builder(
+        reqwest::Client::builder()
+            .connect_timeout(PROBE_TIMEOUT)
+            .timeout(PROBE_TIMEOUT),
+    )?
+    .build()
+    .map_err(|error| CliError::Config(format!("network diagnostic client: {error}")))?;
     let (auth, api) = tokio::join!(
         probe_target(
             &client,
@@ -59,6 +62,7 @@ pub async fn network(ctx: &AppContext, strict: bool) -> Result<(), CliError> {
     let targets = vec![auth, api];
     let report = NetworkReport {
         ok: network_usable(&targets),
+        proxy: crate::net::proxy::proxy_report(),
         targets,
     };
 
@@ -83,6 +87,16 @@ pub async fn network(ctx: &AppContext, strict: bool) -> Result<(), CliError> {
 }
 
 fn print_network_report(report: &NetworkReport) {
+    eprintln!(
+        "Proxy: {}{}",
+        report.proxy.source,
+        report
+            .proxy
+            .address
+            .as_deref()
+            .map(|address| format!(" ({address})"))
+            .unwrap_or_default()
+    );
     for target in &report.targets {
         eprintln!(
             "{} ({}): DNS {}, direct TCP {}, HTTPS {}",

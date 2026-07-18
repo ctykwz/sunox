@@ -2,6 +2,8 @@ use std::collections::HashSet;
 
 use super::cookie::{is_suno_auth_cookie_domain, is_suno_cookie_domain, sanitize_device_id};
 use super::environment::browser_environment_for_cookie_source;
+#[cfg(windows)]
+use super::environment::chromium_user_data_dirs;
 use super::types::{BrowserAuth, BrowserEnvironment};
 use crate::core::CliError;
 
@@ -14,24 +16,161 @@ pub fn extract_browser_auth() -> Result<BrowserAuth, CliError> {
         ".suno.com".into(),
     ];
 
-    for (display_name, source, result) in [
-        ("Chrome", "chrome", rookie::chrome(Some(domains.clone()))),
-        ("Arc", "arc", rookie::arc(Some(domains.clone()))),
-        ("Brave", "brave", rookie::brave(Some(domains.clone()))),
-        ("Firefox", "firefox", rookie::firefox(Some(domains.clone()))),
-        ("Edge", "edge", rookie::edge(Some(domains.clone()))),
-    ] {
-        if let Ok(cookies) = result
-            && let Some(auth) = browser_auth_from_cookies(source, cookies)
+    let mut diagnostics = Vec::new();
+
+    #[cfg(windows)]
+    for (display_name, source) in [("Chrome", "chrome"), ("Brave", "brave"), ("Edge", "edge")] {
+        if let Some(auth) =
+            probe_windows_chromium_profiles(display_name, source, &domains, &mut diagnostics)
         {
-            eprintln!("Found Suno session in {display_name}");
             return Ok(auth);
         }
     }
 
-    Err(CliError::Config(
-        "No Suno session found in any browser. Log into suno.com first, then retry.".into(),
-    ))
+    #[cfg(not(windows))]
+    {
+        if let Some(auth) = record_probe(
+            "Chrome",
+            "chrome",
+            rookie::chrome(Some(domains.clone())),
+            &mut diagnostics,
+        ) {
+            return Ok(auth);
+        }
+        if let Some(auth) = record_probe(
+            "Brave",
+            "brave",
+            rookie::brave(Some(domains.clone())),
+            &mut diagnostics,
+        ) {
+            return Ok(auth);
+        }
+        if let Some(auth) = record_probe(
+            "Edge",
+            "edge",
+            rookie::edge(Some(domains.clone())),
+            &mut diagnostics,
+        ) {
+            return Ok(auth);
+        }
+    }
+
+    if let Some(auth) = record_probe(
+        "Arc",
+        "arc",
+        rookie::arc(Some(domains.clone())),
+        &mut diagnostics,
+    ) {
+        return Ok(auth);
+    }
+    if let Some(auth) = record_probe(
+        "Firefox",
+        "firefox",
+        rookie::firefox(Some(domains)),
+        &mut diagnostics,
+    ) {
+        return Ok(auth);
+    }
+
+    Err(CliError::Config(format!(
+        "No Suno session found in any browser. Log into suno.com first, then retry. Browser probes: {}",
+        diagnostics.join("; ")
+    )))
+}
+
+fn record_probe<E: std::fmt::Display>(
+    display_name: &str,
+    source: &str,
+    result: Result<Vec<rookie::enums::Cookie>, E>,
+    diagnostics: &mut Vec<String>,
+) -> Option<BrowserAuth> {
+    match result {
+        Ok(cookies) => {
+            let cookie_count = cookies.len();
+            let auth = browser_auth_from_cookies(source, cookies);
+            if auth.is_some() {
+                eprintln!("Found Suno session in {display_name}");
+            } else {
+                diagnostics.push(format!(
+                    "{display_name}: read {cookie_count} matching cookies but found no usable __client"
+                ));
+            }
+            auth
+        }
+        Err(error) => {
+            diagnostics.push(format!("{display_name}: {error}"));
+            None
+        }
+    }
+}
+
+#[cfg(windows)]
+fn probe_windows_chromium_profiles(
+    display_name: &str,
+    source: &str,
+    domains: &[String],
+    diagnostics: &mut Vec<String>,
+) -> Option<BrowserAuth> {
+    let mut found_database = false;
+    for user_data_dir in chromium_user_data_dirs(source) {
+        let key_path = user_data_dir.join("Local State");
+        let Ok(entries) = std::fs::read_dir(&user_data_dir) else {
+            continue;
+        };
+        let mut profiles = entries
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .map(|entry| entry.path())
+            .filter(|profile| profile_cookie_path(profile).is_some())
+            .collect::<Vec<_>>();
+        profiles.sort_by_key(|path| path.file_name().map(ToOwned::to_owned));
+
+        for profile in profiles {
+            let Some(cookie_path) = profile_cookie_path(&profile) else {
+                continue;
+            };
+            found_database = true;
+            let profile_name = profile
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "unknown profile".into());
+            let Some(cookie_path) = cookie_path.to_str() else {
+                diagnostics.push(format!(
+                    "{display_name} {profile_name}: cookie path is not valid Unicode"
+                ));
+                continue;
+            };
+            let Some(key_path) = key_path.to_str() else {
+                diagnostics.push(format!(
+                    "{display_name} {profile_name}: Local State path is not valid Unicode"
+                ));
+                continue;
+            };
+            if let Some(auth) = record_probe(
+                &format!("{display_name} ({profile_name})"),
+                source,
+                rookie::any_browser(cookie_path, Some(domains.to_vec()), Some(key_path)),
+                diagnostics,
+            ) {
+                return Some(auth);
+            }
+        }
+    }
+
+    if !found_database {
+        diagnostics.push(format!("{display_name}: no profile cookie database found"));
+    }
+    None
+}
+
+#[cfg(windows)]
+fn profile_cookie_path(profile: &std::path::Path) -> Option<std::path::PathBuf> {
+    [
+        profile.join("Network").join("Cookies"),
+        profile.join("Cookies"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
 }
 
 fn browser_auth_from_cookies(
@@ -98,6 +237,20 @@ mod tests {
             http_only: true,
             same_site: 0,
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn custom_named_chromium_profile_cookie_database_is_detected() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let profile = temp.path().join("Work Account");
+        std::fs::create_dir_all(profile.join("Network")).expect("profile dir");
+        std::fs::write(profile.join("Network").join("Cookies"), "fixture").expect("cookie fixture");
+
+        assert_eq!(
+            profile_cookie_path(&profile),
+            Some(profile.join("Network").join("Cookies"))
+        );
     }
 
     #[test]

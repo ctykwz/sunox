@@ -11,6 +11,8 @@ mod net;
 mod output;
 mod workflow;
 
+use std::io::Write;
+
 #[tokio::main]
 async fn main() {
     let result = tokio::select! {
@@ -35,6 +37,8 @@ async fn main() {
             eprintln!("Error [{}]: {}", e.error_code(), e);
             eprintln!("Hint: {}", e.suggestion());
         }
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().flush();
         std::process::exit(e.exit_code());
     }
 }

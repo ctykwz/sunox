@@ -1,3 +1,4 @@
+use crate::auth::AuthState;
 use crate::core::CliError;
 
 const CLERK_BASE: &str = "https://auth.suno.com";
@@ -56,11 +57,16 @@ fn clerk_status_code(
 ) -> &'static str {
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
         "clerk_rate_limited"
+    } else if matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        rejected
     } else if status.is_client_error()
         && status != reqwest::StatusCode::REQUEST_TIMEOUT
         && status != reqwest::StatusCode::TOO_EARLY
     {
-        rejected
+        "clerk_request_invalid"
     } else {
         failed
     }
@@ -94,12 +100,14 @@ pub async fn clerk_token_exchange(
         .and_then(|r| {
             r.get("last_active_session_id")
                 .and_then(|s| s.as_str())
+                .filter(|session_id| !session_id.trim().is_empty())
                 .or_else(|| {
                     r.get("sessions")
                         .and_then(|s| s.as_array())
                         .and_then(|sessions| sessions.first())
                         .and_then(|session| session.get("id"))
                         .and_then(|id| id.as_str())
+                        .filter(|session_id| !session_id.trim().is_empty())
                 })
         })
         .ok_or_else(|| CliError::Api {
@@ -137,21 +145,42 @@ pub async fn clerk_refresh_jwt(
     }
 
     let body: serde_json::Value = resp.json().await.map_err(transport_error)?;
-    body.get("jwt")
+    let jwt = body
+        .get("jwt")
         .and_then(|j| j.as_str())
+        .filter(|jwt| !jwt.trim().is_empty())
         .map(String::from)
         .ok_or_else(|| CliError::Api {
             code: "no_jwt",
             message: "Clerk returned no JWT - session may have expired, run `sunox login` again"
                 .into(),
-        })
+        })?;
+    validate_clerk_jwt(jwt)
+}
+
+fn validate_clerk_jwt(jwt: String) -> Result<String, CliError> {
+    let candidate = AuthState {
+        jwt: Some(jwt.clone()),
+        ..AuthState::default()
+    };
+    if candidate.is_jwt_expired() {
+        return Err(CliError::Api {
+            code: "no_jwt",
+            message:
+                "Clerk returned an invalid or expired JWT - keep the login window open and retry"
+                    .into(),
+        });
+    }
+    Ok(jwt)
 }
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
     use reqwest::StatusCode;
 
-    use super::{clerk_status_code, redacted_response_excerpt};
+    use super::{clerk_status_code, redacted_response_excerpt, validate_clerk_jwt};
 
     #[test]
     fn clerk_status_distinguishes_rejection_from_server_failure() {
@@ -171,6 +200,10 @@ mod tests {
             clerk_status_code(StatusCode::REQUEST_TIMEOUT, "rejected", "failed"),
             "failed"
         );
+        assert_eq!(
+            clerk_status_code(StatusCode::NOT_FOUND, "rejected", "failed"),
+            "clerk_request_invalid"
+        );
     }
 
     #[test]
@@ -183,5 +216,17 @@ mod tests {
         assert!(!excerpt.contains("super-secret-cookie"));
         assert!(!excerpt.contains("session-secret"));
         assert!(excerpt.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn clerk_jwt_must_be_well_formed_and_unexpired() {
+        let future_claims = BASE64URL.encode(br#"{"exp":4102444800}"#);
+        let valid = format!("header.{future_claims}.signature");
+        assert_eq!(validate_clerk_jwt(valid.clone()).expect("valid JWT"), valid);
+
+        assert!(validate_clerk_jwt(String::new()).is_err());
+        assert!(validate_clerk_jwt("not-a-jwt".into()).is_err());
+        let expired_claims = BASE64URL.encode(br#"{"exp":1}"#);
+        assert!(validate_clerk_jwt(format!("header.{expired_claims}.signature")).is_err());
     }
 }

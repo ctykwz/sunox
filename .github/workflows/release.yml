@@ -79,6 +79,10 @@ jobs:
             os: windows-2022
             kind: windows
             name: sunox-x86_64-pc-windows-msvc
+          - target: aarch64-pc-windows-msvc
+            os: windows-2022
+            kind: windows
+            name: sunox-aarch64-pc-windows-msvc
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -143,7 +147,9 @@ jobs:
         shell: pwsh
         run: |
           $binary = 'target/${{ matrix.target }}/release/sunox.exe'
-          & $binary --version
+          if ('${{ matrix.target }}' -eq 'x86_64-pc-windows-msvc') {
+            & $binary --version
+          }
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $install = & $vswhere -latest -products * -property installationPath
           $dumpbin = Get-ChildItem "$install\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Sort-Object FullName -Descending | Select-Object -First 1
