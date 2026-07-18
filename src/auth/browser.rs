@@ -1,7 +1,9 @@
 use std::collections::HashSet;
 
 use super::cookie::{is_suno_auth_cookie_domain, is_suno_cookie_domain, sanitize_device_id};
-use super::environment::{browser_environment_for_cookie_source, chromium_user_data_dirs};
+use super::environment::browser_environment_for_cookie_source;
+#[cfg(windows)]
+use super::environment::chromium_user_data_dirs;
 use super::types::{BrowserAuth, BrowserEnvironment};
 use crate::core::CliError;
 

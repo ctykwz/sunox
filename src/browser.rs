@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::core::CliError;
 
@@ -95,16 +95,37 @@ where
             let mut candidates = Vec::new();
             if let Some(local_app_data) = env_var("LOCALAPPDATA") {
                 candidates.extend([
-                    local_app_data.join(r"Google\Chrome\Application\chrome.exe"),
-                    local_app_data.join(r"Google\Chrome Beta\Application\chrome.exe"),
-                    local_app_data.join(r"Google\Chrome Dev\Application\chrome.exe"),
-                    local_app_data.join(r"Google\Chrome SxS\Application\chrome.exe"),
-                    local_app_data.join(r"Microsoft\Edge\Application\msedge.exe"),
-                    local_app_data.join(r"Microsoft\Edge Beta\Application\msedge.exe"),
-                    local_app_data.join(r"Microsoft\Edge Dev\Application\msedge.exe"),
-                    local_app_data.join(r"Microsoft\Edge SxS\Application\msedge.exe"),
-                    local_app_data.join(r"BraveSoftware\Brave-Browser\Application\brave.exe"),
-                    local_app_data.join(r"Chromium\Application\chrome.exe"),
+                    append_windows_path(&local_app_data, r"Google\Chrome\Application\chrome.exe"),
+                    append_windows_path(
+                        &local_app_data,
+                        r"Google\Chrome Beta\Application\chrome.exe",
+                    ),
+                    append_windows_path(
+                        &local_app_data,
+                        r"Google\Chrome Dev\Application\chrome.exe",
+                    ),
+                    append_windows_path(
+                        &local_app_data,
+                        r"Google\Chrome SxS\Application\chrome.exe",
+                    ),
+                    append_windows_path(&local_app_data, r"Microsoft\Edge\Application\msedge.exe"),
+                    append_windows_path(
+                        &local_app_data,
+                        r"Microsoft\Edge Beta\Application\msedge.exe",
+                    ),
+                    append_windows_path(
+                        &local_app_data,
+                        r"Microsoft\Edge Dev\Application\msedge.exe",
+                    ),
+                    append_windows_path(
+                        &local_app_data,
+                        r"Microsoft\Edge SxS\Application\msedge.exe",
+                    ),
+                    append_windows_path(
+                        &local_app_data,
+                        r"BraveSoftware\Brave-Browser\Application\brave.exe",
+                    ),
+                    append_windows_path(&local_app_data, r"Chromium\Application\chrome.exe"),
                 ]);
             }
             candidates.extend([
@@ -122,6 +143,12 @@ where
             candidates
         }
     }
+}
+
+fn append_windows_path(base: &Path, relative: &str) -> PathBuf {
+    let base = base.to_string_lossy();
+    let base = base.trim_end_matches(['\\', '/']);
+    PathBuf::from(format!(r"{base}\{relative}"))
 }
 
 #[cfg(test)]

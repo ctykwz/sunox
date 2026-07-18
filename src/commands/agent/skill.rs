@@ -87,7 +87,9 @@ fn expand_home_path(custom: &str, home: &std::path::Path) -> std::path::PathBuf 
 #[cfg(test)]
 mod tests {
     use super::expand_home_path;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
+    #[cfg(windows)]
+    use std::path::PathBuf;
 
     #[test]
     fn custom_skill_path_expands_both_path_separator_styles() {
