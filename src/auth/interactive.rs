@@ -27,7 +27,7 @@ const LOGIN_URL: &str = "https://suno.com/create";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 const EXISTING_SESSION_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
-const BROWSER_PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const BROWSER_PROCESS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const BROWSER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const BROWSER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const SESSION_VALIDATION_INTERVAL: Duration = Duration::from_secs(10);
@@ -188,16 +188,6 @@ impl OwnedBrowserProcesses {
                 let _ = process.kill();
             }
         }
-    }
-
-    #[cfg(windows)]
-    fn has_visible_window(&mut self) -> bool {
-        let pids = self
-            .active_pids()
-            .into_iter()
-            .map(sysinfo::Pid::as_u32)
-            .collect::<HashSet<_>>();
-        windows_has_visible_window(&pids)
     }
 
     fn disarm(&mut self) {
@@ -445,7 +435,13 @@ async fn run_manual_login_browser(browser_path: &Path, profile_dir: &Path) -> Re
     loop {
         let matching = processes.active_pids();
         #[cfg(windows)]
-        let visible_window = processes.has_visible_window();
+        let visible_window = {
+            let pids = matching
+                .iter()
+                .map(|pid| pid.as_u32())
+                .collect::<HashSet<_>>();
+            windows_has_visible_window(&pids)
+        };
         let child_status = child.try_wait()?;
         if child_status.is_none() || !matching.is_empty() {
             browser_seen = true;

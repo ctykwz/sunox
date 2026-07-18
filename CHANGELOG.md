@@ -7,6 +7,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.0.18] - 2026-07-18
+
+### Added
+
+- Added Windows Internet Settings proxy discovery for Suno API, diagnostics, and self-update
+  requests while keeping loopback CDP traffic direct.
+- Added discovery for common Chrome, Edge, Brave, and Chromium stable/preview installations across
+  Windows, macOS, and Linux, including custom Windows browser profiles.
+- Added Windows ARM64 release artifacts and CI verification for static Visual C++ runtime linkage.
+
+### Fixed
+
+- Made interactive login wait for a verified Clerk JWT and successful Suno API validation before
+  reporting success or closing its dedicated browser session.
+- Reused a verified dedicated login profile across runs, opened manual Google login without remote
+  debugging, and shut down only browser processes owned by that profile.
+- Preserved detailed browser-cookie probe failures instead of silently discarding profile,
+  database, and decryption errors.
+- Protected stored Windows authentication with DPAPI while continuing to read and migrate legacy
+  plaintext auth state.
+- Kept browser discovery, Windows path construction, and conditional imports portable across
+  Linux, macOS, and Windows builds.
+- Reduced interactive-login process polling on Windows to avoid repeated full process-table scans
+  while waiting for the dedicated browser window to close.
+
 ## [0.0.17] - 2026-07-17
 
 ### Added
