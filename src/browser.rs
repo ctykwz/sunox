@@ -72,9 +72,17 @@ where
     match target_os {
         TargetOs::Macos => [
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
+            "/Applications/Google Chrome Dev.app/Contents/MacOS/Google Chrome Dev",
+            "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
             "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            "/Applications/Microsoft Edge Beta.app/Contents/MacOS/Microsoft Edge Beta",
+            "/Applications/Microsoft Edge Dev.app/Contents/MacOS/Microsoft Edge Dev",
+            "/Applications/Microsoft Edge Canary.app/Contents/MacOS/Microsoft Edge Canary",
             "/Applications/Chromium.app/Contents/MacOS/Chromium",
             "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            "/Applications/Brave Browser Beta.app/Contents/MacOS/Brave Browser Beta",
+            "/Applications/Brave Browser Nightly.app/Contents/MacOS/Brave Browser Nightly",
         ]
         .into_iter()
         .map(PathBuf::from)
@@ -82,8 +90,16 @@ where
         TargetOs::Linux => [
             "/usr/bin/google-chrome",
             "/usr/bin/google-chrome-stable",
+            "/usr/bin/google-chrome-beta",
+            "/usr/bin/google-chrome-unstable",
             "/usr/bin/microsoft-edge",
             "/usr/bin/microsoft-edge-stable",
+            "/usr/bin/microsoft-edge-beta",
+            "/usr/bin/microsoft-edge-dev",
+            "/usr/bin/brave-browser",
+            "/usr/bin/brave-browser-stable",
+            "/usr/bin/brave-browser-beta",
+            "/usr/bin/brave-browser-nightly",
             "/usr/bin/chromium",
             "/usr/bin/chromium-browser",
             "/snap/bin/chromium",
@@ -125,6 +141,14 @@ where
                         &local_app_data,
                         r"BraveSoftware\Brave-Browser\Application\brave.exe",
                     ),
+                    append_windows_path(
+                        &local_app_data,
+                        r"BraveSoftware\Brave-Browser-Beta\Application\brave.exe",
+                    ),
+                    append_windows_path(
+                        &local_app_data,
+                        r"BraveSoftware\Brave-Browser-Nightly\Application\brave.exe",
+                    ),
                     append_windows_path(&local_app_data, r"Chromium\Application\chrome.exe"),
                 ]);
             }
@@ -133,11 +157,21 @@ where
                 PathBuf::from(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
                 PathBuf::from(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
                 PathBuf::from(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+                PathBuf::from(r"C:\Program Files\Microsoft\Edge Beta\Application\msedge.exe"),
+                PathBuf::from(r"C:\Program Files\Microsoft\Edge Dev\Application\msedge.exe"),
+                PathBuf::from(r"C:\Program Files (x86)\Microsoft\Edge Beta\Application\msedge.exe"),
+                PathBuf::from(r"C:\Program Files (x86)\Microsoft\Edge Dev\Application\msedge.exe"),
                 PathBuf::from(
                     r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
                 ),
                 PathBuf::from(
                     r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
+                ),
+                PathBuf::from(
+                    r"C:\Program Files\BraveSoftware\Brave-Browser-Beta\Application\brave.exe",
+                ),
+                PathBuf::from(
+                    r"C:\Program Files\BraveSoftware\Brave-Browser-Nightly\Application\brave.exe",
                 ),
             ]);
             candidates
@@ -256,6 +290,9 @@ mod tests {
         assert!(candidates.contains(&PathBuf::from(
             r"C:\Users\alice\AppData\Local\Google\Chrome Dev\Application\chrome.exe"
         )));
+        assert!(candidates.contains(&PathBuf::from(
+            r"C:\Users\alice\AppData\Local\BraveSoftware\Brave-Browser-Nightly\Application\brave.exe"
+        )));
     }
 
     #[test]
@@ -268,5 +305,9 @@ mod tests {
         )));
         assert!(linux.contains(&PathBuf::from("/usr/bin/microsoft-edge")));
         assert!(linux.contains(&PathBuf::from("/usr/bin/microsoft-edge-stable")));
+        assert!(linux.contains(&PathBuf::from("/usr/bin/brave-browser")));
+        assert!(macos.contains(&PathBuf::from(
+            "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary"
+        )));
     }
 }
