@@ -170,16 +170,19 @@ fn replace_directory(staging: tempfile::TempDir, destination: &Path) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    use super::{CONFIG_TEMPLATE, MANIFEST, PAGE, SERVICE_WORKER};
+    use super::{BRIDGE, CONFIG_TEMPLATE, MANIFEST, PAGE, SERVICE_WORKER};
 
     #[test]
     fn extension_assets_share_the_bridge_contract() {
         assert!(MANIFEST.contains("https://suno.com/*"));
         assert!(MANIFEST.contains("http://127.0.0.1/*"));
+        assert!(MANIFEST.contains("\"alarms\""));
         assert!(SERVICE_WORKER.contains("29764"));
         assert!(SERVICE_WORKER.contains("sunox-bridge-server-v1"));
+        assert!(SERVICE_WORKER.contains("chrome.alarms"));
         assert!(SERVICE_WORKER.contains("/v1/challenge/claim"));
         assert!(!SERVICE_WORKER.contains("Authorization"));
+        assert!(BRIDGE.contains("sunox-wake"));
         assert!(PAGE.contains("hcaptcha.execute"));
         assert!(PAGE.contains("turnstile.execute"));
         assert!(CONFIG_TEMPLATE.contains("__SUNOX_BRIDGE_SECRET__"));

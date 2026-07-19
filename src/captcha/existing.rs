@@ -18,7 +18,8 @@ use crate::core::CliError;
 
 const PORT_START: u16 = 29_764;
 const PORT_COUNT: u16 = 8;
-const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(7);
+const ACTIVE_TAB_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
+const BACKGROUND_TAB_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(27);
 const COMPLETION_TIMEOUT: Duration = Duration::from_secs(35);
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_REQUEST_BYTES: usize = 24 * 1024;
@@ -193,11 +194,24 @@ async fn bind_bridge_listener() -> Result<(TcpListener, u16), CliError> {
 }
 
 async fn wait_for_claim(state: &BridgeState) -> bool {
+    if wait_for_claim_signal(state, ACTIVE_TAB_DISCOVERY_TIMEOUT).await {
+        return true;
+    }
+    eprintln!("Waiting for the Chrome extension to wake a background Suno tab...");
+    let _ = wait_for_claim_signal(state, BACKGROUND_TAB_DISCOVERY_TIMEOUT).await;
+    close_discovery(state)
+}
+
+async fn wait_for_claim_signal(state: &BridgeState, duration: Duration) -> bool {
     let notified = state.claimed_notify.notified();
     if state.claim_state.load(Ordering::Acquire) == CLAIMED {
         return true;
     }
-    let _ = timeout(DISCOVERY_TIMEOUT, notified).await;
+    timeout(duration, notified).await.is_ok()
+        && state.claim_state.load(Ordering::Acquire) == CLAIMED
+}
+
+fn close_discovery(state: &BridgeState) -> bool {
     match state.claim_state.compare_exchange(
         CLAIM_PENDING,
         CLAIM_CLOSED,

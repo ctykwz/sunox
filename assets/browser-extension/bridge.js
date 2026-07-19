@@ -62,4 +62,9 @@
 
   poll();
   setInterval(poll, 750);
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message?.type !== "sunox-wake") return false;
+    poll();
+    return false;
+  });
 })();

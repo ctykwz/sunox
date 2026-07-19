@@ -3,6 +3,7 @@ importScripts("config.js");
 const PORTS = Array.from({ length: 8 }, (_, index) => 29764 + index);
 const PROTOCOL_VERSION = 1;
 const REQUEST_TIMEOUT_MS = 350;
+const POLL_ALARM = "sunox-bridge-poll";
 const textEncoder = new TextEncoder();
 let signingKeyPromise;
 let scanInProgress = false;
@@ -187,3 +188,27 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   return false;
 });
+
+async function ensurePollAlarm() {
+  if (await chrome.alarms.get(POLL_ALARM)) return;
+  await chrome.alarms.create(POLL_ALARM, {
+    delayInMinutes: 0.1,
+    periodInMinutes: 0.1
+  });
+}
+
+async function wakeSunoTabs() {
+  const tabs = await chrome.tabs.query({ url: "https://suno.com/*" });
+  await Promise.allSettled(
+    tabs
+      .filter((tab) => Number.isInteger(tab.id))
+      .map((tab) => chrome.tabs.sendMessage(tab.id, { type: "sunox-wake" }))
+  );
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === POLL_ALARM) wakeSunoTabs().catch(() => {});
+});
+chrome.runtime.onInstalled.addListener(() => ensurePollAlarm().catch(() => {}));
+chrome.runtime.onStartup.addListener(() => ensurePollAlarm().catch(() => {}));
+ensurePollAlarm().catch(() => {});
