@@ -68,6 +68,7 @@ fn browser_extension_installer_extracts_a_paired_unpacked_extension() {
         .stdout(predicate::str::contains("browser-extension-secret").not());
 
     assert!(extension_path.join("manifest.json").is_file());
+    assert!(extension_path.join("transport-loopback.js").is_file());
     assert!(extension_path.join("icons/icon-16.png").is_file());
     assert!(extension_path.join("icons/icon-32.png").is_file());
     assert!(extension_path.join("icons/icon-48.png").is_file());
@@ -75,7 +76,9 @@ fn browser_extension_installer_extracts_a_paired_unpacked_extension() {
     let config =
         std::fs::read_to_string(extension_path.join("config.js")).expect("extension config");
     assert!(!config.contains("__SUNOX_BRIDGE_SECRET__"));
-    assert!(!config.contains("SUNOX_BRIDGE_SECRET = \"\""));
+    assert!(config.contains("transport: \"loopback\""));
+    assert!(config.contains("schemaVersion: 1"));
+    assert!(!config.contains("sharedSecret: \"\""));
 }
 
 #[test]

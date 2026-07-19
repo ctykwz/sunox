@@ -8,6 +8,8 @@ use crate::output::{self, OutputFormat};
 
 const MANIFEST: &str = include_str!("../../assets/browser-extension/manifest.json");
 const SERVICE_WORKER: &str = include_str!("../../assets/browser-extension/service-worker.js");
+const LOOPBACK_TRANSPORT: &str =
+    include_str!("../../assets/browser-extension/transport-loopback.js");
 const BRIDGE: &str = include_str!("../../assets/browser-extension/bridge.js");
 const PAGE: &str = include_str!("../../assets/browser-extension/page.js");
 const CONFIG_TEMPLATE: &str = include_str!("../../assets/browser-extension/config.js");
@@ -47,6 +49,7 @@ pub async fn install(args: InstallBrowserExtensionArgs, ctx: &AppContext) -> Res
         .tempdir_in(parent)?;
     write_asset(staging.path(), "manifest.json", MANIFEST)?;
     write_asset(staging.path(), "service-worker.js", SERVICE_WORKER)?;
+    write_asset(staging.path(), "transport-loopback.js", LOOPBACK_TRANSPORT)?;
     write_asset(staging.path(), "bridge.js", BRIDGE)?;
     write_asset(staging.path(), "page.js", PAGE)?;
     std::fs::create_dir(staging.path().join("icons"))?;
@@ -183,24 +186,31 @@ fn replace_directory(staging: tempfile::TempDir, destination: &Path) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    use super::{BRIDGE, CONFIG_TEMPLATE, MANIFEST, PAGE, SERVICE_WORKER};
+    use super::{BRIDGE, CONFIG_TEMPLATE, LOOPBACK_TRANSPORT, MANIFEST, PAGE, SERVICE_WORKER};
 
     #[test]
     fn extension_assets_share_the_bridge_contract() {
         assert!(MANIFEST.contains("https://suno.com/*"));
         assert!(MANIFEST.contains("http://127.0.0.1/*"));
-        assert!(MANIFEST.contains("\"version\": \"0.1.2\""));
+        assert!(MANIFEST.contains("\"version\": \"0.1.3\""));
         assert!(MANIFEST.contains("\"alarms\""));
         assert!(MANIFEST.contains("icons/icon-16.png"));
         assert!(MANIFEST.contains("icons/icon-128.png"));
-        assert!(SERVICE_WORKER.contains("29764"));
-        assert!(SERVICE_WORKER.contains("sunox-bridge-server-v1"));
+        assert!(SERVICE_WORKER.contains("SUNOX_BRIDGE_TRANSPORTS"));
+        assert!(SERVICE_WORKER.contains("transport?.contractVersion !== 1"));
         assert!(SERVICE_WORKER.contains("chrome.alarms"));
-        assert!(SERVICE_WORKER.contains("/v1/challenge/claim"));
-        assert!(!SERVICE_WORKER.contains("Authorization"));
+        assert!(SERVICE_WORKER.contains("transport.claimChallenge"));
+        assert!(SERVICE_WORKER.contains("transport.submitResult"));
+        assert!(CONFIG_TEMPLATE.contains("portStart: 29764"));
+        assert!(LOOPBACK_TRANSPORT.contains("sunox-bridge-server-v1"));
+        assert!(LOOPBACK_TRANSPORT.contains("contractVersion: 1"));
+        assert!(LOOPBACK_TRANSPORT.contains("/v1/challenge/claim"));
+        assert!(!LOOPBACK_TRANSPORT.contains("Authorization"));
         assert!(BRIDGE.contains("sunox-wake"));
         assert!(PAGE.contains("hcaptcha.execute"));
         assert!(PAGE.contains("turnstile.execute"));
+        assert!(CONFIG_TEMPLATE.contains("schemaVersion: 1"));
+        assert!(CONFIG_TEMPLATE.contains("transport: \"loopback\""));
         assert!(CONFIG_TEMPLATE.contains("__SUNOX_BRIDGE_SECRET__"));
     }
 }
