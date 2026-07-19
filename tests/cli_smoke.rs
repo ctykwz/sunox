@@ -68,6 +68,10 @@ fn browser_extension_installer_extracts_a_paired_unpacked_extension() {
         .stdout(predicate::str::contains("browser-extension-secret").not());
 
     assert!(extension_path.join("manifest.json").is_file());
+    assert!(extension_path.join("icons/icon-16.png").is_file());
+    assert!(extension_path.join("icons/icon-32.png").is_file());
+    assert!(extension_path.join("icons/icon-48.png").is_file());
+    assert!(extension_path.join("icons/icon-128.png").is_file());
     let config =
         std::fs::read_to_string(extension_path.join("config.js")).expect("extension config");
     assert!(!config.contains("__SUNOX_BRIDGE_SECRET__"));

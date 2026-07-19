@@ -11,6 +11,10 @@ const SERVICE_WORKER: &str = include_str!("../../assets/browser-extension/servic
 const BRIDGE: &str = include_str!("../../assets/browser-extension/bridge.js");
 const PAGE: &str = include_str!("../../assets/browser-extension/page.js");
 const CONFIG_TEMPLATE: &str = include_str!("../../assets/browser-extension/config.js");
+const ICON_16: &[u8] = include_bytes!("../../assets/browser-extension/icons/icon-16.png");
+const ICON_32: &[u8] = include_bytes!("../../assets/browser-extension/icons/icon-32.png");
+const ICON_48: &[u8] = include_bytes!("../../assets/browser-extension/icons/icon-48.png");
+const ICON_128: &[u8] = include_bytes!("../../assets/browser-extension/icons/icon-128.png");
 
 pub async fn install(args: InstallBrowserExtensionArgs, ctx: &AppContext) -> Result<(), CliError> {
     let config_dir = crate::core::project_config_dir()
@@ -45,6 +49,11 @@ pub async fn install(args: InstallBrowserExtensionArgs, ctx: &AppContext) -> Res
     write_asset(staging.path(), "service-worker.js", SERVICE_WORKER)?;
     write_asset(staging.path(), "bridge.js", BRIDGE)?;
     write_asset(staging.path(), "page.js", PAGE)?;
+    std::fs::create_dir(staging.path().join("icons"))?;
+    write_binary_asset(staging.path(), "icons/icon-16.png", ICON_16)?;
+    write_binary_asset(staging.path(), "icons/icon-32.png", ICON_32)?;
+    write_binary_asset(staging.path(), "icons/icon-48.png", ICON_48)?;
+    write_binary_asset(staging.path(), "icons/icon-128.png", ICON_128)?;
     write_asset(
         staging.path(),
         "config.js",
@@ -141,9 +150,13 @@ pub(crate) fn bridge_secret() -> Result<Option<String>, CliError> {
 }
 
 fn write_asset(directory: &Path, name: &str, contents: &str) -> Result<(), CliError> {
+    write_binary_asset(directory, name, contents.as_bytes())
+}
+
+fn write_binary_asset(directory: &Path, name: &str, contents: &[u8]) -> Result<(), CliError> {
     let path = directory.join(name);
     let mut file = std::fs::File::create(path)?;
-    file.write_all(contents.as_bytes())?;
+    file.write_all(contents)?;
     file.sync_all()?;
     Ok(())
 }
@@ -176,7 +189,10 @@ mod tests {
     fn extension_assets_share_the_bridge_contract() {
         assert!(MANIFEST.contains("https://suno.com/*"));
         assert!(MANIFEST.contains("http://127.0.0.1/*"));
+        assert!(MANIFEST.contains("\"version\": \"0.1.1\""));
         assert!(MANIFEST.contains("\"alarms\""));
+        assert!(MANIFEST.contains("icons/icon-16.png"));
+        assert!(MANIFEST.contains("icons/icon-128.png"));
         assert!(SERVICE_WORKER.contains("29764"));
         assert!(SERVICE_WORKER.contains("sunox-bridge-server-v1"));
         assert!(SERVICE_WORKER.contains("chrome.alarms"));
