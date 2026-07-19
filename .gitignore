@@ -5,7 +5,7 @@ target/
 .DS_Store
 .claude/
 .cursor/
-docs/superpowers/
+docs/
 *.log
 *.tmp
 *.out
