@@ -141,12 +141,34 @@ challenge, Sunox first asks the optional Browser Bridge extension to execute the
 inside an existing `suno.com` tab. If no paired tab responds, the default `auto` mode falls back to
 the matching installed Chromium-family browser and closes its temporary profile afterward.
 
-Extract the extension, load it once as an unpacked Chrome extension, then reload a Suno tab:
+### Install the Browser Bridge on macOS or Windows
+
+The Browser Bridge is bundled with the Sunox binary, so there is no separate ZIP or Chrome Web
+Store install. macOS and Windows use the same setup:
+
+1. Extract the bundled extension and note the directory printed by the command:
 
 ```bash
 sunox install-browser-extension
-# Open chrome://extensions, enable Developer mode, then choose Load unpacked.
 ```
+
+2. In the same Chrome profile where you use Suno, open `chrome://extensions`.
+3. Enable **Developer mode**, choose **Load unpacked**, and select the exact directory printed by
+   Sunox. On macOS, press `Shift+Command+G` in the folder picker and paste the printed path because
+   `~/Library` is hidden by default. On Windows, paste the printed path into the folder picker's
+   address bar.
+4. Keep the extension enabled, then open or reload an authenticated `https://suno.com` tab.
+
+The extension stays installed across browser restarts. After a Sunox update that changes the
+bridge, refresh its files and reload it in Chrome:
+
+```bash
+sunox install-browser-extension --force
+```
+
+Then click **Reload** on the Sunox Browser Bridge card and reload the Suno tab. The command chooses
+the correct per-user application directory on both macOS and Windows; do not move or delete that
+directory while Chrome is using the unpacked extension.
 
 The relevant overrides are:
 
@@ -158,7 +180,9 @@ The relevant overrides are:
 
 Set `challenge_browser` to `auto` (default), `existing` (never open a new browser), or `isolated`
 (always use the temporary browser). A one-command override looks like
-`-c challenge_browser=existing`.
+`-c challenge_browser=existing`. In `existing` mode, a missing or stale bridge is reported as an
+error instead of opening another browser. In `auto` mode, Sunox may open the isolated fallback when
+no connected Suno tab responds.
 
 ## JSON output and automation
 

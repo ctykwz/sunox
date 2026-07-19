@@ -142,10 +142,17 @@ un challenge, Sunox pide primero a la extensión Browser Bridge que ejecute el w
 una pestaña `suno.com` existente. Sin una pestaña vinculada, el modo `auto` utiliza el navegador
 Chromium correspondiente y elimina el perfil temporal al terminar.
 
-```bash
-sunox install-browser-extension
-# Abre chrome://extensions, activa el modo desarrollador y carga la carpeta descomprimida.
-```
+Browser Bridge viene incluido en el binario de Sunox y admite macOS y Windows; no requiere una
+descarga aparte ni Chrome Web Store. Ejecuta `sunox install-browser-extension`, copia la ruta que
+muestra, abre `chrome://extensions` en el mismo perfil de Chrome que usas para Suno, activa el modo
+desarrollador y elige **Cargar descomprimida**. Selecciona exactamente esa carpeta y recarga una
+pestaña autenticada de `suno.com`. En macOS, pulsa `Shift+Command+G` en el selector de carpetas y
+pega la ruta, ya que `~/Library` está oculta de forma predeterminada. En Windows, pega la ruta en
+la barra de direcciones del selector.
+
+Después de actualizar Sunox, ejecuta `sunox install-browser-extension --force`, pulsa **Recargar**
+en la tarjeta de la extensión y vuelve a cargar la pestaña de Suno. No muevas ni borres la carpeta
+indicada mientras Chrome use la extensión.
 
 ```text
 --captcha          Verificar aunque la comprobación inicial no lo solicite
@@ -153,7 +160,8 @@ sunox install-browser-extension
 --token <token>    Usar un token de challenge obtenido externamente
 ```
 
-`challenge_browser` admite `auto`, `existing` (sin ventana nueva) o `isolated`.
+`challenge_browser` admite `auto`, `existing` (sin ventana nueva) o `isolated`. `existing` devuelve
+un error si el Bridge no responde; `auto` puede abrir el navegador aislado como respaldo.
 
 ## JSON y automatización
 

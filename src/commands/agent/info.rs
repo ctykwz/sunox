@@ -298,7 +298,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
         "config": {
             "set": "sunox config set <key> <value> persists to config.toml",
             "env_override": "SUNOX_* environment variables override persisted config values",
-            "challenge_browser": "auto prefers a paired existing Suno tab and falls back to an isolated browser; existing requires the extension path; isolated always uses the temporary browser",
+            "challenge_browser": "auto prefers a connected paired Browser Bridge in an existing Suno tab and falls back to an isolated browser; existing requires that connected paired tab and never opens another browser; isolated always uses the temporary browser",
             "keys": ["default_model", "poll_interval_secs", "poll_timeout_secs", "output_dir", "serial_mutations", "challenge_browser"]
         },
         "resource_management": {

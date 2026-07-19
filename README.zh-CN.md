@@ -136,12 +136,31 @@ sunox update                       更新到最新 GitHub Release
 Bridge 扩展，在已经打开的 `suno.com` 页面中执行 invisible challenge；如果没有已配对页面响应，
 默认的 `auto` 模式才会调用匹配的 Chromium 系浏览器，并在结束后清理临时 Profile。
 
-首次使用时先解压扩展，再在 Chrome 中以“加载已解压的扩展程序”方式加载，并刷新 Suno 页面：
+### 在 macOS 或 Windows 安装 Browser Bridge
+
+Browser Bridge 已经打包在 Sunox 二进制里，不需要另外下载 ZIP，也不需要通过 Chrome
+应用商店安装。macOS 和 Windows 的操作完全相同：
+
+1. 运行下面的命令，并记住 Sunox 输出的扩展目录：
 
 ```bash
 sunox install-browser-extension
-# 打开 chrome://extensions，启用开发者模式，然后选择“加载已解压的扩展程序”。
 ```
+
+2. 在平时登录 Suno 的同一个 Chrome Profile 中打开 `chrome://extensions`。
+3. 打开右上角的“开发者模式”，选择“加载已解压的扩展程序”，然后选择 Sunox 刚才输出的
+   目录。macOS 的 `~/Library` 默认隐藏，需要在文件夹选择器中按 `Shift+Command+G`，再粘贴
+   完整路径；Windows 可以把完整路径粘贴到文件夹选择器的地址栏。
+4. 保持扩展启用，再打开或刷新一个已经登录的 `https://suno.com` 页面。
+
+扩展安装后，重启 Chrome 不需要重新加载。Sunox 升级并包含新版 Bridge 时，先更新本地文件：
+
+```bash
+sunox install-browser-extension --force
+```
+
+然后在扩展卡片上点击“重新加载”，并再次刷新 Suno 页面。Sunox 会在 macOS 和 Windows
+上自动选择当前用户的应用配置目录；Chrome 使用这个未打包扩展期间，不要移动或删除该目录。
 
 ```text
 --captcha          即使预检不要求，也强制执行浏览器验证
@@ -150,7 +169,9 @@ sunox install-browser-extension
 ```
 
 `challenge_browser` 支持 `auto`（默认）、`existing`（禁止新开浏览器）和 `isolated`
-（始终使用临时浏览器）。单次命令可使用 `-c challenge_browser=existing`。
+（始终使用临时浏览器）。单次命令可使用 `-c challenge_browser=existing`。`existing` 模式下，
+扩展未连接或版本过旧会直接报错，不会打开其他浏览器；`auto` 模式在没有 Suno 页面响应时
+仍可能启动独立浏览器兜底。
 
 ## JSON 与自动化
 

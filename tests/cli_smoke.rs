@@ -52,7 +52,8 @@ fn help_lists_codex_style_commands() {
 #[test]
 fn browser_extension_installer_extracts_a_paired_unpacked_extension() {
     let test_home = isolated_test_home("sunox-extension-install");
-    let extension_path = test_home.join("unpacked-extension");
+    // The default macOS and Windows configuration paths both commonly contain spaces.
+    let extension_path = test_home.join("Sunox Browser Bridge");
     let mut cmd = Command::cargo_bin("sunox").expect("binary");
 
     with_isolated_home(&mut cmd, &test_home)

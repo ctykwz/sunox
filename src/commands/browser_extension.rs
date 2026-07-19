@@ -88,7 +88,7 @@ pub async fn install(args: InstallBrowserExtensionArgs, ctx: &AppContext) -> Res
                 );
             }
             eprintln!(
-                "Then reload an existing suno.com tab. Future challenges will use it before falling back to an isolated browser."
+                "Then reload an existing suno.com tab. Auto and existing challenge modes can now use the bridge; auto still falls back to an isolated browser when needed."
             );
         }
     }
