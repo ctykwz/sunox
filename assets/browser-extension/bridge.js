@@ -15,7 +15,7 @@
       function onResult(event) {
         if (event.source !== window || event.origin !== location.origin) return;
         const result = event.data;
-        if (result?.source !== "sunox-page-v1" || result.requestId !== challenge.request_id) return;
+        if (result?.source !== "sunox-page-v1" || result.requestId !== challenge.requestId) return;
         clearTimeout(timeout);
         window.removeEventListener("message", onResult);
         resolve({ token: result.token || null, error: result.error || null });
@@ -24,7 +24,7 @@
       window.addEventListener("message", onResult);
       window.postMessage({
         source: "sunox-extension-v1",
-        requestId: challenge.request_id,
+        requestId: challenge.requestId,
         provider: challenge.provider
       }, location.origin);
     });
@@ -44,10 +44,8 @@
       const result = await executeInPage(challenge);
       await chrome.runtime.sendMessage({
         type: "sunox-result",
-        bridgePort: challenge.bridgePort,
-        clientNonce: challenge.clientNonce,
-        serverNonce: challenge.serverNonce,
-        requestId: challenge.request_id,
+        transportReceipt: challenge.transportReceipt,
+        requestId: challenge.requestId,
         token: result.token,
         error: result.error
       });

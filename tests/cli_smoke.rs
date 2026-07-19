@@ -79,6 +79,7 @@ fn browser_extension_installer_extracts_a_paired_unpacked_extension() {
     assert!(config.contains("transport: \"loopback\""));
     assert!(config.contains("schemaVersion: 1"));
     assert!(!config.contains("sharedSecret: \"\""));
+    assert!(!config.contains("__SUNOX_BRIDGE_"));
 }
 
 #[test]

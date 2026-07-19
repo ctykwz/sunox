@@ -1,5 +1,6 @@
 //! Generation challenge solving via a piloted Chromium-family browser instance.
 
+pub(crate) mod bridge_contract;
 mod browser;
 mod cdp;
 mod cookies;

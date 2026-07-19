@@ -1,10 +1,18 @@
-importScripts("config.js", "transport-loopback.js");
+importScripts("config.js");
 
 const bridgeConfig = globalThis.SUNOX_BRIDGE_CONFIG;
-const transport = globalThis.SUNOX_BRIDGE_TRANSPORTS?.[bridgeConfig?.transport];
+const transportName = bridgeConfig?.transport;
 if (
   bridgeConfig?.schemaVersion !== 1
-  || transport?.contractVersion !== 1
+  || !/^[a-z][a-z0-9-]{0,31}$/.test(transportName || "")
+) {
+  throw new Error("Unsupported Sunox Browser Bridge configuration");
+}
+importScripts(`transport-${transportName}.js`);
+
+const transport = globalThis.SUNOX_BRIDGE_TRANSPORTS?.[bridgeConfig?.transport];
+if (
+  transport?.contractVersion !== 1
   || typeof transport.claimChallenge !== "function"
   || typeof transport.submitResult !== "function"
 ) {

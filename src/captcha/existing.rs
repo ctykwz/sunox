@@ -13,17 +13,17 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use crate::api::challenge::ChallengeProvider;
+use crate::captcha::bridge_contract::{
+    LOOPBACK_PORT_COUNT as PORT_COUNT, LOOPBACK_PORT_START as PORT_START, PROTOCOL_VERSION,
+};
 use crate::commands::browser_extension;
 use crate::core::CliError;
 
-const PORT_START: u16 = 29_764;
-const PORT_COUNT: u16 = 8;
 const ACTIVE_TAB_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
 const BACKGROUND_TAB_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(27);
 const COMPLETION_TIMEOUT: Duration = Duration::from_secs(35);
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_REQUEST_BYTES: usize = 24 * 1024;
-const PROTOCOL_VERSION: u8 = 1;
 const CLAIM_PENDING: u8 = 0;
 const CLAIMED: u8 = 1;
 const CLAIM_CLOSED: u8 = 2;

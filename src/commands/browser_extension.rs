@@ -2,6 +2,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::app::AppContext;
+use crate::captcha::bridge_contract::{LOOPBACK_PORT_COUNT, LOOPBACK_PORT_START, PROTOCOL_VERSION};
 use crate::cli::InstallBrowserExtensionArgs;
 use crate::core::CliError;
 use crate::output::{self, OutputFormat};
@@ -57,11 +58,7 @@ pub async fn install(args: InstallBrowserExtensionArgs, ctx: &AppContext) -> Res
     write_binary_asset(staging.path(), "icons/icon-32.png", ICON_32)?;
     write_binary_asset(staging.path(), "icons/icon-48.png", ICON_48)?;
     write_binary_asset(staging.path(), "icons/icon-128.png", ICON_128)?;
-    write_asset(
-        staging.path(),
-        "config.js",
-        &CONFIG_TEMPLATE.replace("__SUNOX_BRIDGE_SECRET__", &secret),
-    )?;
+    write_asset(staging.path(), "config.js", &render_config(&secret))?;
 
     replace_directory(staging, &destination)?;
 
@@ -96,6 +93,23 @@ pub async fn install(args: InstallBrowserExtensionArgs, ctx: &AppContext) -> Res
         }
     }
     Ok(())
+}
+
+fn render_config(secret: &str) -> String {
+    CONFIG_TEMPLATE
+        .replace(
+            "__SUNOX_BRIDGE_PROTOCOL_VERSION__",
+            &PROTOCOL_VERSION.to_string(),
+        )
+        .replace(
+            "__SUNOX_BRIDGE_PORT_START__",
+            &LOOPBACK_PORT_START.to_string(),
+        )
+        .replace(
+            "__SUNOX_BRIDGE_PORT_COUNT__",
+            &LOOPBACK_PORT_COUNT.to_string(),
+        )
+        .replace("__SUNOX_BRIDGE_SECRET__", secret)
 }
 
 fn load_or_create_secret(config_dir: &Path) -> Result<String, CliError> {
@@ -186,7 +200,9 @@ fn replace_directory(staging: tempfile::TempDir, destination: &Path) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    use super::{BRIDGE, CONFIG_TEMPLATE, LOOPBACK_TRANSPORT, MANIFEST, PAGE, SERVICE_WORKER};
+    use super::{
+        BRIDGE, CONFIG_TEMPLATE, LOOPBACK_TRANSPORT, MANIFEST, PAGE, SERVICE_WORKER, render_config,
+    };
 
     #[test]
     fn extension_assets_share_the_bridge_contract() {
@@ -198,10 +214,11 @@ mod tests {
         assert!(MANIFEST.contains("icons/icon-128.png"));
         assert!(SERVICE_WORKER.contains("SUNOX_BRIDGE_TRANSPORTS"));
         assert!(SERVICE_WORKER.contains("transport?.contractVersion !== 1"));
+        assert!(SERVICE_WORKER.contains("transport-${transportName}.js"));
+        assert!(!SERVICE_WORKER.contains("transport-loopback.js"));
         assert!(SERVICE_WORKER.contains("chrome.alarms"));
         assert!(SERVICE_WORKER.contains("transport.claimChallenge"));
         assert!(SERVICE_WORKER.contains("transport.submitResult"));
-        assert!(CONFIG_TEMPLATE.contains("portStart: 29764"));
         assert!(LOOPBACK_TRANSPORT.contains("sunox-bridge-server-v1"));
         assert!(LOOPBACK_TRANSPORT.contains("contractVersion: 1"));
         assert!(LOOPBACK_TRANSPORT.contains("/v1/challenge/claim"));
@@ -211,6 +228,25 @@ mod tests {
         assert!(PAGE.contains("turnstile.execute"));
         assert!(CONFIG_TEMPLATE.contains("schemaVersion: 1"));
         assert!(CONFIG_TEMPLATE.contains("transport: \"loopback\""));
+        assert!(CONFIG_TEMPLATE.contains("__SUNOX_BRIDGE_PROTOCOL_VERSION__"));
+        assert!(CONFIG_TEMPLATE.contains("__SUNOX_BRIDGE_PORT_START__"));
+        assert!(CONFIG_TEMPLATE.contains("__SUNOX_BRIDGE_PORT_COUNT__"));
         assert!(CONFIG_TEMPLATE.contains("__SUNOX_BRIDGE_SECRET__"));
+        assert!(LOOPBACK_TRANSPORT.contains("sunox-bridge-receipt-v1"));
+        assert!(BRIDGE.contains("transportReceipt"));
+        assert!(!BRIDGE.contains("bridgePort"));
+        assert!(!BRIDGE.contains("clientNonce"));
+        assert!(!BRIDGE.contains("serverNonce"));
+    }
+
+    #[test]
+    fn rendered_config_uses_the_rust_bridge_contract() {
+        let config = render_config("secret-value");
+
+        assert!(config.contains("protocolVersion: 1"));
+        assert!(config.contains("portStart: 29764"));
+        assert!(config.contains("portCount: 8"));
+        assert!(config.contains("sharedSecret: \"secret-value\""));
+        assert!(!config.contains("__SUNOX_BRIDGE_"));
     }
 }

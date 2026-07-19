@@ -10,6 +10,7 @@
   );
   const requestTimeoutMs = 350;
   const textEncoder = new TextEncoder();
+  const textDecoder = new TextDecoder();
   let signingKeyPromise;
 
   function authenticationPayload(label, fields) {
@@ -67,6 +68,47 @@
       bytes,
       authenticationPayload(label, fields)
     );
+  }
+
+  function encodeBase64Url(bytes) {
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+  }
+
+  function decodeBase64Url(value) {
+    const padding = "=".repeat((4 - value.length % 4) % 4);
+    const binary = atob(value.replaceAll("-", "+").replaceAll("_", "/") + padding);
+    return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  }
+
+  async function createReceipt(bridge) {
+    const payload = encodeBase64Url(textEncoder.encode(JSON.stringify([
+      bridge.port,
+      bridge.clientNonce,
+      bridge.serverNonce
+    ])));
+    const proof = await sign("sunox-bridge-receipt-v1", [payload]);
+    return `${payload}.${proof}`;
+  }
+
+  async function openReceipt(receipt) {
+    if (!/^[A-Za-z0-9_-]+\.[0-9a-f]{64}$/.test(receipt || "")) return null;
+    const [payload, proof] = receipt.split(".");
+    if (!await verify(proof, "sunox-bridge-receipt-v1", [payload])) return null;
+    try {
+      const [port, clientNonce, serverNonce] = JSON.parse(
+        textDecoder.decode(decodeBase64Url(payload))
+      );
+      if (
+        !ports.includes(port)
+        || typeof clientNonce !== "string"
+        || typeof serverNonce !== "string"
+      ) return null;
+      return { port, clientNonce, serverNonce };
+    } catch {
+      return null;
+    }
   }
 
   async function bridgeRequest(port, path, body) {
@@ -133,11 +175,15 @@
         });
         if (!response.ok) continue;
         const challenge = await response.json();
+        if (
+          challenge.version !== settings.protocolVersion
+          || typeof challenge.request_id !== "string"
+          || !["hcaptcha", "turnstile"].includes(challenge.provider)
+        ) continue;
         return {
-          ...challenge,
-          bridgePort: bridge.port,
-          clientNonce: bridge.clientNonce,
-          serverNonce: bridge.serverNonce
+          requestId: challenge.request_id,
+          provider: challenge.provider,
+          transportReceipt: await createReceipt(bridge)
         };
       } catch {
         // Try another authenticated Sunox listener.
@@ -147,22 +193,24 @@
   }
 
   async function submitResult(message) {
+    const bridge = await openReceipt(message.transportReceipt);
+    if (!bridge) return { accepted: false };
     const kind = message.token ? "token" : "error";
     const value = message.token || message.error || "Challenge returned no result";
     const fields = [
-      message.bridgePort,
-      message.clientNonce,
-      message.serverNonce,
+      bridge.port,
+      bridge.clientNonce,
+      bridge.serverNonce,
       message.requestId,
       kind,
       value
     ];
     try {
-      const response = await bridgeRequest(message.bridgePort, "/v1/challenge/result", {
+      const response = await bridgeRequest(bridge.port, "/v1/challenge/result", {
         version: settings.protocolVersion,
         request_id: message.requestId,
-        client_nonce: message.clientNonce,
-        server_nonce: message.serverNonce,
+        client_nonce: bridge.clientNonce,
+        server_nonce: bridge.serverNonce,
         token: kind === "token" ? value : null,
         error: kind === "error" ? value : null,
         proof: await sign("sunox-bridge-result-v1", fields)
