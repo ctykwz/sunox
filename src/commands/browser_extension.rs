@@ -19,9 +19,16 @@ pub async fn install(args: InstallBrowserExtensionArgs, ctx: &AppContext) -> Res
         .path
         .map(PathBuf::from)
         .unwrap_or_else(|| config_dir.join("browser-extension"));
-    if destination.exists() && !args.force {
+    let updating = destination.exists();
+    if updating && !args.force {
         return Err(CliError::Config(format!(
             "{} already exists — pass --force to update it",
+            destination.display()
+        )));
+    }
+    if updating && !destination.is_dir() {
+        return Err(CliError::Config(format!(
+            "{} exists but is not a directory",
             destination.display()
         )));
     }
@@ -53,7 +60,7 @@ pub async fn install(args: InstallBrowserExtensionArgs, ctx: &AppContext) -> Res
             "next_steps": [
                 "Open chrome://extensions",
                 "Enable Developer mode",
-                "Choose Load unpacked and select the reported path",
+                if updating { "Click Reload on the existing extension" } else { "Choose Load unpacked and select the reported path" },
                 "Reload an existing suno.com tab"
             ]
         })),
@@ -62,9 +69,15 @@ pub async fn install(args: InstallBrowserExtensionArgs, ctx: &AppContext) -> Res
                 "Extracted the Sunox Browser Bridge to: {}",
                 destination.display()
             );
-            eprintln!(
-                "Open chrome://extensions, enable Developer mode, choose Load unpacked, and select that directory."
-            );
+            if updating {
+                eprintln!(
+                    "Open chrome://extensions and click Reload on the existing Sunox Browser Bridge."
+                );
+            } else {
+                eprintln!(
+                    "Open chrome://extensions, enable Developer mode, choose Load unpacked, and select that directory."
+                );
+            }
             eprintln!(
                 "Then reload an existing suno.com tab. Future challenges will use it before falling back to an isolated browser."
             );
@@ -164,7 +177,9 @@ mod tests {
         assert!(MANIFEST.contains("https://suno.com/*"));
         assert!(MANIFEST.contains("http://127.0.0.1/*"));
         assert!(SERVICE_WORKER.contains("29764"));
+        assert!(SERVICE_WORKER.contains("sunox-bridge-server-v1"));
         assert!(SERVICE_WORKER.contains("/v1/challenge/claim"));
+        assert!(!SERVICE_WORKER.contains("Authorization"));
         assert!(PAGE.contains("hcaptcha.execute"));
         assert!(PAGE.contains("turnstile.execute"));
         assert!(CONFIG_TEMPLATE.contains("__SUNOX_BRIDGE_SECRET__"));

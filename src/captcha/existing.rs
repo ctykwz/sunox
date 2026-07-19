@@ -3,7 +3,9 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha2_10::Sha256;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, oneshot};
@@ -16,7 +18,7 @@ use crate::core::CliError;
 
 const PORT_START: u16 = 29_764;
 const PORT_COUNT: u16 = 8;
-const DISCOVERY_TIMEOUT: Duration = Duration::from_millis(1_800);
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(7);
 const COMPLETION_TIMEOUT: Duration = Duration::from_secs(35);
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_REQUEST_BYTES: usize = 24 * 1024;
@@ -32,12 +34,33 @@ enum BridgeResult {
 }
 
 struct BridgeState {
+    port: u16,
     request_id: String,
+    server_nonce: String,
     provider: ChallengeProvider,
     secret: String,
     claim_state: AtomicU8,
     claimed_notify: Notify,
     result_sender: Mutex<Option<oneshot::Sender<BridgeResult>>>,
+    claim_session: Mutex<Option<ClaimSession>>,
+}
+
+struct ClaimSession {
+    client_nonce: String,
+    server_nonce: String,
+}
+
+#[derive(Deserialize)]
+struct HelloRequest {
+    version: u8,
+    client_nonce: String,
+}
+
+#[derive(Serialize)]
+struct HelloResponse<'a> {
+    version: u8,
+    server_nonce: &'a str,
+    proof: String,
 }
 
 #[derive(Deserialize)]
@@ -45,6 +68,9 @@ struct ClaimRequest {
     version: u8,
     client_id: String,
     page_url: String,
+    client_nonce: String,
+    server_nonce: String,
+    proof: String,
 }
 
 #[derive(Serialize)]
@@ -58,8 +84,11 @@ struct ClaimResponse<'a> {
 struct ResultRequest {
     version: u8,
     request_id: String,
+    client_nonce: String,
+    server_nonce: String,
     token: Option<String>,
     error: Option<String>,
+    proof: String,
 }
 
 struct HttpRequest {
@@ -105,12 +134,15 @@ pub(super) async fn try_solve(provider: ChallengeProvider) -> Result<Option<Stri
     let request_id = uuid::Uuid::new_v4().to_string();
     let (result_sender, result_receiver) = oneshot::channel();
     let state = Arc::new(BridgeState {
+        port,
         request_id,
+        server_nonce: uuid::Uuid::new_v4().to_string(),
         provider,
         secret,
         claim_state: AtomicU8::new(CLAIM_PENDING),
         claimed_notify: Notify::new(),
         result_sender: Mutex::new(Some(result_sender)),
+        claim_session: Mutex::new(None),
     });
     let cancellation = CancellationToken::new();
     let server = tokio::spawn(serve(listener, Arc::clone(&state), cancellation.clone()));
@@ -222,16 +254,40 @@ fn route_request(request: &HttpRequest, state: &BridgeState) -> Result<HttpRespo
     if request.method != "POST"
         || !valid_extension_origin(origin)
         || request.headers.get("x-sunox-extension").map(String::as_str) != Some("1")
-        || !authorized(request, &state.secret)
     {
         return Ok(HttpResponse::empty(403, "Forbidden"));
     }
 
     match request.path.as_str() {
+        "/v1/challenge/hello" => hello(request, state),
         "/v1/challenge/claim" => claim(request, state),
         "/v1/challenge/result" => receive_result(request, state),
         _ => Ok(HttpResponse::empty(404, "Not Found")),
     }
+}
+
+fn hello(request: &HttpRequest, state: &BridgeState) -> Result<HttpResponse, CliError> {
+    let hello: HelloRequest = match serde_json::from_slice(&request.body) {
+        Ok(hello) => hello,
+        Err(_) => return Ok(HttpResponse::empty(400, "Bad Request")),
+    };
+    if hello.version != PROTOCOL_VERSION || !valid_nonce(&hello.client_nonce) {
+        return Ok(HttpResponse::empty(422, "Unprocessable Content"));
+    }
+    let port = state.port.to_string();
+    HttpResponse::json(
+        200,
+        "OK",
+        HelloResponse {
+            version: PROTOCOL_VERSION,
+            server_nonce: &state.server_nonce,
+            proof: authentication_proof(
+                &state.secret,
+                "sunox-bridge-server-v1",
+                &[&port, &hello.client_nonce, &state.server_nonce],
+            ),
+        },
+    )
 }
 
 fn claim(request: &HttpRequest, state: &BridgeState) -> Result<HttpResponse, CliError> {
@@ -243,8 +299,25 @@ fn claim(request: &HttpRequest, state: &BridgeState) -> Result<HttpResponse, Cli
         || claim.client_id.is_empty()
         || claim.client_id.len() > 128
         || !is_suno_page(&claim.page_url)
+        || !valid_nonce(&claim.client_nonce)
+        || claim.server_nonce != state.server_nonce
     {
         return Ok(HttpResponse::empty(422, "Unprocessable Content"));
+    }
+    let port = state.port.to_string();
+    let expected_proof = authentication_proof(
+        &state.secret,
+        "sunox-bridge-client-v1",
+        &[
+            &port,
+            &claim.client_nonce,
+            &claim.server_nonce,
+            &claim.client_id,
+            &claim.page_url,
+        ],
+    );
+    if !constant_time_eq(claim.proof.as_bytes(), expected_proof.as_bytes()) {
+        return Ok(HttpResponse::empty(403, "Forbidden"));
     }
     if state
         .claim_state
@@ -253,6 +326,13 @@ fn claim(request: &HttpRequest, state: &BridgeState) -> Result<HttpResponse, Cli
     {
         return Ok(HttpResponse::empty(409, "Conflict"));
     }
+    *state
+        .claim_session
+        .lock()
+        .expect("bridge claim session mutex poisoned") = Some(ClaimSession {
+        client_nonce: claim.client_nonce,
+        server_nonce: claim.server_nonce,
+    });
     state.claimed_notify.notify_waiters();
     HttpResponse::json(
         200,
@@ -276,13 +356,45 @@ fn receive_result(request: &HttpRequest, state: &BridgeState) -> Result<HttpResp
     if result.version != PROTOCOL_VERSION || result.request_id != state.request_id {
         return Ok(HttpResponse::empty(409, "Conflict"));
     }
-    let bridge_result = match (result.token, result.error) {
-        (Some(token), None) if (20..=16_384).contains(&token.len()) => BridgeResult::Token(token),
+    {
+        let session = state
+            .claim_session
+            .lock()
+            .expect("bridge claim session mutex poisoned");
+        let Some(session) = session.as_ref() else {
+            return Ok(HttpResponse::empty(409, "Conflict"));
+        };
+        if result.client_nonce != session.client_nonce
+            || result.server_nonce != session.server_nonce
+        {
+            return Ok(HttpResponse::empty(403, "Forbidden"));
+        }
+    }
+    let (kind, value, bridge_result) = match (&result.token, &result.error) {
+        (Some(token), None) if (20..=16_384).contains(&token.len()) => {
+            ("token", token.as_str(), BridgeResult::Token(token.clone()))
+        }
         (None, Some(error)) if !error.is_empty() && error.len() <= 1_000 => {
-            BridgeResult::Error(error)
+            ("error", error.as_str(), BridgeResult::Error(error.clone()))
         }
         _ => return Ok(HttpResponse::empty(422, "Unprocessable Content")),
     };
+    let port = state.port.to_string();
+    let expected_proof = authentication_proof(
+        &state.secret,
+        "sunox-bridge-result-v1",
+        &[
+            &port,
+            &result.client_nonce,
+            &result.server_nonce,
+            &result.request_id,
+            kind,
+            value,
+        ],
+    );
+    if !constant_time_eq(result.proof.as_bytes(), expected_proof.as_bytes()) {
+        return Ok(HttpResponse::empty(403, "Forbidden"));
+    }
     let Some(sender) = state
         .result_sender
         .lock()
@@ -295,14 +407,32 @@ fn receive_result(request: &HttpRequest, state: &BridgeState) -> Result<HttpResp
     Ok(HttpResponse::empty(204, "No Content"))
 }
 
-fn authorized(request: &HttpRequest, secret: &str) -> bool {
-    let Some(value) = request.headers.get("authorization") else {
-        return false;
-    };
-    let Some(candidate) = value.strip_prefix("Bearer ") else {
-        return false;
-    };
-    constant_time_eq(candidate.as_bytes(), secret.as_bytes())
+fn valid_nonce(nonce: &str) -> bool {
+    (16..=128).contains(&nonce.len())
+        && nonce
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+fn authentication_proof(secret: &str, label: &str, fields: &[&str]) -> String {
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .expect("HMAC accepts keys of any non-empty length");
+    update_authentication_payload(&mut mac, label, fields);
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn update_authentication_payload(mac: &mut Hmac<Sha256>, label: &str, fields: &[&str]) {
+    mac.update(label.as_bytes());
+    mac.update(&[0]);
+    for field in fields {
+        let bytes = field.as_bytes();
+        mac.update(&(bytes.len() as u32).to_be_bytes());
+        mac.update(bytes);
+    }
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -420,7 +550,7 @@ async fn write_response(
     }
     if let Some(origin) = extension_origin {
         headers.push_str(&format!(
-            "Access-Control-Allow-Origin: {origin}\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Allow-Headers: Authorization, Content-Type, X-Sunox-Extension\r\nAccess-Control-Allow-Private-Network: true\r\nVary: Origin\r\n"
+            "Access-Control-Allow-Origin: {origin}\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, X-Sunox-Extension\r\nAccess-Control-Allow-Private-Network: true\r\nVary: Origin\r\n"
         ));
     }
     headers.push_str("\r\n");
@@ -446,8 +576,8 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        BridgeResult, BridgeState, CLAIM_CLOSED, CLAIM_PENDING, HttpRequest, constant_time_eq,
-        is_suno_page, route_request, serve, valid_extension_origin,
+        BridgeResult, BridgeState, CLAIM_CLOSED, CLAIM_PENDING, HttpRequest, authentication_proof,
+        constant_time_eq, is_suno_page, route_request, serve, valid_extension_origin,
     };
     use crate::api::challenge::ChallengeProvider;
 
@@ -455,18 +585,21 @@ mod tests {
         let (sender, receiver) = oneshot::channel();
         (
             BridgeState {
+                port: 29_764,
                 request_id: "request-a".into(),
+                server_nonce: "server-nonce-00000001".into(),
                 provider: ChallengeProvider::HCaptcha,
                 secret: secret.into(),
                 claim_state: CLAIM_PENDING.into(),
                 claimed_notify: Notify::new(),
                 result_sender: Mutex::new(Some(sender)),
+                claim_session: Mutex::new(None),
             },
             receiver,
         )
     }
 
-    fn request(path: &str, secret: &str, body: serde_json::Value) -> HttpRequest {
+    fn request(path: &str, body: serde_json::Value) -> HttpRequest {
         HttpRequest {
             method: "POST".into(),
             path: path.into(),
@@ -476,10 +609,53 @@ mod tests {
                     "chrome-extension://abcdefghijklmnopabcdefghijklmnop".into(),
                 ),
                 ("x-sunox-extension".into(), "1".into()),
-                ("authorization".into(), format!("Bearer {secret}")),
             ]),
             body: serde_json::to_vec(&body).expect("serialize body"),
         }
+    }
+
+    fn claim_request(secret: &str, page_url: &str) -> HttpRequest {
+        let fields = [
+            "29764",
+            "client-nonce-00000001",
+            "server-nonce-00000001",
+            "client-a",
+            page_url,
+        ];
+        request(
+            "/v1/challenge/claim",
+            serde_json::json!({
+                "version": 1,
+                "client_id": "client-a",
+                "page_url": page_url,
+                "client_nonce": "client-nonce-00000001",
+                "server_nonce": "server-nonce-00000001",
+                "proof": authentication_proof(secret, "sunox-bridge-client-v1", &fields)
+            }),
+        )
+    }
+
+    fn result_request(secret: &str, token: &str) -> HttpRequest {
+        let fields = [
+            "29764",
+            "client-nonce-00000001",
+            "server-nonce-00000001",
+            "request-a",
+            "token",
+            token,
+        ];
+        request(
+            "/v1/challenge/result",
+            serde_json::json!({
+                "version": 1,
+                "request_id": "request-a",
+                "client_nonce": "client-nonce-00000001",
+                "server_nonce": "server-nonce-00000001",
+                "token": token,
+                "error": null,
+                "proof": authentication_proof(secret, "sunox-bridge-result-v1", &fields)
+            }),
+        )
     }
 
     use std::collections::HashMap;
@@ -506,7 +682,7 @@ mod tests {
     }
 
     #[test]
-    fn bearer_secret_comparison_is_exact() {
+    fn authentication_proof_comparison_is_exact() {
         assert!(constant_time_eq(b"same", b"same"));
         assert!(!constant_time_eq(b"same", b"diff"));
         assert!(!constant_time_eq(b"short", b"longer"));
@@ -515,15 +691,7 @@ mod tests {
     #[test]
     fn first_valid_suno_tab_claims_the_challenge() {
         let (state, _receiver) = state("secret-value");
-        let claim = request(
-            "/v1/challenge/claim",
-            "secret-value",
-            serde_json::json!({
-                "version": 1,
-                "client_id": "client-a",
-                "page_url": "https://suno.com/create"
-            }),
-        );
+        let claim = claim_request("secret-value", "https://suno.com/create");
 
         let first = route_request(&claim, &state).expect("first response");
         let second = route_request(&claim, &state).expect("second response");
@@ -538,15 +706,7 @@ mod tests {
         state
             .claim_state
             .store(CLAIM_CLOSED, std::sync::atomic::Ordering::Release);
-        let claim = request(
-            "/v1/challenge/claim",
-            "secret-value",
-            serde_json::json!({
-                "version": 1,
-                "client_id": "client-a",
-                "page_url": "https://suno.com/create"
-            }),
-        );
+        let claim = claim_request("secret-value", "https://suno.com/create");
 
         assert_eq!(route_request(&claim, &state).expect("response").status, 409);
     }
@@ -554,16 +714,9 @@ mod tests {
     #[tokio::test]
     async fn matching_result_returns_the_one_time_token() {
         let (state, receiver) = state("secret-value");
-        let result = request(
-            "/v1/challenge/result",
-            "secret-value",
-            serde_json::json!({
-                "version": 1,
-                "request_id": "request-a",
-                "token": "abcdefghijklmnopqrstuvwxyz",
-                "error": null
-            }),
-        );
+        let claim = claim_request("secret-value", "https://suno.com/create");
+        assert_eq!(route_request(&claim, &state).expect("claim").status, 200);
+        let result = result_request("secret-value", "abcdefghijklmnopqrstuvwxyz");
 
         let response = route_request(&result, &state).expect("result response");
         let BridgeResult::Token(token) = receiver.await.expect("bridge result") else {
@@ -577,27 +730,11 @@ mod tests {
     #[test]
     fn invalid_origin_or_secret_cannot_claim() {
         let (state, _receiver) = state("secret-value");
-        let mut bad_origin = request(
-            "/v1/challenge/claim",
-            "secret-value",
-            serde_json::json!({
-                "version": 1,
-                "client_id": "client-a",
-                "page_url": "https://suno.com/create"
-            }),
-        );
+        let mut bad_origin = claim_request("secret-value", "https://suno.com/create");
         bad_origin
             .headers
             .insert("origin".into(), "https://evil.example".into());
-        let bad_secret = request(
-            "/v1/challenge/claim",
-            "wrong-secret",
-            serde_json::json!({
-                "version": 1,
-                "client_id": "client-a",
-                "page_url": "https://suno.com/create"
-            }),
-        );
+        let bad_secret = claim_request("wrong-secret", "https://suno.com/create");
 
         assert_eq!(
             route_request(&bad_origin, &state).expect("response").status,
@@ -626,34 +763,27 @@ mod tests {
             cancellation.clone(),
         ));
 
-        let claim_body = serde_json::json!({
+        let hello_body = serde_json::json!({
             "version": 1,
-            "client_id": "client-a",
-            "page_url": "https://suno.com/create"
+            "client_nonce": "client-nonce-00000001"
         })
         .to_string();
-        let claim_response =
-            raw_request(address, "/v1/challenge/claim", "secret-value", &claim_body).await;
+        let hello_response = raw_request(address, "/v1/challenge/hello", &hello_body).await;
+        assert!(hello_response.starts_with("HTTP/1.1 200 OK"));
+        assert!(!hello_response.contains("secret-value"));
+
+        let claim = claim_request("secret-value", "https://suno.com/create");
+        let claim_body = String::from_utf8(claim.body).expect("claim body");
+        let claim_response = raw_request(address, "/v1/challenge/claim", &claim_body).await;
         assert!(claim_response.starts_with("HTTP/1.1 200 OK"));
         assert!(claim_response.contains(
             "Access-Control-Allow-Origin: chrome-extension://abcdefghijklmnopabcdefghijklmnop"
         ));
         assert!(claim_response.contains("\"provider\":\"hcaptcha\""));
 
-        let result_body = serde_json::json!({
-            "version": 1,
-            "request_id": "request-a",
-            "token": "abcdefghijklmnopqrstuvwxyz",
-            "error": null
-        })
-        .to_string();
-        let result_response = raw_request(
-            address,
-            "/v1/challenge/result",
-            "secret-value",
-            &result_body,
-        )
-        .await;
+        let result = result_request("secret-value", "abcdefghijklmnopqrstuvwxyz");
+        let result_body = String::from_utf8(result.body).expect("result body");
+        let result_response = raw_request(address, "/v1/challenge/result", &result_body).await;
         assert!(result_response.starts_with("HTTP/1.1 204 No Content"));
         let BridgeResult::Token(token) = receiver.await.expect("bridge result") else {
             panic!("expected token");
@@ -664,15 +794,42 @@ mod tests {
         server.await.expect("server task");
     }
 
-    async fn raw_request(
-        address: std::net::SocketAddr,
-        path: &str,
-        secret: &str,
-        body: &str,
-    ) -> String {
+    #[test]
+    fn hello_response_proves_server_identity_without_receiving_the_secret() {
+        let (state, _receiver) = state("secret-value");
+        let hello = request(
+            "/v1/challenge/hello",
+            serde_json::json!({
+            "version": 1,
+                "client_nonce": "client-nonce-00000001"
+            }),
+        );
+
+        let response = route_request(&hello, &state).expect("hello response");
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("hello JSON");
+        let expected = authentication_proof(
+            "secret-value",
+            "sunox-bridge-server-v1",
+            &["29764", "client-nonce-00000001", "server-nonce-00000001"],
+        );
+
+        assert_eq!(response.status, 200);
+        assert_eq!(body["proof"], expected);
+        assert_eq!(
+            expected,
+            "e036e106ebdc8445e1afe3c875cb914ff8b3288383afe780e62e67475b1f38b7"
+        );
+        assert!(
+            !String::from_utf8(response.body)
+                .expect("body")
+                .contains("secret-value")
+        );
+    }
+
+    async fn raw_request(address: std::net::SocketAddr, path: &str, body: &str) -> String {
         let mut stream = TcpStream::connect(address).await.expect("connect");
         let request = format!(
-            "POST {path} HTTP/1.1\r\nHost: {address}\r\nOrigin: chrome-extension://abcdefghijklmnopabcdefghijklmnop\r\nX-Sunox-Extension: 1\r\nAuthorization: Bearer {secret}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            "POST {path} HTTP/1.1\r\nHost: {address}\r\nOrigin: chrome-extension://abcdefghijklmnopabcdefghijklmnop\r\nX-Sunox-Extension: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
         stream.write_all(request.as_bytes()).await.expect("write");

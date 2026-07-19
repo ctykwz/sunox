@@ -60,7 +60,8 @@
         reportapi: "https://hcaptcha-reportapi-prod.suno.com"
       });
       const result = await hcaptcha.execute(widgetId, { async: true });
-      return result?.response || "";
+      if (!result?.response) throw new Error("hCaptcha returned an empty token");
+      return result.response;
     } finally {
       if (widgetId !== undefined) {
         try { hcaptcha.remove(widgetId); } catch {}

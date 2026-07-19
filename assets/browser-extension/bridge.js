@@ -31,7 +31,7 @@
   }
 
   async function poll() {
-    if (busy || location.hostname !== "suno.com") return;
+    if (busy || location.hostname !== "suno.com") return false;
     busy = true;
     try {
       const challenge = await chrome.runtime.sendMessage({
@@ -39,22 +39,22 @@
         clientId,
         pageUrl: location.href
       });
-      if (!challenge) return;
-      if (challenge.bridgeError) {
-        console.warn(`Sunox Browser Bridge: ${challenge.bridgeError}`);
-        return;
-      }
+      if (!challenge) return false;
 
       const result = await executeInPage(challenge);
       await chrome.runtime.sendMessage({
         type: "sunox-result",
         bridgePort: challenge.bridgePort,
+        clientNonce: challenge.clientNonce,
+        serverNonce: challenge.serverNonce,
         requestId: challenge.request_id,
         token: result.token,
         error: result.error
       });
+      return true;
     } catch {
       // The CLI listener is normally absent. Polling failures are expected.
+      return false;
     } finally {
       busy = false;
     }
