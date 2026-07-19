@@ -1,7 +1,7 @@
 use super::SunoClient;
 #[cfg(test)]
 use super::types::Clip;
-use super::types::{ControlSliders, GenerateRequest, LastTagsGeneration};
+use super::types::{ControlSliders, GenerateRequest, LastTagsGeneration, PromptUpsampleRequest};
 use crate::core::CliError;
 
 pub struct InspirationOptions<'a> {
@@ -32,7 +32,15 @@ impl SunoClient {
                 "inspiration generation requires non-empty --tags".into(),
             ));
         }
-        let upsampled = self.upsample_tags(original_tags, false).await?;
+        let lyrics = options.lyrics.trim();
+        let upsampled = self
+            .upsample_tags(PromptUpsampleRequest {
+                original_tags,
+                lyrics: (!lyrics.is_empty()).then_some(lyrics),
+                is_instrumental: false,
+                user_guidance: None,
+            })
+            .await?;
         let mut req = GenerateRequest::new("chirp-fenix", "custom");
         req.task = Some("playlist_condition".into());
         req.title = Some(options.title.to_string());

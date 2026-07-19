@@ -80,7 +80,7 @@ impl SunoClient {
         req.continue_clip_id = Some(options.clip_id.to_string());
         req.continue_at = Some(options.continue_at);
         req.metadata.is_remix = Some(true);
-        req.metadata.lyrics_updated = Some(true);
+        req.metadata.lyrics_updated = Some(options.lyrics.is_some());
         req.set_challenge_token(options.challenge_token);
 
         Ok(req)

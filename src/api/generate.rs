@@ -1,10 +1,8 @@
-use std::collections::HashMap;
-
 use super::SunoClient;
-use super::types::{Clip, GenerateRequest, GenerateResponse, Model};
+use super::types::{
+    Clip, FeedFilters, FeedResponse, FeedV3Request, GenerateRequest, GenerateResponse, Model,
+};
 use crate::core::CliError;
-
-const FEED_IDS_CHUNK_SIZE: usize = 2;
 
 impl SunoClient {
     /// Submit a music generation request (custom mode or inspiration mode).
@@ -64,6 +62,7 @@ impl SunoClient {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) async fn submit_prepared_generation(
         &self,
         req: &GenerateRequest,
@@ -75,17 +74,24 @@ impl SunoClient {
             .await
     }
 
+    #[cfg(test)]
     async fn ensure_generation_challenge(&self, has_token: bool) -> Result<(), CliError> {
         if !has_token {
-            let mut challenge = self.generation_challenge().await?;
-            if challenge.required && self.try_refresh_jwt_for_challenge_recheck().await? {
-                challenge = self.generation_challenge().await?;
-            }
+            let challenge = self.generation_challenge_with_refresh().await?;
             if challenge.required {
                 return Err(generation_challenge_error(&challenge));
             }
         }
         Ok(())
+    }
+
+    pub(crate) async fn submit_prepared_generation_after_challenge(
+        &self,
+        req: &GenerateRequest,
+    ) -> Result<Vec<Clip>, CliError> {
+        let body = serde_json::to_value(req)?;
+        self.submit_generation_body(&body, req.token.is_some())
+            .await
     }
 
     async fn submit_generation_body(
@@ -104,30 +110,60 @@ impl SunoClient {
         .await
     }
 
-    /// Fetch clips by IDs. Batches in pairs because Suno's feed endpoint can
-    /// drop results when queried with larger mixed batches.
-    /// Each chunk is wrapped in `with_auth_retry` so explicit wait/status
-    /// flows survive Suno's JWT staleness window mid-generation.
+    /// Fetch clips by IDs using the same split as the current Web client:
+    /// direct `/api/clip/{id}` for a single detail read and batched feed/v3
+    /// exact-ID filters for generation polling and other multi-clip reads.
+    /// Temporarily missing clips are omitted so polling callers can retry them.
     pub async fn get_clips(&self, ids: &[String]) -> Result<Vec<Clip>, CliError> {
-        let mut all_clips = Vec::new();
-        for chunk in ids.chunks(FEED_IDS_CHUNK_SIZE) {
-            let ids_param = chunk.join(",");
-            let path = format!("/api/feed/?ids={ids_param}");
-            let clips: Vec<Clip> = self
+        const WEB_POLL_BATCH_SIZE: usize = 48;
+
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if ids.len() == 1 {
+            return Ok(self.get_clip(&ids[0]).await?.into_iter().collect());
+        }
+
+        let mut by_id = std::collections::HashMap::with_capacity(ids.len());
+        for batch in ids.chunks(WEB_POLL_BATCH_SIZE) {
+            let req = FeedV3Request {
+                cursor: None,
+                limit: Some(batch.len() as u32),
+                filters: Some(FeedFilters::ids(batch)),
+            };
+            let response: FeedResponse = self
                 .with_auth_retry(|| async {
-                    let resp = self.get(&path).send().await?;
+                    let resp = self.post("/api/feed/v3").json(&req).send().await?;
                     let resp = self.check_response(resp).await?;
-                    let clips: Vec<Clip> = resp.json().await?;
-                    Ok(clips)
+                    Ok(resp.json().await?)
                 })
                 .await?;
-            all_clips.extend(clips);
+            by_id.extend(
+                response
+                    .clips
+                    .into_iter()
+                    .map(|clip| (clip.id.clone(), clip)),
+            );
         }
-        let mut clips_by_id = all_clips
-            .into_iter()
-            .map(|clip| (clip.id.clone(), clip))
-            .collect::<HashMap<_, _>>();
-        Ok(ids.iter().filter_map(|id| clips_by_id.remove(id)).collect())
+
+        Ok(ids.iter().filter_map(|id| by_id.get(id).cloned()).collect())
+    }
+
+    async fn get_clip(&self, id: &str) -> Result<Option<Clip>, CliError> {
+        let path = format!("/api/clip/{id}");
+        self.with_auth_retry(|| async {
+            let resp = self.get(&path).send().await?;
+            if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                return Ok(None);
+            }
+            let resp = self.check_response(resp).await?;
+            let value: serde_json::Value = resp.json().await?;
+            if value.is_null() {
+                return Ok(None);
+            }
+            Ok(Some(serde_json::from_value::<Clip>(value)?))
+        })
+        .await
     }
 }
 
@@ -184,6 +220,7 @@ fn validate_length(field: &str, value: Option<&str>, limit: u32) -> Result<(), C
     Ok(())
 }
 
+#[cfg(test)]
 fn generation_challenge_error(challenge: &super::challenge::GenerationChallenge) -> CliError {
     let version = challenge
         .captcha_version
@@ -196,7 +233,7 @@ fn generation_challenge_error(challenge: &super::challenge::GenerationChallenge)
 
 #[cfg(test)]
 mod tests {
-    use super::{FEED_IDS_CHUNK_SIZE, select_generation_model, validate_generation_lengths};
+    use super::{select_generation_model, validate_generation_lengths};
     use crate::api::types::{GenerateRequest, MaxLengths, Model};
 
     fn model(can_use: bool, is_default_model: bool, max_lengths: MaxLengths) -> Model {
@@ -207,12 +244,8 @@ mod tests {
             is_default_model,
             description: "fixture".into(),
             max_lengths,
+            extra: Default::default(),
         }
-    }
-
-    #[test]
-    fn feed_id_batch_size_documents_current_web_limit() {
-        assert_eq!(FEED_IDS_CHUNK_SIZE, 2);
     }
 
     #[test]

@@ -9,7 +9,8 @@ use tokio::process::{Child, Command};
 use tokio::time::sleep;
 
 use super::cdp;
-use crate::browser::locate_chromium_browser;
+use crate::auth::BrowserEnvironment;
+use crate::browser::{locate_chromium_browser, locate_chromium_browser_for_source};
 use crate::core::CliError;
 
 pub(super) struct BrowserSession {
@@ -34,15 +35,17 @@ impl BrowserSession {
 
 /// Launch a browser owned by this invocation. Chrome chooses an unused CDP
 /// port and records it inside the invocation's private temporary profile.
-pub(super) async fn launch() -> Result<BrowserSession, CliError> {
-    let browser_path = locate_chromium_browser()?;
+pub(super) async fn launch(
+    browser_environment: Option<&BrowserEnvironment>,
+) -> Result<BrowserSession, CliError> {
+    let browser_path = challenge_browser_path(browser_environment)?;
     let profile = tempfile::Builder::new()
         .prefix("sunox-captcha-")
         .tempdir()
         .map_err(CliError::Io)?;
     let active_port_path = profile.path().join("DevToolsActivePort");
 
-    eprintln!("Launching browser for captcha solver...");
+    eprintln!("Launching browser for generation challenge solver...");
 
     // Do not use --headless. hCaptcha's bot-detection trips on headless mode.
     let mut command = Command::new(&browser_path);
@@ -91,6 +94,36 @@ pub(super) async fn launch() -> Result<BrowserSession, CliError> {
     Err(CliError::Config(
         "Browser was spawned but never exposed its owned CDP endpoint. Check that Chrome or Edge can start normally, or set SUNOX_BROWSER_PATH to a Chromium-family browser binary.".into(),
     ))
+}
+
+fn challenge_browser_path(
+    browser_environment: Option<&BrowserEnvironment>,
+) -> Result<PathBuf, CliError> {
+    if let Some(source) = browser_environment
+        .and_then(|environment| environment.browser_source.as_deref())
+        .filter(|source| is_chromium_source(source))
+        && let Ok(path) = locate_chromium_browser_for_source(source)
+    {
+        return Ok(path);
+    }
+    locate_chromium_browser()
+}
+
+fn is_chromium_source(source: &str) -> bool {
+    matches!(
+        source.trim().to_ascii_lowercase().as_str(),
+        "chrome"
+            | "chrome-beta"
+            | "chrome-dev"
+            | "chrome-canary"
+            | "chromium"
+            | "edge"
+            | "edge-beta"
+            | "edge-dev"
+            | "edge-canary"
+            | "brave"
+            | "arc"
+    )
 }
 
 fn read_owned_cdp_port(path: &std::path::Path) -> Result<u16, CliError> {
@@ -172,7 +205,7 @@ fn drain_stderr(child: &mut Child) {
 mod tests {
     use std::io::Write;
 
-    use super::{is_legacy_captcha_command, read_owned_cdp_port};
+    use super::{is_chromium_source, is_legacy_captcha_command, read_owned_cdp_port};
 
     #[test]
     fn owned_cdp_port_comes_from_private_profile_file() {
@@ -212,5 +245,14 @@ mod tests {
         assert!(is_legacy_captcha_command(&owned, profile));
         assert!(!is_legacy_captcha_command(&wrong_port, profile));
         assert!(!is_legacy_captcha_command(&prefix_collision, profile));
+    }
+
+    #[test]
+    fn challenge_browser_source_accepts_only_cdp_capable_browsers() {
+        assert!(is_chromium_source("chrome"));
+        assert!(is_chromium_source("edge-dev"));
+        assert!(is_chromium_source("arc"));
+        assert!(!is_chromium_source("firefox"));
+        assert!(!is_chromium_source("interactive-browser"));
     }
 }

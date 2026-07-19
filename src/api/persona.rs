@@ -4,7 +4,7 @@ use super::SunoClient;
 use super::types::{
     CreatePersonaRequest, EditPersonaRequest, PersonaClipsResponse, PersonaInfo,
     PersonaListResponse, PersonaListScope, ProcessedClipInfo, TogglePersonaLoveResponse,
-    TrashPersonasRequest, TrashPersonasResponse,
+    TrashPersonasResponse,
 };
 use crate::core::CliError;
 
@@ -138,7 +138,10 @@ impl SunoClient {
     ) -> Result<TogglePersonaLoveResponse, CliError> {
         let persona = self.get_persona(persona_id).await?;
         if persona.is_loved == loved {
-            return Ok(TogglePersonaLoveResponse { loved });
+            return Ok(TogglePersonaLoveResponse {
+                loved,
+                extra: Default::default(),
+            });
         }
         self.toggle_persona_love(persona_id).await
     }
@@ -163,7 +166,7 @@ impl SunoClient {
     }
 
     /// Move personas to trash.
-    /// PUT /api/persona/bulk-trash-personas/
+    /// PUT /api/persona/trash-persona/{persona_id}/?undo=false&hide=false
     pub async fn trash_personas(
         &self,
         persona_ids: &[String],
@@ -173,7 +176,7 @@ impl SunoClient {
     }
 
     /// Restore personas from trash.
-    /// PUT /api/persona/bulk-trash-personas/
+    /// PUT /api/persona/trash-persona/{persona_id}/?undo=true&hide=false
     pub async fn restore_personas(
         &self,
         persona_ids: &[String],
@@ -183,7 +186,7 @@ impl SunoClient {
     }
 
     /// Permanently hide/delete personas from trash.
-    /// PUT /api/persona/bulk-trash-personas/
+    /// PUT /api/persona/trash-persona/{persona_id}/?undo=false&hide=true
     pub async fn purge_personas(
         &self,
         persona_ids: &[String],
@@ -198,21 +201,68 @@ impl SunoClient {
         undo: bool,
         hide: bool,
     ) -> Result<TrashPersonasResponse, CliError> {
-        self.with_auth_retry(|| async {
-            let req = TrashPersonasRequest {
-                persona_ids: persona_ids.to_vec(),
-                undo,
-                hide,
+        let operation = match (undo, hide) {
+            (true, _) => "restore_personas",
+            (false, true) => "purge_personas",
+            (false, false) => "trash_personas",
+        };
+        let mut result = TrashPersonasResponse {
+            updated_persona_ids: Vec::with_capacity(persona_ids.len()),
+            voice_persona_count: 0,
+            max_voice_personas: 0,
+            extra: Default::default(),
+        };
+
+        for (index, persona_id) in persona_ids.iter().enumerate() {
+            let response = match self
+                .with_auth_retry(|| async {
+                    let resp = self
+                        .put(&format!("/api/persona/trash-persona/{persona_id}/"))
+                        .query(&[("undo", undo), ("hide", hide)])
+                        .send()
+                        .await?;
+                    let resp = self.check_response(resp).await?;
+                    let body = resp.text().await?;
+                    if body.trim().is_empty() {
+                        return Ok(None);
+                    }
+                    Ok(Some(serde_json::from_str::<TrashPersonasResponse>(&body)?))
+                })
+                .await
+            {
+                Ok(response) => response,
+                Err(error) if result.updated_persona_ids.is_empty() => return Err(error),
+                Err(error) => {
+                    return Err(CliError::PartialMutation {
+                        message: format!(
+                            "{operation} completed for {} persona(s), failed for {persona_id}, and left {} persona(s) not attempted",
+                            result.updated_persona_ids.len(),
+                            persona_ids.len().saturating_sub(index + 1)
+                        ),
+                        details: serde_json::json!({
+                            "operation": operation,
+                            "requested_persona_ids": persona_ids,
+                            "succeeded_persona_ids": result.updated_persona_ids,
+                            "failed": {
+                                "persona_id": persona_id,
+                                "code": error.error_code(),
+                                "message": error.to_string()
+                            },
+                            "not_attempted_persona_ids": &persona_ids[index + 1..]
+                        }),
+                    });
+                }
             };
-            let resp = self
-                .put("/api/persona/bulk-trash-personas/")
-                .json(&req)
-                .send()
-                .await?;
-            let resp = self.check_response(resp).await?;
-            Ok(resp.json().await?)
-        })
-        .await
+
+            result.updated_persona_ids.push(persona_id.clone());
+            if let Some(response) = response {
+                result.voice_persona_count = response.voice_persona_count;
+                result.max_voice_personas = response.max_voice_personas;
+                result.extra.extend(response.extra);
+            }
+        }
+
+        Ok(result)
     }
 }
 

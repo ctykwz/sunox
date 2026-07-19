@@ -32,12 +32,13 @@ pub use persona::{
     CreatePersonaRequest, EditPersonaRequest, PersonaClipsResponse, PersonaInfo,
     PersonaListResponse, PersonaListScope, ProcessedClipInfo,
 };
-pub use persona::{TogglePersonaLoveResponse, TrashPersonasRequest, TrashPersonasResponse};
+pub use persona::{TogglePersonaLoveResponse, TrashPersonasResponse};
 pub use playlist::{
     CreatePlaylistRequest, PlaylistInfo, PlaylistListResponse, PlaylistReaction,
     PlaylistReorderRequest, PlaylistTrackMutationFailure, PlaylistTrackMutationReport,
     PlaylistTracksRequest, SetPlaylistCoverRequest, SetPlaylistMetadataRequest,
-    SetPlaylistReactionRequest, SetPlaylistVisibilityRequest, TrashPlaylistRequest,
+    SetPlaylistMetadataV2Request, SetPlaylistReactionRequest, SetPlaylistVisibilityRequest,
+    TrashPlaylistRequest,
 };
 pub use prompts::{PromptUpsampleRequest, PromptUpsampleResponse};
 pub use upload::{

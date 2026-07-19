@@ -38,7 +38,8 @@ impl SunoClient {
             .find(|clip| clip.id == clip_id)
             .ok_or_else(|| CliError::NotFound(format!("clip: {clip_id}")))?;
 
-        let mut req = GenerateRequest::new(model_key, "cover");
+        let mut req = GenerateRequest::new(model_key, "custom");
+        req.task = Some("cover".into());
         req.title = Some(source.title);
         req.tags = tags.map(String::from);
         req.cover_clip_id = Some(clip_id.to_string());

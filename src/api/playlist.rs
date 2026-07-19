@@ -5,7 +5,8 @@ use super::types::{
     CreatePlaylistRequest, PlaylistInfo, PlaylistListResponse, PlaylistReaction,
     PlaylistReorderRequest, PlaylistTrackMutationFailure, PlaylistTrackMutationReport,
     PlaylistTracksRequest, SetPlaylistCoverRequest, SetPlaylistMetadataRequest,
-    SetPlaylistReactionRequest, SetPlaylistVisibilityRequest, TrashPlaylistRequest,
+    SetPlaylistMetadataV2Request, SetPlaylistReactionRequest, SetPlaylistVisibilityRequest,
+    TrashPlaylistRequest,
 };
 use crate::core::CliError;
 
@@ -55,9 +56,36 @@ impl SunoClient {
         .await
     }
 
-    /// Update playlist metadata.
-    /// POST /api/playlist/set_metadata
+    /// Update playlist metadata through the current v2 route. The legacy
+    /// endpoint remains an explicit compatibility path only for arbitrary
+    /// external image URLs, which the v2 S3-cover contract cannot represent.
     pub async fn set_playlist_metadata(
+        &self,
+        playlist_id: &str,
+        name: Option<&str>,
+        description: Option<&str>,
+        image_url: Option<&str>,
+    ) -> Result<(), CliError> {
+        if image_url.is_none() {
+            let req = SetPlaylistMetadataV2Request::new(name, description);
+            return self
+                .with_auth_retry(|| async {
+                    let resp = self
+                        .patch(&format!("/api/playlist/v2/{playlist_id}"))
+                        .json(&req)
+                        .send()
+                        .await?;
+                    self.check_response(resp).await?;
+                    Ok(())
+                })
+                .await;
+        }
+
+        self.set_playlist_metadata_legacy(playlist_id, name, description, image_url)
+            .await
+    }
+
+    async fn set_playlist_metadata_legacy(
         &self,
         playlist_id: &str,
         name: Option<&str>,

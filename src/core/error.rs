@@ -149,7 +149,7 @@ impl CliError {
                 "Inspect the failure message and retry only after addressing the reported cause"
             }
             Self::ChallengeRequired(_) => {
-                "Provide a valid challenge token with `--token`, use `--captcha`, or complete a manual generation challenge in the Suno web app"
+                "Keep a supported local browser available and retry without `--no-captcha`; otherwise provide a valid challenge token with `--token` or complete a manual generation challenge in the Suno web app"
             }
             Self::PartialMutation { .. } => {
                 "Inspect error.details before retrying; when recovery is present, follow it only if recovery.resumable is true"
@@ -276,7 +276,8 @@ mod tests {
         let error = CliError::ChallengeRequired("captcha_version=4".into());
 
         assert_eq!(error.error_code(), "challenge_required");
-        assert!(error.suggestion().contains("--captcha"));
+        assert!(error.suggestion().contains("--no-captcha"));
+        assert!(error.suggestion().contains("--token"));
         assert!(!error.suggestion().contains("doctor"));
     }
 }

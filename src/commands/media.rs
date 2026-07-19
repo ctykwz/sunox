@@ -110,6 +110,7 @@ async fn download_file(
                 url,
                 options.force,
                 options.quiet,
+                ctx,
                 client,
             )
             .await
@@ -123,6 +124,7 @@ async fn download_file(
                     &url,
                     options.force,
                     options.quiet,
+                    ctx,
                     client,
                 )
                 .await
@@ -148,11 +150,21 @@ async fn download_mp3_with_lyrics(
     url: &str,
     force: bool,
     quiet: bool,
+    ctx: &AppContext,
     client: &crate::api::SunoClient,
 ) -> Result<(String, Option<DownloadWarning>), CliError> {
     let staged = media::stage_clip_url(clip, output_dir, url, "mp3", force, quiet).await?;
-    let plain_lyrics = clip.metadata.prompt.as_deref();
-    let (aligned, warning) = match client.aligned_lyrics(&clip.id).await {
+    let plain_lyrics = clip_alignment_lyrics(clip);
+    let enable_augmentation = !clip_has_concat_history(clip);
+    let (aligned, warning) = match client
+        .aligned_lyrics(
+            &clip.id,
+            plain_lyrics,
+            enable_augmentation,
+            configured_polling(ctx),
+        )
+        .await
+    {
         Ok(aligned) => (Some(aligned), None),
         Err(error) if error.is_auth_or_rate_limit() => return Err(error),
         Err(error) => {
@@ -326,7 +338,19 @@ pub async fn upload_status(args: UploadStatusArgs, ctx: &AppContext) -> Result<(
 
 pub async fn timed_lyrics(args: TimedLyricsArgs, ctx: &AppContext) -> Result<(), CliError> {
     let render = timed_lyrics_render(args.lrc, ctx.fmt, ctx.json_explicit)?;
-    let words = ctx.client().await?.aligned_lyrics(&args.id).await?;
+    let client = ctx.client().await?;
+    let ids = vec![args.id.clone()];
+    let clips = tasks::require_found_clips(&ids, client.get_clips(&ids).await?)?;
+    let clip = &clips[0];
+    let enable_augmentation = !clip_has_concat_history(clip);
+    let words = client
+        .aligned_lyrics(
+            &args.id,
+            clip_alignment_lyrics(clip),
+            enable_augmentation,
+            configured_polling(ctx),
+        )
+        .await?;
     match render {
         TimedLyricsRender::Json => output::json::success(&words),
         TimedLyricsRender::Lrc => {
@@ -351,6 +375,37 @@ pub async fn timed_lyrics(args: TimedLyricsArgs, ctx: &AppContext) -> Result<(),
         }
     }
     Ok(())
+}
+
+fn clip_alignment_lyrics(clip: &crate::api::types::Clip) -> Option<&str> {
+    clip.metadata
+        .extra
+        .get("infill_lyrics")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            clip.metadata
+                .prompt
+                .as_deref()
+                .filter(|value| !value.is_empty())
+        })
+}
+
+fn clip_has_concat_history(clip: &crate::api::types::Clip) -> bool {
+    clip.metadata
+        .extra
+        .get("concat_history")
+        .is_some_and(json_value_is_truthy)
+}
+
+fn json_value_is_truthy(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => false,
+        serde_json::Value::Bool(value) => *value,
+        serde_json::Value::Number(value) => value.as_f64().is_some_and(|value| value != 0.0),
+        serde_json::Value::String(value) => !value.is_empty(),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => true,
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -386,8 +441,8 @@ mod tests {
     use crate::output::OutputFormat;
 
     use super::{
-        AudioDownloadSource, TimedLyricsRender, audio_download_source, partial_download_error,
-        timed_lyrics_render,
+        AudioDownloadSource, TimedLyricsRender, audio_download_source, clip_alignment_lyrics,
+        json_value_is_truthy, partial_download_error, timed_lyrics_render,
     };
 
     #[test]
@@ -473,5 +528,34 @@ mod tests {
             timed_lyrics_render(false, OutputFormat::Table, false).expect("table"),
             TimedLyricsRender::Table
         );
+    }
+
+    #[test]
+    fn concat_history_uses_javascript_truthiness_for_augmentation() {
+        assert!(json_value_is_truthy(&serde_json::json!([])));
+        assert!(json_value_is_truthy(&serde_json::json!({})));
+        assert!(json_value_is_truthy(&serde_json::json!("history")));
+        assert!(!json_value_is_truthy(&serde_json::Value::Null));
+        assert!(!json_value_is_truthy(&serde_json::json!(false)));
+        assert!(!json_value_is_truthy(&serde_json::json!(0)));
+        assert!(!json_value_is_truthy(&serde_json::json!("")));
+    }
+
+    #[test]
+    fn empty_infill_lyrics_fall_back_to_the_clip_prompt() {
+        let clip: crate::api::types::Clip = serde_json::from_value(serde_json::json!({
+            "id": "clip-1",
+            "title": "Song",
+            "status": "complete",
+            "model_name": "chirp-fenix",
+            "created_at": "2026-07-19T00:00:00Z",
+            "metadata": {
+                "infill_lyrics": "",
+                "prompt": "[Verse]\nWords"
+            }
+        }))
+        .expect("clip");
+
+        assert_eq!(clip_alignment_lyrics(&clip), Some("[Verse]\nWords"));
     }
 }

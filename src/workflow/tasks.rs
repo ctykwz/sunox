@@ -107,6 +107,7 @@ mod tests {
             play_count: 0,
             upvote_count: 0,
             metadata: Default::default(),
+            extra: Default::default(),
         }
     }
 

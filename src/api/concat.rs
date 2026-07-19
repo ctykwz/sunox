@@ -9,6 +9,7 @@ impl SunoClient {
                 .post("/api/generate/concat/v2/")
                 .json(&ConcatRequest {
                     clip_id: clip_id.to_string(),
+                    is_infill: false,
                 })
                 .send()
                 .await?;

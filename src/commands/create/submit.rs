@@ -6,7 +6,7 @@ use crate::cli::{CreateArgs, DescribeArgs, ExtendArgs, GenerateArgs, ModelVersio
 use crate::core::{AppConfig, CliError};
 use crate::workflow::generation::{build_control_sliders, build_tags};
 
-use super::support::{execute_generation_submission, output_clips};
+use super::support::{ChallengeMode, execute_generation_submission, output_clips};
 
 pub async fn create(args: CreateArgs, ctx: &AppContext) -> Result<(), CliError> {
     if args.instrumental || args.lyrics.is_some() || args.lyrics_file.is_some() {
@@ -100,7 +100,7 @@ fn non_empty(value: String) -> Option<String> {
 
 async fn generate(args: GenerateArgs, ctx: &AppContext) -> Result<(), CliError> {
     let mut req = build_generate_request(&args, &ctx.config)?;
-    let force_captcha = args.captcha && !args.no_captcha;
+    let challenge_mode = ChallengeMode::from_flags(args.captcha, args.no_captcha);
     let token = args.token.clone();
     let enhance_tags = args.enhance_tags;
     let instrumental = args.instrumental;
@@ -116,21 +116,12 @@ async fn generate(args: GenerateArgs, ctx: &AppContext) -> Result<(), CliError> 
             model_label(args.model.as_ref(), &ctx.config)
         );
     }
-    let clips = execute_generation_submission(
-        token,
-        force_captcha,
-        ctx,
-        move || async move {
-            let client = ctx.client().await?;
-            maybe_enhance_tags(&mut req, enhance_tags, instrumental, &client).await?;
-            client.prepare_generation_request(&mut req).await?;
-            Ok((client, req))
-        },
-        |(client, mut req), challenge_token| async move {
-            req.set_challenge_token(challenge_token);
-            client.submit_prepared_generation(&req).await
-        },
-    )
+    let clips = execute_generation_submission(token, challenge_mode, ctx, move || async move {
+        let client = ctx.client().await?;
+        maybe_enhance_tags(&mut req, enhance_tags, instrumental, &client).await?;
+        client.prepare_generation_request(&mut req).await?;
+        Ok((client, req))
+    })
     .await?;
     output_clips(&clips, ctx);
     Ok(())
@@ -150,26 +141,32 @@ fn build_generate_request(
     } else {
         args.vocal.as_ref()
     };
-    let tags = build_tags(args.tags.as_deref(), vocal);
+    let tags = build_tags(args.tags.as_deref(), None);
     let control_sliders = build_control_sliders(args.weirdness, args.style_influence)?;
 
     let mut req = GenerateRequest::new(model_api_key(args.model.as_ref(), config), "custom");
     if let (Some(lyrics), false) = (lyrics, args.instrumental) {
-        req.gpt_description_prompt = Some(lyrics);
-        req.metadata.lyrics_model = Some("default".into());
+        req.prompt = lyrics;
     }
-    req.title = args.title.clone();
-    req.tags = tags;
+    req.title = Some(args.title.clone().unwrap_or_default());
+    req.tags = Some(tags.unwrap_or_default());
     req.negative_tags = args.exclude.clone().unwrap_or_default();
     req.make_instrumental = args.instrumental;
     req.persona_id = args.persona.clone();
     req.metadata.control_sliders = control_sliders;
+    req.metadata.vocal_gender = vocal.map(|gender| match gender {
+        crate::cli::VocalGender::Male => "m".to_string(),
+        crate::cli::VocalGender::Female => "f".to_string(),
+    });
+    if req.persona_id.is_some() {
+        req.override_fields = vec!["prompt".to_string(), "tags".to_string()];
+    }
     Ok(req)
 }
 
 async fn describe(args: DescribeArgs, ctx: &AppContext) -> Result<(), CliError> {
     let mut req = build_describe_request(&args, &ctx.config)?;
-    let force_captcha = args.captcha && !args.no_captcha;
+    let challenge_mode = ChallengeMode::from_flags(args.captcha, args.no_captcha);
     let token = args.token.clone();
     let enhance_tags = args.enhance_tags;
     let instrumental = args.instrumental;
@@ -180,21 +177,12 @@ async fn describe(args: DescribeArgs, ctx: &AppContext) -> Result<(), CliError> 
             model_label(args.model.as_ref(), &ctx.config)
         );
     }
-    let clips = execute_generation_submission(
-        token,
-        force_captcha,
-        ctx,
-        move || async move {
-            let client = ctx.client().await?;
-            maybe_enhance_tags(&mut req, enhance_tags, instrumental, &client).await?;
-            client.prepare_generation_request(&mut req).await?;
-            Ok((client, req))
-        },
-        |(client, mut req), challenge_token| async move {
-            req.set_challenge_token(challenge_token);
-            client.submit_prepared_generation(&req).await
-        },
-    )
+    let clips = execute_generation_submission(token, challenge_mode, ctx, move || async move {
+        let client = ctx.client().await?;
+        maybe_enhance_tags(&mut req, enhance_tags, instrumental, &client).await?;
+        client.prepare_generation_request(&mut req).await?;
+        Ok((client, req))
+    })
     .await?;
     output_clips(&clips, ctx);
     Ok(())
@@ -207,14 +195,21 @@ fn build_describe_request(
     let tags = build_tags(args.tags.as_deref(), args.vocal.as_ref());
     let control_sliders = build_control_sliders(args.weirdness, args.style_influence)?;
 
-    let mut req = GenerateRequest::new(model_api_key(args.model.as_ref(), config), "inspiration");
-    req.prompt = args.prompt.clone();
+    let mut req = GenerateRequest::new(model_api_key(args.model.as_ref(), config), "simple");
+    req.gpt_description_prompt = Some(args.prompt.clone());
+    req.metadata.lyrics_model = Some("default".into());
     req.title = Some(args.title.clone().unwrap_or_default());
     req.tags = tags;
     req.negative_tags = args.exclude.clone().unwrap_or_default();
     req.make_instrumental = args.instrumental;
     req.persona_id = args.persona.clone();
     req.metadata.control_sliders = control_sliders;
+    if req.tags.is_some() {
+        mark_tags_override(&mut req);
+    }
+    if req.persona_id.is_some() {
+        req.override_fields = vec!["prompt".to_string(), "tags".to_string()];
+    }
     Ok(req)
 }
 
@@ -229,8 +224,16 @@ async fn maybe_enhance_tags(
     }
 
     let original_tags = req.tags.clone().unwrap_or_default();
+    let lyrics = (!is_instrumental)
+        .then_some(req.prompt.trim())
+        .filter(|lyrics| !lyrics.is_empty());
     let upsample = client
-        .upsample_tags(&original_tags, is_instrumental)
+        .upsample_tags(crate::api::types::PromptUpsampleRequest {
+            original_tags: &original_tags,
+            lyrics,
+            is_instrumental,
+            user_guidance: None,
+        })
         .await?;
     req.tags = Some(upsample.upsampled.clone());
     req.metadata.last_tags_generation = Some(LastTagsGeneration::from_upsample_response(
@@ -261,7 +264,7 @@ fn model_label<'a>(model: Option<&'a ModelVersion>, config: &'a AppConfig) -> &'
 
 pub async fn extend(args: ExtendArgs, ctx: &AppContext) -> Result<(), CliError> {
     crate::core::ensure_non_negative_finite("--at", args.at)?;
-    let force_captcha = args.captcha && !args.no_captcha;
+    let challenge_mode = ChallengeMode::from_flags(args.captcha, args.no_captcha);
     let token = args.token.clone();
     let instrumental = if args.instrumental {
         Some(true)
@@ -270,32 +273,23 @@ pub async fn extend(args: ExtendArgs, ctx: &AppContext) -> Result<(), CliError> 
     } else {
         None
     };
-    let clips = execute_generation_submission(
-        token,
-        force_captcha,
-        ctx,
-        move || async move {
-            let client = ctx.client().await?;
-            let mut req = client
-                .prepare_extend_request(ExtendClipOptions {
-                    clip_id: &args.clip_id,
-                    continue_at: args.at,
-                    tags: args.tags.as_deref(),
-                    negative_tags: args.exclude.as_deref(),
-                    lyrics: args.lyrics.as_deref(),
-                    title: args.title.as_deref(),
-                    instrumental,
-                    challenge_token: None,
-                })
-                .await?;
-            client.prepare_generation_request(&mut req).await?;
-            Ok((client, req))
-        },
-        |(client, mut req), challenge_token| async move {
-            req.set_challenge_token(challenge_token);
-            client.submit_prepared_generation(&req).await
-        },
-    )
+    let clips = execute_generation_submission(token, challenge_mode, ctx, move || async move {
+        let client = ctx.client().await?;
+        let mut req = client
+            .prepare_extend_request(ExtendClipOptions {
+                clip_id: &args.clip_id,
+                continue_at: args.at,
+                tags: args.tags.as_deref(),
+                negative_tags: args.exclude.as_deref(),
+                lyrics: args.lyrics.as_deref(),
+                title: args.title.as_deref(),
+                instrumental,
+                challenge_token: None,
+            })
+            .await?;
+        client.prepare_generation_request(&mut req).await?;
+        Ok((client, req))
+    })
     .await?;
     output_clips(&clips, ctx);
     Ok(())
@@ -346,7 +340,14 @@ mod tests {
 
         let body = serde_json::to_value(req).expect("request json");
         assert_eq!(body["title"], "");
-        assert_eq!(body["metadata"]["create_mode"], "inspiration");
+        assert_eq!(body["metadata"]["create_mode"], "simple");
+        assert_eq!(
+            body["gpt_description_prompt"],
+            "bright city pop about a clean morning"
+        );
+        assert_eq!(body["prompt"], "");
+        assert_eq!(body["metadata"]["lyrics_model"], "default");
+        assert_eq!(body["override_fields"], serde_json::json!(["tags"]));
     }
 
     #[test]
@@ -455,15 +456,83 @@ mod tests {
 
         let body = serde_json::to_value(req).expect("request json");
         assert_eq!(body["mv"], "chirp-crow");
-        assert_eq!(body["prompt"], "");
-        assert_eq!(body["gpt_description_prompt"], "[Verse]\nHello");
-        assert_eq!(body["metadata"]["lyrics_model"], "default");
+        assert_eq!(body["prompt"], "[Verse]\nHello");
+        assert!(
+            !body
+                .as_object()
+                .expect("object")
+                .contains_key("gpt_description_prompt")
+        );
+        assert!(
+            !body["metadata"]
+                .as_object()
+                .expect("metadata object")
+                .contains_key("lyrics_model")
+        );
         assert!(
             body.as_object()
                 .expect("object")
                 .contains_key("token_provider")
         );
         assert!(body["token_provider"].is_null());
+    }
+
+    #[test]
+    fn custom_request_uses_current_web_vocal_gender_field() {
+        let args = crate::cli::GenerateArgs {
+            title: Some("Morning Reset".into()),
+            tags: Some("city pop".into()),
+            exclude: None,
+            lyrics: Some("[Verse]\nHello".into()),
+            lyrics_file: None,
+            model: None,
+            vocal: Some(crate::cli::VocalGender::Female),
+            weirdness: None,
+            style_influence: None,
+            enhance_tags: false,
+            instrumental: false,
+            token: None,
+            captcha: false,
+            no_captcha: false,
+            persona: None,
+        };
+
+        let req = build_generate_request(&args, &AppConfig::default()).expect("request");
+        let body = serde_json::to_value(req).expect("request json");
+
+        assert_eq!(body["tags"], "city pop");
+        assert_eq!(body["metadata"]["vocal_gender"], "f");
+    }
+
+    #[test]
+    fn custom_request_sends_web_empty_strings_and_persona_overrides() {
+        let args = crate::cli::GenerateArgs {
+            title: None,
+            tags: None,
+            exclude: None,
+            lyrics: Some("[Verse]\nHello".into()),
+            lyrics_file: None,
+            model: None,
+            vocal: None,
+            weirdness: None,
+            style_influence: None,
+            enhance_tags: false,
+            instrumental: false,
+            token: None,
+            captcha: false,
+            no_captcha: false,
+            persona: Some("persona-1".into()),
+        };
+
+        let req = build_generate_request(&args, &AppConfig::default()).expect("request");
+        let body = serde_json::to_value(req).expect("request json");
+
+        assert_eq!(body["title"], "");
+        assert_eq!(body["tags"], "");
+        assert_eq!(
+            body["override_fields"],
+            serde_json::json!(["prompt", "tags"])
+        );
     }
 
     #[test]

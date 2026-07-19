@@ -6,6 +6,7 @@ use super::Clip;
 
 #[derive(Debug, Serialize)]
 pub struct CreateAudioUploadRequest {
+    #[serde(flatten)]
     pub spec: CreateAudioUploadSpec,
 }
 
@@ -44,6 +45,7 @@ pub struct FinishImageUploadResponse {
 pub struct FinishAudioUploadRequest {
     pub upload_type: String,
     pub upload_filename: String,
+    pub agreed_to_vip_upload_terms: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -53,6 +55,8 @@ pub struct AudioUploadStatus {
     pub title: Option<String>,
     pub image_url: Option<String>,
     pub has_vocal: Option<bool>,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]

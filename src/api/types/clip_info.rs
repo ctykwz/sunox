@@ -1,4 +1,7 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::clip::Clip;
 
@@ -25,6 +28,8 @@ pub struct ClipInfoSupplementalError {
 pub struct ClipAttribution {
     #[serde(default)]
     pub source_clips: Vec<ClipAttributionSource>,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -43,6 +48,8 @@ pub struct ClipAttributionSource {
     pub relationship: Option<String>,
     #[serde(default)]
     pub user: Option<ClipAttributionUser>,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -55,6 +62,8 @@ pub struct ClipAttributionUser {
     pub user_handle: Option<String>,
     #[serde(default)]
     pub user_avatar_url: Option<String>,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -65,6 +74,8 @@ pub struct ClipComments {
     pub allow_comment: bool,
     #[serde(default)]
     pub total_count: u64,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -95,6 +106,8 @@ pub struct ClipComment {
     pub track_timestamp: Option<f64>,
     #[serde(default)]
     pub replies: Vec<serde_json::Value>,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -107,4 +120,38 @@ pub struct DirectChildrenCountResponse {
 pub struct SimilarClipsResponse {
     #[serde(default)]
     pub similar_clips: Vec<Clip>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn song_page_supplemental_unknown_fields_round_trip_in_place() {
+        let attribution: ClipAttribution = serde_json::from_value(serde_json::json!({
+            "source_clips": [{
+                "clip_id": "source-1",
+                "relationship": "cover",
+                "source_kind": "uploaded",
+                "user": {"user_id": "user-1", "badge": "verified"}
+            }],
+            "attribution_version": 2
+        }))
+        .expect("attribution");
+        let comments: ClipComments = serde_json::from_value(serde_json::json!({
+            "results": [{"id": "comment-1", "content": "Great", "moderation_state": "clean"}],
+            "allow_comment": true,
+            "total_count": 1,
+            "next_cursor": "cursor-2"
+        }))
+        .expect("comments");
+
+        let attribution = serde_json::to_value(attribution).expect("serialize attribution");
+        let comments = serde_json::to_value(comments).expect("serialize comments");
+        assert_eq!(attribution["attribution_version"], 2);
+        assert_eq!(attribution["source_clips"][0]["source_kind"], "uploaded");
+        assert_eq!(attribution["source_clips"][0]["user"]["badge"], "verified");
+        assert_eq!(comments["next_cursor"], "cursor-2");
+        assert_eq!(comments["results"][0]["moderation_state"], "clean");
+    }
 }

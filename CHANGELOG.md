@@ -7,6 +7,36 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.0.20] - 2026-07-19
+
+### Fixed
+
+- Switched single-clip reads from the legacy feed IDs route to the current `GET /api/clip/{id}`
+  contract across status polling, edits, cover, extend, stems, downloads, and song-page reads.
+- Made the current aligned-lyrics v3 start/poll workflow primary, with v2 retained only as an
+  explicit compatibility fallback when source lyrics are unavailable or v3 cannot serve the clip.
+- Made `PATCH /api/playlist/v2/{id}` the primary playlist name/description mutation; the legacy
+  metadata route remains only for arbitrary external cover URLs that v2 cannot represent.
+- Resynchronized create requests with the current Suno Web contract: custom lyrics use `prompt`,
+  while simple descriptions use `gpt_description_prompt`, `create_mode=simple`, and the current
+  tag/persona override metadata; custom vocal gender uses the native `metadata.vocal_gender`
+  field, and omitted custom title/tags use the Web contract's empty strings.
+- Matched the flat audio-upload initialization body and current per-persona trash, restore, and
+  purge route.
+- Matched current cover, concat, extend, tag-upsample, visibility, upload-finish, and uploaded clip
+  cover fields, including exact-ID feed v3 polling for multi-clip reads.
+- Recovered a missing same-account browser device ID when possible and omitted the header when it
+  is unavailable instead of fabricating an all-zero identity.
+- Reported partial progress for current per-ID persona trash, restore, and purge mutations instead
+  of hiding earlier successful writes when a later request fails.
+- Preserved newly added billing, model, clip, clip-metadata, feed, playlist, persona, and upload
+  status response fields at their original JSON level instead of silently dropping them.
+- Matched Suno Web's generation challenge lifecycle by automatically solving required invisible
+  hCaptcha or Cloudflare Turnstile checks and preserving the detected `token_provider`.
+- Prioritized the verified stored account cookies and matching recorded browser source during
+  silent challenge verification, while retaining `--captcha`, `--no-captcha`, and external-token
+  overrides.
+
 ## [0.0.19] - 2026-07-19
 
 ### Fixed

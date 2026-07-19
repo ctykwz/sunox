@@ -72,6 +72,7 @@ pub async fn run(
             &FinishAudioUploadRequest {
                 upload_type: input.upload_type.to_string(),
                 upload_filename: filename,
+                agreed_to_vip_upload_terms: false,
             },
         )
         .await
@@ -122,6 +123,7 @@ pub async fn run(
                     lyrics,
                     caption: None,
                     image_url,
+                    image_s3_id: None,
                     is_audio_upload_tos_accepted: Some(true),
                     remove_image_cover: None,
                     remove_video_cover: None,
