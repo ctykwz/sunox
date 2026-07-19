@@ -7,10 +7,23 @@ lyrics, downloads, playlists, personas, covers, remasters, clip edits, stems, an
 [![CI](https://github.com/ctykwz/sunox/actions/workflows/ci.yml/badge.svg)](https://github.com/ctykwz/sunox/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+English · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) ·
+[Français](README.fr.md) · [Español](README.es.md)
+
 > [!WARNING]
 > Sunox is not affiliated with or endorsed by Suno. It uses private Suno Web APIs, which may
 > change without notice. You are responsible for following Suno's terms, account limits, and the
 > rights that apply to any material you generate or upload.
+
+## What it covers
+
+- Create songs from a description, custom lyrics, style tags, a voice persona, or an instrumental
+  brief.
+- Wait for asynchronous generations and download the resulting MP3, M4A, WAV, Opus, or video.
+- Browse, search, edit, publish, trash, restore, and download clips.
+- Cover, extend, concatenate, remaster, reverse, crop, fade, change speed, or generate stems.
+- Manage playlists and voice personas, and upload local audio or cover images.
+- Use table output in a terminal or stable JSON envelopes in scripts and coding agents.
 
 ## Install
 
@@ -177,10 +190,14 @@ such as `SUNOX_OUTPUT_DIR`, `SUNOX_DEFAULT_MODEL`, and `SUNOX_BROWSER_PATH`.
 Write operations are serialized per account by default. `--parallel` disables that protection for
 one command; use it only when same-account concurrent writes are intentional.
 
-## Scope
+## Limits and safety
 
 Sunox covers non-Studio workflows that can be verified against the current Suno Web application.
 Suno Studio features are intentionally out of scope.
+
+Some commands create paid resources or change remote state. Sunox keeps created clips, playlists,
+and personas private unless a command explicitly requests public visibility. Destructive commands
+require `-y` or `--yes`.
 
 ## Development
 
