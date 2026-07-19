@@ -7,13 +7,8 @@ impl SunoClient {
     /// client carries the returned request_id into metadata.last_tags_generation.
     pub async fn upsample_tags(
         &self,
-        original_tags: &str,
-        is_instrumental: bool,
+        req: PromptUpsampleRequest<'_>,
     ) -> Result<PromptUpsampleResponse, CliError> {
-        let req = PromptUpsampleRequest {
-            original_tags,
-            is_instrumental,
-        };
         self.with_auth_retry(|| async {
             let resp = self.post("/api/prompts/upsample").json(&req).send().await?;
             let resp = self.check_response(resp).await?;

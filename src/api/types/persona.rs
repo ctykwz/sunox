@@ -1,4 +1,7 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::clip::Clip;
 
@@ -19,6 +22,8 @@ pub struct PersonaListResponse {
     pub current_page: u32,
     #[serde(default, alias = "continuationToken")]
     pub continuation_token: Option<String>,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -30,23 +35,22 @@ pub struct PersonaClipsResponse {
     pub current_page: u32,
     #[serde(default)]
     pub is_following: bool,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct PersonaClipEntry {
     pub clip: Clip,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct TogglePersonaLoveResponse {
     pub loved: bool,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct TrashPersonasRequest {
-    pub persona_ids: Vec<String>,
-    pub undo: bool,
-    pub hide: bool,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -57,6 +61,8 @@ pub struct TrashPersonasResponse {
     pub voice_persona_count: u64,
     #[serde(default)]
     pub max_voice_personas: u64,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -128,14 +134,13 @@ pub struct ProcessedClipInfo {
     pub vocal_end_s: Option<f64>,
     #[serde(default)]
     pub vocal_audio_url: Option<String>,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CreatePersonaRequest, EditPersonaRequest, PersonaInfo, TogglePersonaLoveResponse,
-        TrashPersonasRequest,
-    };
+    use super::{CreatePersonaRequest, EditPersonaRequest, PersonaInfo, TogglePersonaLoveResponse};
 
     #[test]
     fn toggle_love_response_reads_loved_state() {
@@ -162,7 +167,9 @@ mod tests {
             "user_input_styles": "warm soul",
             "vocal_start_s": 0.43,
             "vocal_end_s": 22.56,
-            "vocal_clip_id": "processed-1"
+            "vocal_clip_id": "processed-1",
+            "is_vox_persona": true,
+            "user_is_verified": true
         }))
         .expect("deserialize persona");
 
@@ -178,6 +185,10 @@ mod tests {
         assert_eq!(persona.vocal_start_s, Some(0.43));
         assert_eq!(persona.vocal_end_s, Some(22.56));
         assert_eq!(persona.vocal_clip_id.as_deref(), Some("processed-1"));
+        let output = serde_json::to_value(persona).expect("serialize persona");
+        assert_eq!(output["is_vox_persona"], true);
+        assert_eq!(output["user_is_verified"], true);
+        assert!(output.get("extra").is_none());
     }
 
     #[test]
@@ -210,26 +221,6 @@ mod tests {
                 "root_clip_id": "clip-a",
                 "name": "Lead Voice",
                 "is_public": false
-            })
-        );
-    }
-
-    #[test]
-    fn trash_personas_request_matches_current_web_shape() {
-        let req = TrashPersonasRequest {
-            persona_ids: vec!["persona-1".into()],
-            undo: false,
-            hide: false,
-        };
-
-        let json = serde_json::to_value(req).expect("serialize request");
-
-        assert_eq!(
-            json,
-            serde_json::json!({
-                "persona_ids": ["persona-1"],
-                "undo": false,
-                "hide": false
             })
         );
     }
@@ -312,4 +303,6 @@ pub struct PersonaInfo {
     pub clip: Option<Clip>,
     #[serde(default)]
     pub persona_clips: Vec<PersonaClipEntry>,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
 }

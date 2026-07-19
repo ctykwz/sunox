@@ -1,4 +1,7 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::clip::Clip;
 
@@ -9,6 +12,8 @@ pub struct FeedResponse {
     pub next_cursor: Option<String>,
     #[serde(default)]
     pub has_more: bool,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -23,6 +28,8 @@ pub struct FeedV3Request {
 
 #[derive(Debug, Serialize)]
 pub struct FeedFilters {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ids: Option<IdsFilter>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "searchText")]
     pub search_text: Option<String>,
@@ -62,6 +69,13 @@ pub struct FilterPresence {
 }
 
 #[derive(Debug, Serialize)]
+pub struct IdsFilter {
+    pub presence: String,
+    #[serde(rename = "clipIds")]
+    pub clip_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct WorkspaceFilter {
     pub presence: String,
     #[serde(rename = "workspaceId")]
@@ -86,6 +100,7 @@ pub struct FeedSort {
 impl FeedFilters {
     pub fn trashed() -> Self {
         Self {
+            ids: None,
             search_text: None,
             disliked: None,
             liked: None,
@@ -105,6 +120,7 @@ impl FeedFilters {
 
     pub fn default_workspace() -> Self {
         Self {
+            ids: None,
             search_text: None,
             disliked: Some("False".to_string()),
             liked: None,
@@ -126,6 +142,31 @@ impl FeedFilters {
         Self {
             search_text: Some(query.to_string()),
             ..Self::default_workspace()
+        }
+    }
+
+    /// Exact-ID filter used by the current Web client for batched generation
+    /// polling and other multi-clip reads.
+    pub fn ids(ids: &[String]) -> Self {
+        Self {
+            ids: Some(IdsFilter {
+                presence: "True".to_string(),
+                clip_ids: ids.to_vec(),
+            }),
+            search_text: None,
+            disliked: None,
+            liked: None,
+            public: None,
+            upload: None,
+            trashed: None,
+            full_song: None,
+            from_studio_project: None,
+            stem: None,
+            cover: None,
+            extend: None,
+            workspace: None,
+            user: None,
+            sort: None,
         }
     }
 

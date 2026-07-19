@@ -294,6 +294,7 @@ mod tests {
             external_key: "chirp-carp".into(),
             is_default_model: true,
             can_use: None,
+            extra: Default::default(),
         }];
 
         assert_eq!(
@@ -309,6 +310,7 @@ mod tests {
             external_key: "chirp-flounder".into(),
             is_default_model: true,
             can_use: Some(false),
+            extra: Default::default(),
         }];
 
         assert!(select_remaster_model(&models, Some(&RemasterModel::V55)).is_err());

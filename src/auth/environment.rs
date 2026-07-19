@@ -426,10 +426,14 @@ pub(crate) async fn enrich_browser_auth_environment(
         return Ok(false);
     }
     let existing = auth.browser_environment.clone();
-    let recovered =
-        recover_browser_environment(existing.as_ref(), Some(auth.clerk_client_cookie.as_str()))
+    let existing_device_id = auth.device_id.clone();
+    let (recovered, recovered_device_id) =
+        recover_browser_metadata(existing.as_ref(), Some(auth.clerk_client_cookie.as_str()))
             .await?;
-    if recovered == existing {
+    if auth.device_id.is_none() {
+        auth.device_id = recovered_device_id;
+    }
+    if recovered == existing && auth.device_id == existing_device_id {
         Ok(false)
     } else {
         auth.browser_environment = recovered;
@@ -438,13 +442,21 @@ pub(crate) async fn enrich_browser_auth_environment(
 }
 
 pub(crate) async fn recover_auth_state_environment(auth: &mut AuthState) -> Result<bool, CliError> {
-    if browser_environment_is_complete(auth.browser_environment.as_ref()) {
+    let device_id_is_present = auth
+        .device_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
+    if browser_environment_is_complete(auth.browser_environment.as_ref()) && device_id_is_present {
         return Ok(false);
     }
     let existing = auth.browser_environment.clone();
-    let recovered =
-        recover_browser_environment(existing.as_ref(), auth.clerk_client_cookie.as_deref()).await?;
-    if recovered == existing {
+    let existing_device_id = auth.device_id.clone();
+    let (recovered, recovered_device_id) =
+        recover_browser_metadata(existing.as_ref(), auth.clerk_client_cookie.as_deref()).await?;
+    if !device_id_is_present {
+        auth.device_id = recovered_device_id;
+    }
+    if recovered == existing && auth.device_id == existing_device_id {
         Ok(false)
     } else {
         auth.browser_environment = recovered;
@@ -452,9 +464,10 @@ pub(crate) async fn recover_auth_state_environment(auth: &mut AuthState) -> Resu
     }
 }
 
-/// Load persisted auth and repair legacy browser metadata before it can be
-/// copied into a refreshed state. The compare-and-swap save prevents a local
-/// probe from overwriting a concurrent login, logout, or account switch.
+/// Load persisted auth and repair legacy browser metadata, including the
+/// matching device identity, before it can be copied into a refreshed state.
+/// The compare-and-swap save prevents a local probe from overwriting a
+/// concurrent login, logout, or account switch.
 pub(crate) async fn load_auth_state_with_recovered_environment() -> Result<AuthState, CliError> {
     let original = AuthState::load()?;
     let mut auth = original.clone();
@@ -483,10 +496,10 @@ fn browser_environment_is_complete(environment: Option<&BrowserEnvironment>) -> 
     })
 }
 
-async fn recover_browser_environment(
+async fn recover_browser_metadata(
     existing: Option<&BrowserEnvironment>,
     expected_clerk_client_cookie: Option<&str>,
-) -> Result<Option<BrowserEnvironment>, CliError> {
+) -> Result<(Option<BrowserEnvironment>, Option<String>), CliError> {
     let matching_browser = match expected_clerk_client_cookie {
         Some(cookie) => {
             let cookie = cookie.to_string();
@@ -494,12 +507,15 @@ async fn recover_browser_environment(
                 .await
                 .ok()
                 .and_then(Result::ok)
-                .and_then(|auth| auth.browser_environment)
         }
         None => None,
     };
+    let recovered_device_id = matching_browser
+        .as_ref()
+        .and_then(|auth| auth.device_id.clone());
+    let matching_browser_environment = matching_browser.and_then(|auth| auth.browser_environment);
 
-    let Some(source) = matching_browser
+    let Some(source) = matching_browser_environment
         .as_ref()
         .and_then(|environment| environment.browser_source.clone())
         .or_else(|| {
@@ -509,13 +525,13 @@ async fn recover_browser_environment(
         })
         .or_else(preferred_installed_browser_source)
     else {
-        return Ok(existing.cloned());
+        return Ok((existing.cloned(), recovered_device_id));
     };
     let source = if source == "interactive-browser" {
         let Some(source) =
             recorded_interactive_browser_source().or_else(preferred_installed_browser_source)
         else {
-            return Ok(existing.cloned());
+            return Ok((existing.cloned(), recovered_device_id));
         };
         source
     } else {
@@ -529,7 +545,7 @@ async fn recover_browser_environment(
         environment
     });
 
-    let profile_environment = matching_browser.or_else(|| {
+    let profile_environment = matching_browser_environment.or_else(|| {
         Some(BrowserEnvironment {
             browser_source: Some(source.clone()),
             user_agent: None,
@@ -578,10 +594,9 @@ async fn recover_browser_environment(
         }
     };
 
-    Ok(merge_recovered_browser_environment(
-        profile_environment,
-        runtime_environment,
-        existing,
+    Ok((
+        merge_recovered_browser_environment(profile_environment, runtime_environment, existing),
+        recovered_device_id,
     ))
 }
 

@@ -530,8 +530,22 @@ fn install_skill_prints_current_generation_guidance() {
         .stdout(predicate::str::contains("sunox clip list --trashed"))
         .stdout(predicate::str::contains("sunox clip speed <clip_id>"))
         .stdout(predicate::str::contains("sunox clip crop <clip_id>"))
+        .stdout(predicate::str::contains("image_s3_id"))
         .stdout(predicate::str::contains(
             "already wait for the resulting clip to complete",
+        ));
+}
+
+#[test]
+fn agent_info_reports_current_uploaded_cover_and_device_contracts() {
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    cmd.args(["agent-info", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("image_s3_id"))
+        .stdout(predicate::str::contains(
+            "otherwise omitted rather than fabricated",
         ));
 }
 
@@ -1239,7 +1253,7 @@ fn agent_info_separates_challenge_capable_commands_from_async_edits() {
         .expect("extend notes");
     assert_eq!(
         extend_notes["route"],
-        "GET /api/feed/?ids=<clip_id>, optional POST /api/feed/v3 metadata fallback, then POST /api/generate/v2-web/"
+        "GET /api/clip/<clip_id>, optional POST /api/feed/v3 metadata enrichment, then POST /api/generate/v2-web/"
     );
     assert!(
         extend_notes["defaults"]

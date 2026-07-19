@@ -14,6 +14,8 @@ pub struct PlaylistListResponse {
     pub current_page: u32,
     #[serde(default)]
     pub playlists: Vec<PlaylistInfo>,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -37,6 +39,7 @@ pub struct PlaylistInfo {
     pub relationship: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stats: Option<Value>,
+    #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
 
@@ -173,6 +176,37 @@ pub struct SetPlaylistMetadataRequest {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_url: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SetPlaylistMetadataV2Request {
+    pub metadata: PlaylistMetadataV2Patch,
+    pub bio: PlaylistBioV2Patch,
+}
+
+impl SetPlaylistMetadataV2Request {
+    pub fn new(name: Option<&str>, description: Option<&str>) -> Self {
+        Self {
+            metadata: PlaylistMetadataV2Patch {
+                name: name.map(str::to_string),
+            },
+            bio: PlaylistBioV2Patch {
+                description: description.map(str::to_string),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlaylistMetadataV2Patch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlaylistBioV2Patch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -343,8 +377,8 @@ pub struct TrashPlaylistRequest {
 mod tests {
     use super::{
         CreatePlaylistRequest, PlaylistInfo, PlaylistReorderRequest, PlaylistTracksRequest,
-        SetPlaylistCoverRequest, SetPlaylistMetadataRequest, SetPlaylistReactionRequest,
-        SetPlaylistVisibilityRequest, TrashPlaylistRequest,
+        SetPlaylistCoverRequest, SetPlaylistMetadataRequest, SetPlaylistMetadataV2Request,
+        SetPlaylistReactionRequest, SetPlaylistVisibilityRequest, TrashPlaylistRequest,
     };
 
     #[test]
@@ -400,8 +434,8 @@ mod tests {
         assert_eq!(output["relationship"]["can_edit"], true);
         assert_eq!(output["stats"]["save_count"], 2);
         assert_eq!(output["stats"]["total_duration_seconds"], 2056);
-        assert_eq!(output["extra"]["bio"], serde_json::json!({}));
-        assert_eq!(output["extra"]["deferred_fields"], serde_json::json!([]));
+        assert_eq!(output["bio"], serde_json::json!({}));
+        assert_eq!(output["deferred_fields"], serde_json::json!([]));
     }
 
     #[test]
@@ -431,6 +465,21 @@ mod tests {
             serde_json::json!({
                 "playlist_id": "playlist-1",
                 "name": "Renamed"
+            })
+        );
+    }
+
+    #[test]
+    fn set_playlist_metadata_v2_uses_metadata_and_bio_shape() {
+        let req = SetPlaylistMetadataV2Request::new(Some("Renamed"), Some("Description"));
+
+        let json = serde_json::to_value(req).expect("serialize request");
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "metadata": { "name": "Renamed" },
+                "bio": { "description": "Description" }
             })
         );
     }

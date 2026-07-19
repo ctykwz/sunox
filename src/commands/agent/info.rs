@@ -115,8 +115,9 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                     "--no-captcha": "disable automatic browser verification; generation challenge preflight still runs and a required challenge is surfaced without submitting"
                 },
                 "modes": "description mode when a non-instrumental prompt is provided; custom lyrics mode when --lyrics or --lyrics-file is provided; custom instrumental mode when --instrumental is provided, with the prompt folded into style tags",
+                "request_contract": "custom lyrics use prompt with metadata.create_mode=custom, omit gpt_description_prompt, and encode --vocal as metadata.vocal_gender=m|f; description mode uses gpt_description_prompt with metadata.create_mode=simple, metadata.lyrics_model=default, and leaves prompt empty",
                 "web_context": "generation metadata.user_tier and default model are resolved from current account /api/billing/info/ when available; default_model=auto falls back to chirp-fenix only when that read is unavailable",
-                "enhance_tags": "pass --enhance-tags only when the user wants Suno to enhance style tags; it first calls /api/prompts/upsample, carries the returned tags plus request_id into metadata.last_tags_generation, and marks override_fields=[\"tags\"]; personalization_enabled follows the captured web submit shape",
+                "enhance_tags": "pass --enhance-tags only when the user wants Suno to enhance style tags; it first calls /api/prompts/upsample with current custom lyrics as context for vocal requests, carries the returned tags plus request_id into metadata.last_tags_generation, and marks override_fields=[\"tags\"]; personalization_enabled follows the captured web submit shape",
                 "response_derived_metadata": "do not fabricate tag-upsample metadata; metadata.last_tags_generation is only valid after a real /api/prompts/upsample response and should otherwise be omitted",
                 "title": "optional; omitted title is sent as an empty string for description mode because Suno currently requires params.title to be a string"
             },
@@ -145,7 +146,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             },
             "clip info": {
                 "routes": [
-                    "GET /api/feed/?ids=<clip_id>",
+                    "GET /api/clip/<clip_id>",
                     "GET /api/clips/{clip_id}/attribution",
                     "GET /api/gen/{clip_id}/comments?order=most_liked",
                     "GET /api/clips/direct_children_count?clip_id=<clip_id>",
@@ -166,7 +167,8 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "clip download": {
                 "route": "GET /api/download/clip/{clip_id}?format=mp3|m4a for prepared MP3/M4A; POST /api/gen/{clip_id}/convert_wav/ then GET /api/gen/{clip_id}/wav_file/ for WAV; GET/POST /api/gen/{clip_id}/opus_file|convert_opus for OPUS",
                 "defaults": "without --format, downloads clip.audio_url as MP3 and embeds lyrics into ID3 tags; explicit --format mp3|m4a|wav|opus uses the official endpoint for that format",
-                "constraints": "--video uses clip.video_url and cannot be combined with --format. WAV and OPUS preparation are serialized as account-scoped mutations; OPUS still reuses an existing file URL without requesting conversion. Output directories are created automatically; existing output is preserved unless --force is explicit."
+                "constraints": "--video uses clip.video_url and cannot be combined with --format. WAV and OPUS preparation are serialized as account-scoped mutations; OPUS still reuses an existing file URL without requesting conversion. Output directories are created automatically; existing output is preserved unless --force is explicit.",
+                "timed_lyrics": "GET /api/clip/<clip_id>, then POST and poll GET /api/gen/<clip_id>/aligned_lyrics/v3; GET /api/gen/<clip_id>/aligned_lyrics/v2 is compatibility-only when source lyrics are unavailable or v3 cannot serve the clip"
             },
             "clip stems": {
                 "route": "POST /api/generate/v2-web/",
@@ -175,23 +177,23 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                 "response": "generation response with multiple chirp-stem clips"
             },
             "clip extend": {
-                "route": "GET /api/feed/?ids=<clip_id>, optional POST /api/feed/v3 metadata fallback, then POST /api/generate/v2-web/",
-                "defaults": "fetches the source clip before submit; when feed/?ids lacks source style metadata, searches feed/v3 by source.title and merges the exact source id; title defaults to source.title, tags defaults to source.metadata.tags, negative_tags defaults to source.metadata.negative_tags when available, and make_instrumental defaults to source.metadata.make_instrumental",
+                "route": "GET /api/clip/<clip_id>, optional POST /api/feed/v3 metadata enrichment, then POST /api/generate/v2-web/",
+                "defaults": "fetches the source clip through the current single-clip route before submit; only when it lacks source style metadata, searches feed/v3 by source.title and merges the exact source id; title defaults to source.title, tags defaults to source.metadata.tags, negative_tags defaults to source.metadata.negative_tags when available, and make_instrumental defaults to source.metadata.make_instrumental",
                 "overrides": "--title overrides the submitted title; --tags overrides inherited style tags; --exclude overrides inherited negative_tags; --instrumental forces make_instrumental=true; --no-instrumental forces make_instrumental=false",
-                "body_constraints": "task=extend, metadata.create_mode=custom, metadata.is_remix=true, metadata.lyrics_updated=true, mv=chirp-fenix, continue_clip_id=<source clip id>, continue_at=<seconds>, continued_aligned_prompt=<source context or empty string>, title must be a string",
+                "body_constraints": "task=extend, metadata.create_mode=custom, metadata.is_remix=true, metadata.lyrics_updated reflects whether new lyrics were supplied, mv=chirp-fenix, continue_clip_id=<source clip id>, continue_at=<seconds>, continued_aligned_prompt=<source context or empty string>, title must be a string",
                 "response": "generation response with submitted continuation clips"
             },
             "clip cover": {
-                "route": "GET /api/feed/?ids=<clip_id>, then POST /api/generate/v2-web/",
+                "route": "GET /api/clip/<clip_id>, then POST /api/generate/v2-web/",
                 "defaults": "fetches the source clip before submit and always sends title as source.title because Suno requires a string title for the cover generation variant",
-                "body_constraints": "metadata.create_mode=cover, cover_clip_id=<source clip id>, title=<source title string>",
+                "body_constraints": "task=cover, metadata.create_mode=custom, cover_clip_id=<source clip id>, title=<source title string>",
                 "response": "generation response with submitted cover clips"
             },
             "clip inspire": {
                 "route": "POST /api/prompts/upsample, then POST /api/generate/v2-web/",
                 "status": "implemented from the live-captured playlist-conditioned Use as Inspiration request",
                 "constraints": "accepts exactly one source clip; requires --title, --tags, and --lyrics or --lyrics-file; does not expose instrumental or multi-source variants because those were not captured",
-                "body_constraints": "task=playlist_condition, mv=chirp-fenix, playlist_id=inspiration, playlist_clip_ids=[<source clip id>], metadata.create_mode=custom, lyrics in prompt, no gpt_description_prompt, upsample response carried in metadata.last_tags_generation, override_fields=[]",
+                "body_constraints": "task=playlist_condition, mv=chirp-fenix, playlist_id=inspiration, playlist_clip_ids=[<source clip id>], metadata.create_mode=custom, lyrics sent both as tag-upsample context and in prompt, no gpt_description_prompt, upsample response carried in metadata.last_tags_generation, override_fields=[]",
                 "response": "generation response with submitted clips"
             },
             "clip concat": {
@@ -308,7 +310,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                     "clip cover", "clip inspire", "clip remaster", "clip speed", "clip reverse",
                     "clip crop", "clip fade", "clip stems"
                 ],
-                "cover_status": "clip set supports --image-url, --image-file, --remove-cover, and --remove-video-cover; local image files use POST /api/uploads/image/, presigned S3 form upload, POST /api/uploads/image/{id}/upload-finish/, then POST /api/gen/{clip_id}/set_metadata/ with image_url"
+                "cover_status": "clip set supports --image-url, --image-file, --remove-cover, and --remove-video-cover; local image files use POST /api/uploads/image/, presigned S3 form upload, POST /api/uploads/image/{id}/upload-finish/, then POST /api/gen/{clip_id}/set_metadata/ with image_s3_id; arbitrary external cover URLs use image_url"
             },
             "persona": {
                 "commands": [
@@ -322,9 +324,9 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                 "edit_status": "implemented via PUT /api/persona/edit-persona/{id}/",
                 "processed_clip_status": "implemented via GET /api/processed_clip/{id}",
                 "visibility_status": "implemented via PUT /api/persona/set_visibility/{id}/?is_public=true|false",
-                "trash_status": "implemented via PUT /api/persona/bulk-trash-personas/ with undo=false, hide=false",
-                "restore_status": "implemented via PUT /api/persona/bulk-trash-personas/ with undo=true, hide=false",
-                "purge_status": "implemented via PUT /api/persona/bulk-trash-personas/ with undo=false, hide=true"
+                "trash_status": "implemented via PUT /api/persona/trash-persona/{id}/?undo=false&hide=false",
+                "restore_status": "implemented via PUT /api/persona/trash-persona/{id}/?undo=true&hide=false",
+                "purge_status": "implemented via PUT /api/persona/trash-persona/{id}/?undo=false&hide=true"
             },
             "playlist": {
                 "commands": [
@@ -335,11 +337,16 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                     "playlist like", "playlist dislike",
                     "playlist delete"
                 ],
+                "metadata_status": "playlist set uses PATCH /api/playlist/v2/{id} with metadata.name and bio.description as the primary contract; arbitrary external image URLs alone retain the legacy set_metadata compatibility route because v2 requires an uploaded S3 cover id",
                 "cover_status": "playlist set/create support --image-file for local image upload; uploaded covers use POST /api/uploads/image/, presigned S3 form upload, POST /api/uploads/image/{id}/upload-finish/, then PATCH /api/playlist/v2/{id} with metadata.cover_url, metadata.cover_image_s3_id, and metadata.cover_is_user_set=true",
                 "cover_url_status": "playlist set --image-url accepts existing Suno uploaded image URLs such as https://cdn2.suno.ai/image_<upload_id>.jpeg and maps them to the same v2 cover metadata patch; arbitrary external URLs still use the legacy set_metadata route",
                 "info_json_shape": "playlist info keeps normalized top-level fields for compatibility and also preserves the complete metadata, relationship, and stats objects from the v2 response; unknown top-level response fields remain under extra",
                 "multi_step_failure": "playlist create/set expose completed_steps, playlist_id, and failed.step/code/message through partial_mutation when an earlier server mutation succeeded",
                 "remove_status": "playlist remove accepts multiple clip IDs but submits one POST /api/playlist/v2/{playlist_id}/tracks/remove request per clip ID because larger batch remove requests can return Suno 500s. If a later item fails, the command returns partial_mutation with error.details containing requested_clip_ids, succeeded_clip_ids, failed, and not_attempted_clip_ids."
+            },
+            "persona_mutation": {
+                "route": "PUT /api/persona/trash-persona/{persona_id}/ with undo/hide query parameters",
+                "partial_failure": "multi-persona trash, restore, and purge run through the current per-ID endpoint; a first failure preserves its semantic error, while a later failure returns partial_mutation with succeeded_persona_ids, failed, and not_attempted_persona_ids"
             }
         },
         "exit_codes": {
@@ -368,7 +375,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "login_fallback": "`sunox login` first probes existing browser cookies; if that fails, it opens a dedicated Sunox Chromium-family profile and captures the Clerk session after the user logs in. Windows skips live Chromium cookie databases so App-Bound decryption cannot force-close a running browser, while Firefox uses a non-destructive read-only SQLite path. The interactive fallback requires an installed Chromium-family browser.",
             "logout": "`sunox logout` removes stored auth, the dedicated interactive browser profile, and any legacy captcha profile",
             "generation_challenge": "Commands that submit through /api/generate/v2-web/ preflight POST /api/c/check with ctype=generation. If Suno reports a challenge and stored Clerk refresh material exists, Sunox refreshes the JWT once and repeats the preflight. If a challenge remains, Sunox automatically performs silent browser verification with hCaptcha/provider 1 or Cloudflare Turnstile/provider 2 according to captcha_version. It prioritizes stored verified account cookies and the matching recorded browser source, launches an invocation-owned off-screen browser on a random loopback CDP port, and deletes its temporary profile after use. Use --token <solved> for an external token, --captcha to force verification, or --no-captcha to disable the automatic solver.",
-            "browser_environment": "Browser-cookie login links auth to the matching local profile and probes the same installed browser binary for runtime user-agent, accept-language, and client hints without a visible window or Suno navigation. Legacy auth is repaired before authenticated commands. Fresh values win per field, stored values survive failed probes, and built-in constants are only the final fallback. The recovered context is used for Clerk login/JWT refresh and Suno API requests.",
+            "browser_environment": "Browser-cookie login links auth to the matching local profile and probes the same installed browser binary for runtime user-agent, accept-language, client hints, and matching device identity without a visible window or Suno navigation. Legacy auth is repaired before authenticated commands. Fresh values win per field, stored values survive failed probes, and built-in constants are only the final UA/language fallback. Device-Id is recovered from the same account when possible and otherwise omitted rather than fabricated. The recovered context is used for Clerk login/JWT refresh and Suno API requests.",
         },
         "provider": "direct_suno_unofficial",
         "auth_required": true,

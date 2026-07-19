@@ -11,9 +11,7 @@ impl SunoClient {
             let auth = self.auth.lock().expect("auth mutex poisoned");
             (
                 auth.jwt.clone(),
-                auth.device_id
-                    .clone()
-                    .unwrap_or_else(|| "00000000-0000-0000-0000-000000000000".to_string()),
+                auth.device_id.clone(),
                 auth.browser_environment.clone(),
             )
         };
@@ -23,7 +21,9 @@ impl SunoClient {
         {
             headers.insert("authorization", val);
         }
-        if let Ok(val) = device.parse() {
+        if let Some(device) = device.as_deref().filter(|value| !value.trim().is_empty())
+            && let Ok(val) = device.parse()
+        {
             headers.insert("device-id", val);
         }
         if let Ok(val) = "*/*".parse() {

@@ -391,6 +391,7 @@ mod tests {
             vocal_clip_id: Some("processed-1".into()),
             clip: None,
             persona_clips: Vec::new(),
+            extra: Default::default(),
         };
         let args = PersonaSetArgs {
             id: "persona-1".into(),
@@ -443,6 +444,7 @@ mod tests {
             vocal_clip_id: None,
             clip: None,
             persona_clips: Vec::new(),
+            extra: Default::default(),
         };
         let args = PersonaSetArgs {
             id: "persona-1".into(),

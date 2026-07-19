@@ -97,7 +97,10 @@ pub async fn set(args: SetArgs, ctx: &AppContext) -> Result<(), CliError> {
         title: args.title.clone(),
         lyrics,
         caption: args.caption.clone(),
-        image_url,
+        image_url: uploaded_cover.is_none().then_some(image_url).flatten(),
+        image_s3_id: uploaded_cover
+            .as_ref()
+            .map(|uploaded| uploaded.cover_image_s3_id.clone()),
         is_audio_upload_tos_accepted: None,
         remove_image_cover: if args.remove_cover { Some(true) } else { None },
         remove_video_cover: if args.remove_video_cover {

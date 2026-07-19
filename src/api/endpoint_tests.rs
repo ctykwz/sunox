@@ -695,6 +695,24 @@ async fn requests_use_browser_like_fallback_headers_when_environment_is_partial(
 }
 
 #[tokio::test]
+async fn requests_omit_device_id_instead_of_fabricating_one() {
+    let server = MockServer::json(r#"{"required":false}"#).await;
+    let client = server.client_with_auth(AuthState {
+        jwt: Some("test-jwt".into()),
+        device_id: None,
+        ..AuthState::default()
+    });
+
+    client
+        .generation_challenge()
+        .await
+        .expect("generation challenge");
+
+    let request = server.captured().await;
+    assert!(!request.headers.to_ascii_lowercase().contains("device-id:"));
+}
+
+#[tokio::test]
 async fn challenge_recheck_refresh_skips_without_clerk_material() {
     let client = SunoClient::new_for_tests(
         "http://127.0.0.1:1".into(),
@@ -738,15 +756,11 @@ async fn restore_clips_posts_current_web_trash_contract() {
 }
 
 #[tokio::test]
-async fn get_clips_batches_feed_ids_by_pairs_contract() {
-    let clip_a = r#"{"id":"clip-a","title":"A","status":"complete","model_name":"chirp-v4-5","created_at":"2026-06-30T00:00:00Z"}"#;
-    let clip_b = r#"{"id":"clip-b","title":"B","status":"complete","model_name":"chirp-v4-5","created_at":"2026-06-30T00:00:00Z"}"#;
-    let clip_c = r#"{"id":"clip-c","title":"C","status":"complete","model_name":"chirp-v4-5","created_at":"2026-06-30T00:00:00Z"}"#;
-    let clip_extra = r#"{"id":"clip-extra","title":"Extra","status":"complete","model_name":"chirp-v4-5","created_at":"2026-06-30T00:00:00Z"}"#;
-    let first_response = format!("[{clip_extra},{clip_b},{clip_a}]");
-    let second_response = format!("[{clip_c}]");
-    let server =
-        MockServer::json_sequence(&[first_response.as_str(), second_response.as_str()]).await;
+async fn get_clips_uses_current_feed_v3_exact_id_contract_in_input_order() {
+    let server = MockServer::json(
+        r#"{"clips":[{"id":"clip-c","title":"C","status":"complete","model_name":"chirp-v4-5","created_at":"2026-06-30T00:00:00Z"},{"id":"clip-a","title":"A","status":"complete","model_name":"chirp-v4-5","created_at":"2026-06-30T00:00:00Z"},{"id":"clip-b","title":"B","status":"complete","model_name":"chirp-v4-5","created_at":"2026-06-30T00:00:00Z"}],"has_more":false}"#,
+    )
+    .await;
     let client = server.client();
 
     let clips = client
@@ -767,11 +781,60 @@ async fn get_clips_batches_feed_ids_by_pairs_contract() {
         vec!["clip-a", "clip-b", "clip-c"]
     );
     let requests = server.captured_all().await;
-    assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0].method, "GET");
-    assert_eq!(requests[0].path, "/api/feed/?ids=clip-a,clip-b");
-    assert_eq!(requests[1].method, "GET");
-    assert_eq!(requests[1].path, "/api/feed/?ids=clip-c");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].path, "/api/feed/v3");
+    let body = serde_json::from_str::<serde_json::Value>(&requests[0].body).expect("request json");
+    assert_eq!(body["limit"], 3);
+    assert_eq!(body["filters"]["ids"]["presence"], "True");
+    assert_eq!(
+        body["filters"]["ids"]["clipIds"],
+        serde_json::json!(["clip-a", "clip-b", "clip-c"])
+    );
+}
+
+#[tokio::test]
+async fn get_clips_omits_ids_missing_from_current_feed_response() {
+    let server = MockServer::json(
+        r#"{"clips":[{"id":"clip-c","title":"C","status":"complete","model_name":"chirp-v4-5","created_at":"2026-06-30T00:00:00Z"}],"has_more":false}"#,
+    )
+    .await;
+    let client = server.client();
+
+    let clips = client
+        .get_clips(&[
+            "clip-a".to_string(),
+            "clip-b".to_string(),
+            "clip-c".to_string(),
+        ])
+        .await
+        .expect("get clips");
+
+    assert_eq!(clips.len(), 1);
+    assert_eq!(clips[0].id, "clip-c");
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/api/feed/v3");
+}
+
+#[tokio::test]
+async fn get_clips_keeps_current_direct_contract_for_one_clip() {
+    let server = MockServer::json(
+        r#"{"id":"clip-a","title":"A","status":"complete","model_name":"chirp-v4-5","created_at":"2026-06-30T00:00:00Z"}"#,
+    )
+    .await;
+    let client = server.client();
+
+    let clips = client
+        .get_clips(&["clip-a".to_string()])
+        .await
+        .expect("get clip");
+
+    assert_eq!(clips.len(), 1);
+    assert_eq!(clips[0].id, "clip-a");
+    let request = server.captured().await;
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.path, "/api/clip/clip-a");
 }
 
 #[tokio::test]
@@ -895,6 +958,7 @@ async fn clip_info_fetches_song_page_supplemental_contract() {
             play_count: 0,
             upvote_count: 0,
             metadata: Default::default(),
+            extra: Default::default(),
         })
         .await
         .expect("clip info");
@@ -955,6 +1019,7 @@ async fn clip_info_keeps_base_clip_when_supplemental_read_fails() {
             play_count: 0,
             upvote_count: 0,
             metadata: Default::default(),
+            extra: Default::default(),
         })
         .await
         .expect("clip info should keep base clip when supplemental reads fail");
@@ -993,6 +1058,7 @@ async fn clip_info_aborts_on_rate_limited_supplemental_read() {
             play_count: 0,
             upvote_count: 0,
             metadata: Default::default(),
+            extra: Default::default(),
         })
         .await
         .expect_err("rate limit should not be hidden as supplemental data");
@@ -1020,6 +1086,7 @@ async fn clip_info_aborts_on_auth_expired_supplemental_read() {
             play_count: 0,
             upvote_count: 0,
             metadata: Default::default(),
+            extra: Default::default(),
         })
         .await
         .expect_err("auth failure should not be hidden as supplemental data");
@@ -1064,6 +1131,7 @@ async fn set_clip_metadata_posts_current_web_contract() {
                 lyrics: None,
                 caption: Some("Caption".into()),
                 image_url: None,
+                image_s3_id: None,
                 is_audio_upload_tos_accepted: None,
                 remove_image_cover: None,
                 remove_video_cover: None,
@@ -1097,6 +1165,7 @@ async fn set_clip_metadata_posts_cover_contract() {
                 lyrics: None,
                 caption: None,
                 image_url: Some("https://cdn2.suno.ai/image_upload-1.jpeg".into()),
+                image_s3_id: None,
                 is_audio_upload_tos_accepted: None,
                 remove_image_cover: None,
                 remove_video_cover: Some(true),
@@ -1118,6 +1187,69 @@ async fn set_clip_metadata_posts_cover_contract() {
 }
 
 #[tokio::test]
+async fn set_clip_metadata_uses_current_uploaded_cover_identity() {
+    let server = MockServer::json("{}").await;
+    let client = server.client();
+
+    client
+        .set_metadata(
+            "clip-a",
+            &SetMetadataRequest {
+                image_s3_id: Some("image_upload-1".into()),
+                ..SetMetadataRequest::default()
+            },
+        )
+        .await
+        .expect("set uploaded cover");
+
+    let request = server.captured().await;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&request.body).expect("request json"),
+        serde_json::json!({ "image_s3_id": "image_upload-1" })
+    );
+}
+
+#[tokio::test]
+async fn set_clip_metadata_surfaces_http_200_api_errors() {
+    let server = MockServer::json(
+        r#"{"error_type":"image_moderation_error","moderation_error_message":"Cover rejected"}"#,
+    )
+    .await;
+    let client = server.client();
+
+    let error = client
+        .set_metadata(
+            "clip-a",
+            &SetMetadataRequest {
+                image_s3_id: Some("image_upload-1".into()),
+                ..SetMetadataRequest::default()
+            },
+        )
+        .await
+        .expect_err("semantic API error must not be reported as success");
+
+    assert_eq!(error.error_code(), "metadata_update_rejected");
+    assert!(error.to_string().contains("Cover rejected"));
+}
+
+#[tokio::test]
+async fn set_clip_metadata_accepts_an_empty_success_body() {
+    let server = MockServer::json("").await;
+    let client = server.client();
+
+    client
+        .set_metadata(
+            "clip-a",
+            &SetMetadataRequest {
+                title: Some("Updated".into()),
+                ..SetMetadataRequest::default()
+            },
+        )
+        .await
+        .expect("empty successful response");
+}
+
+#[tokio::test]
 async fn clip_cover_workflow_preserves_uploaded_image_when_metadata_update_fails() {
     let server = MockServer::json_status_sequence(&[(429, r#"{"detail":"rate limited"}"#)]).await;
     let client = server.client();
@@ -1125,7 +1257,8 @@ async fn clip_cover_workflow_preserves_uploaded_image_when_metadata_update_fails
         title: None,
         lyrics: None,
         caption: None,
-        image_url: Some("https://cdn2.suno.ai/image_image-upload-1.jpeg".into()),
+        image_url: None,
+        image_s3_id: Some("image_image-upload-1".into()),
         is_audio_upload_tos_accepted: None,
         remove_image_cover: None,
         remove_video_cover: None,
@@ -1193,7 +1326,10 @@ async fn set_clip_visibility_posts_current_web_contract() {
     assert_eq!(request.path, "/api/gen/clip-a/set_visibility/");
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&request.body).expect("request json"),
-        serde_json::json!({ "is_public": false })
+        serde_json::json!({
+            "is_public": false,
+            "submit_to_contest": false
+        })
     );
 }
 #[tokio::test]
@@ -1210,8 +1346,7 @@ async fn generate_posts_current_web_contract() {
     generate.set_challenge_token(Some("captcha-token".into()));
     generate.title = Some("Demo".into());
     generate.tags = Some("pop, upbeat".into());
-    generate.gpt_description_prompt = Some("first line\nsecond line".into());
-    generate.metadata.lyrics_model = Some("default".into());
+    generate.prompt = "first line\nsecond line".into();
 
     let clips = client.generate(&generate).await.expect("generate");
 
@@ -1227,11 +1362,11 @@ async fn generate_posts_current_web_contract() {
     assert_eq!(body["token"], "captcha-token");
     assert_eq!(body["generation_type"], "TEXT");
     assert_eq!(body["mv"], "chirp-v4-5");
-    assert_eq!(body["prompt"], "");
-    assert_eq!(body["gpt_description_prompt"], "first line\nsecond line");
+    assert_eq!(body["prompt"], "first line\nsecond line");
+    assert!(body.get("gpt_description_prompt").is_none());
     assert_eq!(body["token_provider"], 1);
     assert_eq!(body["metadata"]["create_mode"], "custom");
-    assert_eq!(body["metadata"]["lyrics_model"], "default");
+    assert!(body["metadata"].get("lyrics_model").is_none());
     assert_eq!(body["metadata"]["web_client_pathname"], "/create");
     assert_eq!(body["metadata"]["user_tier"], "tier-pro");
     assert!(
@@ -1322,7 +1457,12 @@ async fn prompt_upsample_posts_current_web_contract() {
     let client = server.client();
 
     let response = client
-        .upsample_tags("garage pop", false)
+        .upsample_tags(crate::api::types::PromptUpsampleRequest {
+            original_tags: "garage pop",
+            lyrics: Some("[Verse]\nNeon rain"),
+            is_instrumental: false,
+            user_guidance: None,
+        })
         .await
         .expect("upsample tags");
 
@@ -1336,6 +1476,7 @@ async fn prompt_upsample_posts_current_web_contract() {
         body,
         serde_json::json!({
             "original_tags": "garage pop",
+            "lyrics": "[Verse]\nNeon rain",
             "is_instrumental": false
         })
     );
@@ -1370,6 +1511,15 @@ async fn inspiration_posts_live_captured_playlist_condition_contract() {
     let requests = server.captured_all().await;
     assert_eq!(requests.len(), 4);
     assert_eq!(requests[0].path, "/api/prompts/upsample");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[0].body)
+            .expect("upsample request json"),
+        serde_json::json!({
+            "original_tags": "garage pop",
+            "lyrics": "[Verse]\nNew words",
+            "is_instrumental": false
+        })
+    );
     assert_eq!(requests[1].path, "/api/billing/info/");
     assert_eq!(requests[2].path, "/api/c/check");
     assert_eq!(requests[3].path, "/api/generate/v2-web/");
@@ -1400,8 +1550,8 @@ async fn inspiration_posts_live_captured_playlist_condition_contract() {
 #[tokio::test]
 async fn clip_wait_retries_ids_that_are_temporarily_missing() {
     let server = MockServer::json_sequence(&[
-        r#"[]"#,
-        r#"[{"id":"clip-a","title":"Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-07-10T00:00:00Z"}]"#,
+        r#"null"#,
+        r#"{"id":"clip-a","title":"Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-07-10T00:00:00Z"}"#,
     ])
     .await;
     let client = server.client();
@@ -1419,7 +1569,7 @@ async fn clip_wait_retries_ids_that_are_temporarily_missing() {
 #[tokio::test]
 async fn clip_wait_does_not_poll_again_after_its_deadline() {
     let server = MockServer::json_until_idle(
-        r#"[{"id":"clip-a","title":"Song","status":"processing","model_name":"chirp-fenix","created_at":"2026-07-10T00:00:00Z"}]"#,
+        r#"{"id":"clip-a","title":"Song","status":"processing","model_name":"chirp-fenix","created_at":"2026-07-10T00:00:00Z"}"#,
         3,
     )
     .await;
@@ -1633,7 +1783,7 @@ async fn generate_without_token_stops_when_challenge_is_required() {
 async fn cover_posts_generate_v2_cover_contract() {
     let billing = billing_info_response("tier-pro");
     let server = MockServer::json_sequence(&[
-        r#"[{"id":"clip-a","title":"Source title","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z"}]"#,
+        r#"{"id":"clip-a","title":"Source title","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z"}"#,
         billing.as_str(),
         r#"{"required":false}"#,
         r#"{"clips":[{"id":"cover-1","title":"Cover","status":"submitted","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z"}]}"#,
@@ -1650,7 +1800,7 @@ async fn cover_posts_generate_v2_cover_contract() {
     let requests = server.captured_all().await;
     assert_eq!(requests.len(), 4);
     assert_eq!(requests[0].method, "GET");
-    assert_eq!(requests[0].path, "/api/feed/?ids=clip-a");
+    assert_eq!(requests[0].path, "/api/clip/clip-a");
     assert_eq!(requests[1].method, "GET");
     assert_eq!(requests[1].path, "/api/billing/info/");
     assert_eq!(requests[2].method, "POST");
@@ -1662,7 +1812,8 @@ async fn cover_posts_generate_v2_cover_contract() {
     assert_eq!(body["title"], "Source title");
     assert_eq!(body["tags"], "pop");
     assert_eq!(body["cover_clip_id"], "clip-a");
-    assert_eq!(body["metadata"]["create_mode"], "cover");
+    assert_eq!(body["task"], "cover");
+    assert_eq!(body["metadata"]["create_mode"], "custom");
     assert_eq!(body["metadata"]["user_tier"], "tier-pro");
 }
 
@@ -1670,7 +1821,7 @@ async fn cover_posts_generate_v2_cover_contract() {
 async fn cover_with_challenge_token_posts_generate_without_preflight_contract() {
     let billing = billing_info_response("tier-pro");
     let server = MockServer::json_sequence(&[
-        r#"[{"id":"clip-a","title":"Source title","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z"}]"#,
+        r#"{"id":"clip-a","title":"Source title","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z"}"#,
         billing.as_str(),
         r#"{"clips":[{"id":"cover-1","title":"Cover","status":"submitted","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z"}]}"#,
     ])
@@ -1691,7 +1842,7 @@ async fn cover_with_challenge_token_posts_generate_without_preflight_contract() 
     let requests = server.captured_all().await;
     assert_eq!(requests.len(), 3);
     assert_eq!(requests[0].method, "GET");
-    assert_eq!(requests[0].path, "/api/feed/?ids=clip-a");
+    assert_eq!(requests[0].path, "/api/clip/clip-a");
     assert_eq!(requests[1].method, "GET");
     assert_eq!(requests[1].path, "/api/billing/info/");
     assert_eq!(requests[2].method, "POST");
@@ -1773,7 +1924,10 @@ async fn concat_posts_current_web_contract() {
     assert_eq!(request.path, "/api/generate/concat/v2/");
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&request.body).expect("request json"),
-        serde_json::json!({ "clip_id": "clip-a" })
+        serde_json::json!({
+            "clip_id": "clip-a",
+            "is_infill": false
+        })
     );
 }
 
@@ -1836,8 +1990,8 @@ async fn crop_retries_result_lookup_after_action_completes() {
     let server = MockServer::json_sequence(&[
         r#"{"action_clip_id":"crop-1"}"#,
         r#"{"status":"complete"}"#,
-        r#"[]"#,
-        r#"[{"id":"crop-1","title":"Song (Crop)","status":"complete","model_name":"chirp-fenix","created_at":"2026-07-10T00:00:00Z"}]"#,
+        r#"null"#,
+        r#"{"id":"crop-1","title":"Song (Crop)","status":"complete","model_name":"chirp-fenix","created_at":"2026-07-10T00:00:00Z"}"#,
     ])
     .await;
     let client = server.client();
@@ -1874,8 +2028,8 @@ async fn crop_retries_result_lookup_after_action_completes() {
     assert_eq!(requests[1].method, "GET");
     assert_eq!(requests[1].path, "/api/edit/action/crop-1/");
     assert_eq!(requests[2].method, "GET");
-    assert_eq!(requests[2].path, "/api/feed/?ids=crop-1");
-    assert_eq!(requests[3].path, "/api/feed/?ids=crop-1");
+    assert_eq!(requests[2].path, "/api/clip/crop-1");
+    assert_eq!(requests[3].path, "/api/clip/crop-1");
 }
 
 #[tokio::test]
@@ -1883,8 +2037,8 @@ async fn crop_waits_for_the_result_clip_to_complete() {
     let server = MockServer::json_sequence(&[
         r#"{"action_clip_id":"crop-1"}"#,
         r#"{"status":"complete"}"#,
-        r#"[{"id":"crop-1","title":"Song (Crop)","status":"processing","model_name":"chirp-fenix","created_at":"2026-07-10T00:00:00Z"}]"#,
-        r#"[{"id":"crop-1","title":"Song (Crop)","status":"complete","model_name":"chirp-fenix","created_at":"2026-07-10T00:00:00Z"}]"#,
+        r#"{"id":"crop-1","title":"Song (Crop)","status":"processing","model_name":"chirp-fenix","created_at":"2026-07-10T00:00:00Z"}"#,
+        r#"{"id":"crop-1","title":"Song (Crop)","status":"complete","model_name":"chirp-fenix","created_at":"2026-07-10T00:00:00Z"}"#,
     ])
     .await;
     let client = server.client();
@@ -1908,8 +2062,8 @@ async fn crop_waits_for_the_result_clip_to_complete() {
     let requests = server.captured_all().await;
     assert_eq!(requests.len(), 4);
     assert_eq!(requests[1].path, "/api/edit/action/crop-1/");
-    assert_eq!(requests[2].path, "/api/feed/?ids=crop-1");
-    assert_eq!(requests[3].path, "/api/feed/?ids=crop-1");
+    assert_eq!(requests[2].path, "/api/clip/crop-1");
+    assert_eq!(requests[3].path, "/api/clip/crop-1");
 }
 
 #[tokio::test]
@@ -1979,7 +2133,7 @@ async fn fade_reports_a_failed_result_clip() {
     let server = MockServer::json_sequence(&[
         r#"{"action_clip_id":"fade-1"}"#,
         r#"{"status":"complete"}"#,
-        r#"[{"id":"fade-1","title":"Song (Fade In)","status":"error","model_name":"chirp-fenix","created_at":"2026-07-10T00:00:00Z"}]"#,
+        r#"{"id":"fade-1","title":"Song (Fade In)","status":"error","model_name":"chirp-fenix","created_at":"2026-07-10T00:00:00Z"}"#,
     ])
     .await;
     let client = server.client();
@@ -2006,7 +2160,7 @@ async fn fade_waits_for_action_status_before_loading_clip() {
     let server = MockServer::json_sequence(&[
         r#"{"action_clip_id":"fade-1"}"#,
         r#"{"status":"complete"}"#,
-        r#"[{"id":"fade-1","title":"Song (Fade In)","status":"complete","model_name":"chirp-fenix","created_at":"2026-07-10T00:00:00Z"}]"#,
+        r#"{"id":"fade-1","title":"Song (Fade In)","status":"complete","model_name":"chirp-fenix","created_at":"2026-07-10T00:00:00Z"}"#,
     ])
     .await;
     let client = server.client();
@@ -2037,7 +2191,7 @@ async fn fade_waits_for_action_status_before_loading_clip() {
         })
     );
     assert_eq!(requests[1].path, "/api/edit/action/fade-1/");
-    assert_eq!(requests[2].path, "/api/feed/?ids=fade-1");
+    assert_eq!(requests[2].path, "/api/clip/fade-1");
 }
 
 #[tokio::test]
@@ -2252,7 +2406,7 @@ async fn opus_download_posts_convert_when_file_url_is_missing() {
 async fn stems_posts_current_web_contract() {
     let billing = billing_info_response("tier-pro");
     let server = MockServer::json_sequence(&[
-        r#"[{"id":"clip-a","title":"Source Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z"}]"#,
+        r#"{"id":"clip-a","title":"Source Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z"}"#,
         billing.as_str(),
         r#"{"required":false}"#,
         r#"{"clips":[{"id":"stem-1","title":"Source Song (Vocals)","status":"submitted","model_name":"chirp-stem","created_at":"2026-06-30T00:00:00Z"},{"id":"stem-2","title":"Source Song (Drums)","status":"submitted","model_name":"chirp-stem","created_at":"2026-06-30T00:00:00Z"}]}"#,
@@ -2267,7 +2421,7 @@ async fn stems_posts_current_web_contract() {
     let requests = server.captured_all().await;
     assert_eq!(requests.len(), 4);
     assert_eq!(requests[0].method, "GET");
-    assert_eq!(requests[0].path, "/api/feed/?ids=clip-a");
+    assert_eq!(requests[0].path, "/api/clip/clip-a");
     assert_eq!(requests[1].method, "GET");
     assert_eq!(requests[1].path, "/api/billing/info/");
     assert_eq!(requests[2].method, "POST");
@@ -2307,7 +2461,7 @@ async fn stems_posts_current_web_contract() {
 async fn stems_with_challenge_token_posts_generate_without_preflight_contract() {
     let billing = billing_info_response("tier-pro");
     let server = MockServer::json_sequence(&[
-        r#"[{"id":"clip-a","title":"Source Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z"}]"#,
+        r#"{"id":"clip-a","title":"Source Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z"}"#,
         billing.as_str(),
         r#"{"clips":[{"id":"stem-1","title":"Source Song (Vocals)","status":"submitted","model_name":"chirp-stem","created_at":"2026-06-30T00:00:00Z"}]}"#,
     ])
@@ -2323,7 +2477,7 @@ async fn stems_with_challenge_token_posts_generate_without_preflight_contract() 
     let requests = server.captured_all().await;
     assert_eq!(requests.len(), 3);
     assert_eq!(requests[0].method, "GET");
-    assert_eq!(requests[0].path, "/api/feed/?ids=clip-a");
+    assert_eq!(requests[0].path, "/api/clip/clip-a");
     assert_eq!(requests[1].method, "GET");
     assert_eq!(requests[1].path, "/api/billing/info/");
     assert_eq!(requests[2].method, "POST");
@@ -2339,7 +2493,7 @@ async fn stems_with_challenge_token_posts_generate_without_preflight_contract() 
 async fn extend_fetches_source_clip_and_posts_string_title_contract() {
     let billing = billing_info_response("tier-pro");
     let server = MockServer::json_sequence(&[
-        r#"[{"id":"clip-a","title":"Source Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z","metadata":{"prompt":"[Verse]\nOriginal words"}}]"#,
+        r#"{"id":"clip-a","title":"Source Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z","metadata":{"prompt":"[Verse]\nOriginal words"}}"#,
         r#"{"clips":[{"id":"clip-a","title":"Source Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z","metadata":{"tags":"source chamber folk","negative_tags":"vocals, narration","prompt":"[Verse]\nOriginal words","make_instrumental":true}}]}"#,
         billing.as_str(),
         r#"{"required":false}"#,
@@ -2366,7 +2520,7 @@ async fn extend_fetches_source_clip_and_posts_string_title_contract() {
     let requests = server.captured_all().await;
     assert_eq!(requests.len(), 5);
     assert_eq!(requests[0].method, "GET");
-    assert_eq!(requests[0].path, "/api/feed/?ids=clip-a");
+    assert_eq!(requests[0].path, "/api/clip/clip-a");
     assert_eq!(requests[1].method, "POST");
     assert_eq!(requests[1].path, "/api/feed/v3");
     let feed_body =
@@ -2390,7 +2544,7 @@ async fn extend_fetches_source_clip_and_posts_string_title_contract() {
     assert_eq!(body["make_instrumental"], true);
     assert_eq!(body["metadata"]["create_mode"], "custom");
     assert_eq!(body["metadata"]["is_remix"], true);
-    assert_eq!(body["metadata"]["lyrics_updated"], true);
+    assert_eq!(body["metadata"]["lyrics_updated"], false);
     assert_eq!(body["metadata"]["user_tier"], "tier-pro");
 }
 
@@ -2399,7 +2553,7 @@ async fn extend_propagates_rate_limit_from_metadata_enrichment_without_submittin
     let server = MockServer::json_status_sequence(&[
         (
             200,
-            r#"[{"id":"clip-a","title":"Source Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z","metadata":{"prompt":"[Verse]\nOriginal words"}}]"#,
+            r#"{"id":"clip-a","title":"Source Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z","metadata":{"prompt":"[Verse]\nOriginal words"}}"#,
         ),
         (429, ""),
     ])
@@ -2423,7 +2577,7 @@ async fn extend_propagates_rate_limit_from_metadata_enrichment_without_submittin
     assert!(matches!(error, CliError::RateLimited));
     let requests = server.captured_all().await;
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0].path, "/api/feed/?ids=clip-a");
+    assert_eq!(requests[0].path, "/api/clip/clip-a");
     assert_eq!(requests[1].path, "/api/feed/v3");
 }
 
@@ -2431,7 +2585,7 @@ async fn extend_propagates_rate_limit_from_metadata_enrichment_without_submittin
 async fn extend_metadata_fallback_does_not_merge_same_title_different_clip() {
     let billing = billing_info_response("tier-pro");
     let server = MockServer::json_sequence(&[
-        r#"[{"id":"clip-a","title":"Source Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z","metadata":{"prompt":"[Verse]\nOriginal words"}}]"#,
+        r#"{"id":"clip-a","title":"Source Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z","metadata":{"prompt":"[Verse]\nOriginal words"}}"#,
         r#"{"clips":[{"id":"clip-other","title":"Source Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z","metadata":{"tags":"wrong same-title tags","negative_tags":"wrong negatives","make_instrumental":true}}]}"#,
         r#"{"required":false}"#,
         billing.as_str(),
@@ -2542,23 +2696,161 @@ async fn lyrics_poll_deadline_bounds_an_in_flight_request() {
 }
 
 #[tokio::test]
-async fn aligned_lyrics_gets_current_web_contract() {
+async fn aligned_lyrics_starts_current_v3_contract_and_uses_immediate_alignment() {
     let server = MockServer::json(
-        r#"{"aligned_words":[{"word":"Hello","start_s":0.0,"end_s":0.5,"success":true,"p_align":0.99}]}"#,
+        r#"{"alignment":[{"word":"Hello","start_s":0.0,"end_s":0.5,"p_align":0.99,"phoneme":"həˈloʊ"}]}"#,
     )
     .await;
     let client = server.client();
 
     let words = client
-        .aligned_lyrics("clip-a")
+        .aligned_lyrics(
+            "clip-a",
+            Some("Hello"),
+            true,
+            super::PollingOptions {
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_millis(1),
+            },
+        )
         .await
         .expect("aligned lyrics");
 
     assert_eq!(words[0].word, "Hello");
+    assert_eq!(words[0].extra["phoneme"], "həˈloʊ");
+    let request = server.captured().await;
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/api/gen/clip-a/aligned_lyrics/v3");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&request.body).expect("request json"),
+        serde_json::json!({
+            "lyrics": "Hello",
+            "enable_augmentation": true
+        })
+    );
+}
+
+#[tokio::test]
+async fn aligned_lyrics_polls_current_v3_contract_until_alignment_is_ready() {
+    let server = MockServer::json_sequence(&[
+        r#"{"state":"running"}"#,
+        r#"{"detail":"Lyrics alignment not available, try again later."}"#,
+        r#"{"alignment":[{"word":"Hello","start_s":0.0,"end_s":0.5}]}"#,
+    ])
+    .await;
+    let client = server.client();
+
+    let words = client
+        .aligned_lyrics(
+            "clip-a",
+            Some("Hello"),
+            false,
+            super::PollingOptions {
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_millis(1),
+            },
+        )
+        .await
+        .expect("aligned lyrics");
+
+    assert_eq!(words[0].word, "Hello");
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].path, "/api/gen/clip-a/aligned_lyrics/v3");
+    assert_eq!(requests[1].method, "GET");
+    assert_eq!(requests[1].path, "/api/gen/clip-a/aligned_lyrics/v3");
+    assert_eq!(requests[2].method, "GET");
+    assert_eq!(requests[2].path, "/api/gen/clip-a/aligned_lyrics/v3");
+}
+
+#[tokio::test]
+async fn aligned_lyrics_uses_v2_only_as_v3_compatibility_fallback() {
+    let server = MockServer::json_sequence(&[
+        r#"{"state":"error","error_message":"v3 unavailable"}"#,
+        r#"{"aligned_words":[{"word":"Hello","start_s":0.0,"end_s":0.5,"success":true,"p_align":0.99}]}"#,
+    ])
+    .await;
+    let client = server.client();
+
+    let words = client
+        .aligned_lyrics(
+            "clip-a",
+            Some("Hello"),
+            true,
+            super::PollingOptions {
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_millis(1),
+            },
+        )
+        .await
+        .expect("v2 compatibility fallback");
+
+    assert_eq!(words[0].word, "Hello");
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].path, "/api/gen/clip-a/aligned_lyrics/v3");
+    assert_eq!(requests[1].method, "GET");
+    assert_eq!(requests[1].path, "/api/gen/clip-a/aligned_lyrics/v2");
+}
+
+#[tokio::test]
+async fn aligned_lyrics_does_not_hide_v3_schema_drift_behind_v2() {
+    let server = MockServer::json_sequence(&[r#"{}"#, r#"{"unexpected":true}"#]).await;
+    let client = server.client();
+
+    let error = client
+        .aligned_lyrics(
+            "clip-a",
+            Some("Hello"),
+            true,
+            super::PollingOptions {
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_millis(1),
+            },
+        )
+        .await
+        .expect_err("v3 schema drift must remain visible");
+
+    assert!(matches!(
+        error,
+        CliError::Api {
+            code: "schema_drift",
+            ..
+        }
+    ));
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].path, "/api/gen/clip-a/aligned_lyrics/v3");
+    assert_eq!(requests[1].path, "/api/gen/clip-a/aligned_lyrics/v3");
+}
+
+#[tokio::test]
+async fn aligned_lyrics_without_source_lyrics_uses_v2_compatibility_path() {
+    let server = MockServer::json(
+        r#"{"aligned_words":[{"word":"Hello","start_s":0.0,"end_s":0.5,"success":true}]}"#,
+    )
+    .await;
+    let client = server.client();
+
+    let words = client
+        .aligned_lyrics(
+            "clip-a",
+            None,
+            true,
+            super::PollingOptions {
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_millis(1),
+            },
+        )
+        .await
+        .expect("v2 compatibility path");
+
+    assert_eq!(words[0].word, "Hello");
     let request = server.captured().await;
     assert_eq!(request.method, "GET");
-    assert_eq!(request.path, "/api/gen/clip-a/aligned_lyrics/v2/");
-    assert_eq!(request.body, "");
+    assert_eq!(request.path, "/api/gen/clip-a/aligned_lyrics/v2");
 }
 #[tokio::test]
 async fn playlist_reaction_posts_current_web_contract() {
@@ -2787,7 +3079,29 @@ async fn playlist_create_failure_after_local_cover_upload_is_resumable_by_image_
 }
 
 #[tokio::test]
-async fn set_playlist_metadata_posts_only_the_metadata_mutation() {
+async fn set_playlist_metadata_patches_current_v2_contract() {
+    let server = MockServer::json("{}").await;
+    let client = server.client();
+
+    client
+        .set_playlist_metadata("playlist-1", Some("Road Trip"), Some("Drive set"), None)
+        .await
+        .expect("set metadata");
+
+    let request = server.captured().await;
+    assert_eq!(request.method, "PATCH");
+    assert_eq!(request.path, "/api/playlist/v2/playlist-1");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&request.body).expect("metadata json"),
+        serde_json::json!({
+            "metadata": { "name": "Road Trip" },
+            "bio": { "description": "Drive set" }
+        })
+    );
+}
+
+#[tokio::test]
+async fn set_playlist_external_image_url_uses_legacy_compatibility_contract() {
     let server = MockServer::json("{}").await;
     let client = server.client();
 
@@ -3253,7 +3567,7 @@ async fn get_processed_clip_uses_current_web_contract() {
 }
 
 #[tokio::test]
-async fn trash_personas_puts_current_web_bulk_trash_contract() {
+async fn trash_personas_puts_current_web_per_id_trash_contract() {
     let server = MockServer::json(
         r#"{"updated_persona_ids":["persona-1"],"voice_persona_count":4,"max_voice_personas":1000}"#,
     )
@@ -3268,19 +3582,15 @@ async fn trash_personas_puts_current_web_bulk_trash_contract() {
     assert_eq!(response.updated_persona_ids, vec!["persona-1"]);
     let request = server.captured().await;
     assert_eq!(request.method, "PUT");
-    assert_eq!(request.path, "/api/persona/bulk-trash-personas/");
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&request.body).expect("request json"),
-        serde_json::json!({
-            "persona_ids": ["persona-1"],
-            "undo": false,
-            "hide": false
-        })
+        request.path,
+        "/api/persona/trash-persona/persona-1/?undo=false&hide=false"
     );
+    assert_eq!(request.body, "");
 }
 
 #[tokio::test]
-async fn restore_personas_puts_current_web_bulk_restore_contract() {
+async fn restore_personas_puts_current_web_per_id_restore_contract() {
     let server = MockServer::json(
         r#"{"updated_persona_ids":["persona-1"],"voice_persona_count":5,"max_voice_personas":1000}"#,
     )
@@ -3294,19 +3604,15 @@ async fn restore_personas_puts_current_web_bulk_restore_contract() {
 
     let request = server.captured().await;
     assert_eq!(request.method, "PUT");
-    assert_eq!(request.path, "/api/persona/bulk-trash-personas/");
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&request.body).expect("request json"),
-        serde_json::json!({
-            "persona_ids": ["persona-1"],
-            "undo": true,
-            "hide": false
-        })
+        request.path,
+        "/api/persona/trash-persona/persona-1/?undo=true&hide=false"
     );
+    assert_eq!(request.body, "");
 }
 
 #[tokio::test]
-async fn purge_personas_puts_current_web_bulk_delete_contract() {
+async fn purge_personas_puts_current_web_per_id_delete_contract() {
     let server = MockServer::json(
         r#"{"updated_persona_ids":["persona-1"],"voice_persona_count":4,"max_voice_personas":1000}"#,
     )
@@ -3320,15 +3626,62 @@ async fn purge_personas_puts_current_web_bulk_delete_contract() {
 
     let request = server.captured().await;
     assert_eq!(request.method, "PUT");
-    assert_eq!(request.path, "/api/persona/bulk-trash-personas/");
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&request.body).expect("request json"),
-        serde_json::json!({
-            "persona_ids": ["persona-1"],
-            "undo": false,
-            "hide": true
+        request.path,
+        "/api/persona/trash-persona/persona-1/?undo=false&hide=true"
+    );
+    assert_eq!(request.body, "");
+}
+
+#[tokio::test]
+async fn persona_per_id_mutation_reports_partial_progress() {
+    let server = MockServer::response_sequence(vec![
+        (
+            200,
+            r#"{"updated_persona_ids":["persona-a"],"voice_persona_count":4,"max_voice_personas":1000}"#
+                .into(),
+        ),
+        (500, r#"{"detail":"persona mutation failed"}"#.into()),
+    ])
+    .await;
+    let client = server.client();
+    let ids = vec!["persona-a".into(), "persona-b".into(), "persona-c".into()];
+
+    let error = client
+        .trash_personas(&ids)
+        .await
+        .expect_err("later failure must expose partial progress");
+
+    assert_eq!(error.error_code(), "partial_mutation");
+    assert_eq!(
+        error.details().expect("partial details"),
+        &serde_json::json!({
+            "operation": "trash_personas",
+            "requested_persona_ids": ["persona-a", "persona-b", "persona-c"],
+            "succeeded_persona_ids": ["persona-a"],
+            "failed": {
+                "persona_id": "persona-b",
+                "code": "api_error",
+                "message": "API error: HTTP 500 Internal Server Error: persona mutation failed"
+            },
+            "not_attempted_persona_ids": ["persona-c"]
         })
     );
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+}
+
+#[tokio::test]
+async fn persona_per_id_mutation_rejects_non_json_success_body() {
+    let server = MockServer::json("not-json").await;
+    let client = server.client();
+
+    let error = client
+        .restore_personas(&["persona-a".into()])
+        .await
+        .expect_err("unknown success schema must not be ignored");
+
+    assert_eq!(error.error_code(), "json_error");
 }
 
 #[tokio::test]
@@ -3380,11 +3733,9 @@ async fn create_audio_upload_posts_current_web_contract() {
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&request.body).expect("request json"),
         serde_json::json!({
-            "spec": {
-                "extension": "mp3",
-                "is_stem_mix": false,
-                "upload_type": "file_upload"
-            }
+            "extension": "mp3",
+            "is_stem_mix": false,
+            "upload_type": "file_upload"
         })
     );
 }
@@ -3400,6 +3751,7 @@ async fn finish_audio_upload_posts_current_web_contract() {
             &FinishAudioUploadRequest {
                 upload_type: "file_upload".into(),
                 upload_filename: "demo.mp3".into(),
+                agreed_to_vip_upload_terms: false,
             },
         )
         .await
@@ -3412,7 +3764,8 @@ async fn finish_audio_upload_posts_current_web_contract() {
         serde_json::from_str::<serde_json::Value>(&request.body).expect("request json"),
         serde_json::json!({
             "upload_type": "file_upload",
-            "upload_filename": "demo.mp3"
+            "upload_filename": "demo.mp3",
+            "agreed_to_vip_upload_terms": false
         })
     );
 }
@@ -3608,8 +3961,8 @@ async fn audio_upload_workflow_returns_clip_after_metadata_update() {
             serde_json::json!({ "clip_id": "clip-1", "clip": stale_clip.clone() }).to_string(),
         ),
         (200, "{}".to_string()),
-        (200, serde_json::json!([stale_clip]).to_string()),
-        (200, serde_json::json!([final_clip]).to_string()),
+        (200, stale_clip.to_string()),
+        (200, final_clip.to_string()),
     ])
     .await;
     let client = api.client();

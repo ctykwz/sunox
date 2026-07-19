@@ -144,6 +144,8 @@ pub struct GenerateMetadata {
     pub create_session_token: String,
     pub disable_volume_normalization: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub vocal_gender: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub control_sliders: Option<ControlSliders>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lyrics_model: Option<String>,
@@ -165,6 +167,7 @@ impl GenerateMetadata {
             user_tier: context.user_tier_value(),
             create_session_token: uuid::Uuid::new_v4().to_string(),
             disable_volume_normalization: false,
+            vocal_gender: None,
             control_sliders: None,
             lyrics_model: None,
             is_remix: None,
