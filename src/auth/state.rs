@@ -46,6 +46,22 @@ impl AuthState {
         self.save_if_unchanged_to_path(expected, &path)
     }
 
+    /// Persist an explicitly verified device override without rolling back a
+    /// JWT/session/environment that another refresh saved concurrently.
+    pub(crate) fn save_device_id_for_active_account(&self) -> Result<(), CliError> {
+        let path = Self::path()?;
+        let _guard = AuthStateLockGuard::acquire()?;
+        let mut current = Self::load_from_path(&path).map_err(|error| match error {
+            CliError::AuthMissing => active_auth_changed_error(),
+            other => other,
+        })?;
+        if !self.matches_account_material(&current) {
+            return Err(active_auth_changed_error());
+        }
+        current.device_id.clone_from(&self.device_id);
+        current.save_to_path(&path)
+    }
+
     fn save_if_unchanged_to_path(
         &self,
         expected: Option<&Self>,
@@ -237,6 +253,8 @@ impl AuthState {
             && self.session_id == other.session_id
             && self.clerk_client_cookie == other.clerk_client_cookie
             && self.cookie == other.cookie
+            && self.device_id == other.device_id
+            && self.browser_environment == other.browser_environment
     }
 
     fn jwt_account_subject(&self) -> Option<String> {
@@ -397,7 +415,7 @@ mod tests {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
 
-    use super::AuthState;
+    use super::{AuthState, BrowserEnvironment};
 
     #[test]
     fn auth_path_rejects_an_unresolvable_config_directory() {
@@ -569,6 +587,85 @@ mod tests {
 
         let saved = AuthState::load_from_path(&path).expect("saved account");
         assert_eq!(saved.session_id.as_deref(), Some("new-session"));
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn stale_refresh_cannot_remove_recovered_browser_environment() {
+        let dir = std::env::temp_dir().join(format!(
+            "sunox-auth-cas-browser-environment-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("test dir");
+        let path = dir.join("auth.json");
+        let lock_path = dir.join("auth-state.lock");
+        let before = AuthState {
+            jwt: Some(jwt_with_subject("account-a")),
+            clerk_client_cookie: Some("client-a".into()),
+            ..Default::default()
+        };
+        let recovered = AuthState {
+            browser_environment: Some(BrowserEnvironment {
+                browser_source: Some("chrome".into()),
+                user_agent: Some("Mozilla/5.0 Chrome/150.0.0.0".into()),
+                accept_language: Some("zh-CN,zh;q=0.9".into()),
+                client_hints: None,
+            }),
+            ..before.clone()
+        };
+        let stale_refresh = AuthState {
+            jwt: Some(jwt_with_subject("account-a")),
+            clerk_client_cookie: Some("client-a".into()),
+            session_id: Some("new-session".into()),
+            ..Default::default()
+        };
+        recovered
+            .save_to_path(&path)
+            .expect("seed recovered browser environment");
+
+        let error = stale_refresh
+            .save_after_refresh_to_path_with_lock_path(&before, &path, &lock_path)
+            .expect_err("stale refresh must not remove recovered metadata");
+
+        assert_eq!(error.error_code(), "auth_changed");
+        assert_eq!(AuthState::load_from_path(&path).expect("saved"), recovered);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn stale_refresh_cannot_roll_back_a_newer_device_id() {
+        let dir = std::env::temp_dir().join(format!(
+            "sunox-auth-cas-device-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("test dir");
+        let path = dir.join("auth.json");
+        let lock_path = dir.join("auth-state.lock");
+        let before = AuthState {
+            jwt: Some(jwt_with_subject("account-a")),
+            clerk_client_cookie: Some("client-a".into()),
+            device_id: Some("old-device".into()),
+            ..Default::default()
+        };
+        let newer = AuthState {
+            device_id: Some("new-device".into()),
+            ..before.clone()
+        };
+        let stale_refresh = AuthState {
+            jwt: Some(jwt_with_subject("account-a")),
+            clerk_client_cookie: Some("client-a".into()),
+            session_id: Some("new-session".into()),
+            device_id: Some("old-device".into()),
+            ..Default::default()
+        };
+        newer.save_to_path(&path).expect("seed newer device");
+
+        let error = stale_refresh
+            .save_after_refresh_to_path_with_lock_path(&before, &path, &lock_path)
+            .expect_err("stale refresh must not roll back the newer device");
+
+        assert_eq!(error.error_code(), "auth_changed");
+        assert_eq!(AuthState::load_from_path(&path).expect("saved"), newer);
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 

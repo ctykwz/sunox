@@ -48,16 +48,25 @@ async fn refresh_state_with_lock(
         if !auth.matches_account_material(&saved_auth) {
             return Err(active_auth_changed_error());
         }
-        if let Some(reusable_auth) = reusable_saved_auth_after_lock(auth, saved_auth, mode) {
+        if let Some(reusable_auth) = reusable_saved_auth_after_lock(auth, saved_auth.clone(), mode)
+        {
             *auth = reusable_auth;
             return Ok(());
         }
+        adopt_saved_request_metadata(auth, &saved_auth);
     }
     let refresh_origin = auth.clone();
 
     if let (Some(cookie), Some(session_id)) = (&auth.clerk_client_cookie, &auth.session_id) {
         eprintln!("{}", refresh_with_session_message(mode));
-        match clerk_refresh_jwt(client, cookie, session_id).await {
+        match clerk_refresh_jwt(
+            client,
+            cookie,
+            session_id,
+            auth.browser_environment.as_ref(),
+        )
+        .await
+        {
             Ok(jwt) => {
                 auth.jwt = Some(jwt);
                 auth.save_after_refresh(&refresh_origin)?;
@@ -71,7 +80,7 @@ async fn refresh_state_with_lock(
         }
     } else if let Some(cookie) = &auth.clerk_client_cookie {
         eprintln!("{}", recover_session_message(mode));
-        match clerk_token_exchange(client, cookie).await {
+        match clerk_token_exchange(client, cookie, auth.browser_environment.as_ref()).await {
             Ok((session_id, jwt)) => {
                 auth.session_id = Some(session_id);
                 auth.jwt = Some(jwt);
@@ -86,6 +95,14 @@ async fn refresh_state_with_lock(
         }
     } else {
         Err(CliError::AuthExpired)
+    }
+}
+
+fn adopt_saved_request_metadata(auth: &mut AuthState, saved_auth: &AuthState) {
+    auth.device_id.clone_from(&saved_auth.device_id);
+    if saved_auth.browser_environment.is_some() {
+        auth.browser_environment
+            .clone_from(&saved_auth.browser_environment);
     }
 }
 
@@ -152,7 +169,10 @@ mod tests {
 
     use crate::auth::AuthState;
 
-    use super::{RefreshMode, refresh_error, reusable_saved_auth_after_lock};
+    use super::{
+        RefreshMode, adopt_saved_request_metadata, refresh_error, reusable_saved_auth_after_lock,
+    };
+    use crate::auth::BrowserEnvironment;
     use crate::core::CliError;
 
     #[test]
@@ -299,5 +319,26 @@ mod tests {
                 .jwt,
             saved.jwt
         );
+    }
+
+    #[test]
+    fn refresh_adopts_browser_metadata_recovered_by_another_process() {
+        let mut current = auth_with_jwt(jwt(1, "user-a", "old"));
+        current.device_id = Some("stale-device".into());
+        let saved = AuthState {
+            device_id: Some("persisted-device".into()),
+            browser_environment: Some(BrowserEnvironment {
+                browser_source: Some("chrome".into()),
+                user_agent: Some("Mozilla/5.0 Chrome/150.0.0.0".into()),
+                accept_language: Some("zh-CN,zh;q=0.9".into()),
+                client_hints: None,
+            }),
+            ..current.clone()
+        };
+
+        adopt_saved_request_metadata(&mut current, &saved);
+
+        assert_eq!(current.device_id, saved.device_id);
+        assert_eq!(current.browser_environment, saved.browser_environment);
     }
 }

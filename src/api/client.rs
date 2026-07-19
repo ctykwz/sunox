@@ -17,6 +17,7 @@ pub struct SunoClient {
     /// kicks in well before the JWT's own `exp` claim). The lock is only
     /// held briefly to read/clone auth fields; never across awaits.
     pub(crate) auth: Mutex<AuthState>,
+    pub(crate) device_override: Mutex<Option<String>>,
 }
 
 impl SunoClient {
@@ -30,6 +31,7 @@ impl SunoClient {
             client,
             base_url: BASE_URL.to_string(),
             auth: Mutex::new(auth),
+            device_override: Mutex::new(None),
         })
     }
 
@@ -41,6 +43,7 @@ impl SunoClient {
             client: http::browser_client()?,
             base_url: BASE_URL.to_string(),
             auth: Mutex::new(auth),
+            device_override: Mutex::new(None),
         })
     }
 
@@ -50,11 +53,20 @@ impl SunoClient {
             client: http::browser_client()?,
             base_url: base_url.trim_end_matches('/').to_string(),
             auth: Mutex::new(auth),
+            device_override: Mutex::new(None),
         })
     }
 
     pub(crate) fn auth_state_snapshot(&self) -> AuthState {
         self.auth.lock().expect("auth mutex poisoned").clone()
+    }
+
+    pub(crate) fn set_device_id(&self, device_id: String) {
+        self.auth.lock().expect("auth mutex poisoned").device_id = Some(device_id.clone());
+        *self
+            .device_override
+            .lock()
+            .expect("device override mutex poisoned") = Some(device_id);
     }
 
     fn url(&self, path: &str) -> String {

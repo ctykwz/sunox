@@ -212,7 +212,7 @@ Studio 関連機能はこの CLI の対象外です。
 sunox login
 ```
 
-`sunox login` はまず Chrome、Arc、Brave、Firefox、Edge から Clerk cookie を読み取ります。成功した場合はブラウザ種別と、取得できる公開 profile 設定（受け入れ言語など）を保存しますが、ブラウザ名だけから user-agent を作ることはありません。失敗した場合は Sunox 専用の Chrome/Edge 互換ブラウザ profile を開き、そこで Suno にログインすると Clerk session を取得します。その session を JWT に交換し、更新可能なローカル session として保存します。対話型 login では user-agent と受け入れ言語も取得し、API request では選択された user-agent から Chromium client hints を派生し、browser fetch metadata header を送り、実値がない項目だけ fallback します。
+`sunox login` はまず Chrome、Arc、Brave、Firefox、Edge から Clerk cookie を読み取ります。Windows では App-Bound unlock により browser を閉じる可能性がある live Chromium cookie DB を避けますが、Firefox は非破壊の read-only SQLite 経由で読み取ります。再利用可能な session がない場合、専用の対話 login fallback には Chromium 系 browser が必要です。成功すると session を一致した profile/channel に関連付け、追加 window を開かず Suno にアクセスせずに同じ binary の runtime user-agent、受け入れ言語、Client Hints を取得します。新しい field を優先し、probe で欠けた field は旧値を維持し、両方にない場合だけ内蔵 fallback を使います。同じ context を Clerk login/JWT refresh と Suno API request に使います。
 
 認証情報は OS keychain ではなくローカル JSON に保存されます。Unix では認証ファイルを `0600` で作成し、Windows では設定ディレクトリのユーザー ACL に依存します。`--cookie` と `--jwt` の値は shell history やプロセス一覧に表示される可能性があるため、`sunox login` または標準入力用の `--cookie-stdin` / `--jwt-stdin` を優先し、認証情報をログ、prompt、プロジェクトファイル、commit に含めないでください。
 

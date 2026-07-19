@@ -27,7 +27,7 @@ pub mod upload;
 
 mod auth_retry;
 mod client;
-mod headers;
+pub(crate) mod headers;
 mod response;
 
 #[cfg(test)]

@@ -15,11 +15,22 @@ use std::io::Write;
 
 #[tokio::main]
 async fn main() {
+    // Tokio's worker threads have more stack headroom than the Windows executable main thread.
+    // Run the command dispatcher there so deeply nested async command paths cannot overflow the
+    // platform's smaller main-thread stack before returning validation errors.
+    let mut app_task = tokio::spawn(async { app::run().await });
     let result = tokio::select! {
-        result = app::run() => result,
-        signal = tokio::signal::ctrl_c() => match signal {
-            Ok(()) => Err(core::CliError::Interrupted),
-            Err(error) => Err(core::CliError::Io(error)),
+        result = &mut app_task => match result {
+            Ok(result) => result,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(_) => Err(core::CliError::Interrupted),
+        },
+        signal = tokio::signal::ctrl_c() => {
+            app_task.abort();
+            match signal {
+                Ok(()) => Err(core::CliError::Interrupted),
+                Err(error) => Err(core::CliError::Io(error)),
+            }
         },
     };
     if let Err(e) = result {

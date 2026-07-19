@@ -1,6 +1,6 @@
 use crate::api::SunoClient;
 use crate::app::AppContext;
-use crate::auth::AuthState;
+use crate::auth::load_auth_state_with_recovered_environment;
 use crate::cli::{ConfigAction, ConfigArgs};
 use crate::core::{AppConfig, CliError};
 use crate::output::{self, OutputFormat};
@@ -35,7 +35,7 @@ pub async fn run(args: ConfigArgs, ctx: &AppContext) -> Result<(), CliError> {
 }
 
 async fn check(ctx: &AppContext) -> Result<(), CliError> {
-    let result = match AuthState::load() {
+    let result = match load_auth_state_with_recovered_environment().await {
         Ok(auth) => match SunoClient::new_with_refresh(auth).await {
             Ok(client) => {
                 let info = client.billing_info().await?;

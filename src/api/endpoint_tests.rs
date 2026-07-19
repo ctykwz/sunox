@@ -654,6 +654,7 @@ async fn requests_use_stored_browser_environment_headers_when_available() {
             browser_source: Some("interactive-browser".into()),
             user_agent: Some("SunoxTestBrowser/1.0".into()),
             accept_language: Some("en-US,en;q=0.9".into()),
+            client_hints: None,
         }),
         ..AuthState::default()
     });

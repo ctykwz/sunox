@@ -33,6 +33,7 @@ pub async fn run(args: AuthArgs, ctx: &AppContext) -> Result<(), CliError> {
         Err(e) => return Err(e),
     };
     let mut state = original_state.clone().unwrap_or_default();
+    let mut environment_recovery_attempted = false;
     let jwt_input = read_secret_input(args.jwt.clone(), args.jwt_stdin, "JWT")?;
     let cookie_input = read_secret_input(args.cookie.clone(), args.cookie_stdin, "Clerk cookie")?;
 
@@ -42,6 +43,11 @@ pub async fn run(args: AuthArgs, ctx: &AppContext) -> Result<(), CliError> {
         || (!has_explicit_auth_input && state.jwt.is_none() && state.clerk_client_cookie.is_none());
 
     if args.refresh {
+        environment_recovery_attempted = true;
+        let recovery_origin = state.clone();
+        if auth::recover_auth_state_environment(&mut state).await? {
+            state.save_if_unchanged(Some(&recovery_origin))?;
+        }
         state.clerk_client_cookie.as_ref().ok_or_else(|| {
             CliError::Config("no Clerk session cookie stored — run `sunox login` first".into())
         })?;
@@ -49,55 +55,85 @@ pub async fn run(args: AuthArgs, ctx: &AppContext) -> Result<(), CliError> {
         auth::refresh_state_explicit(&http, &mut state).await?;
     } else if should_login {
         eprintln!("Extracting Suno session from your browser...");
-        let login = extract_browser_auth_with_fallback(
+        let mut login = extract_browser_auth_with_fallback(
             auth::extract_browser_auth,
             auth::extract_interactive_browser_auth,
         )
         .await?;
+        auth::enrich_browser_auth_environment(&mut login.browser_auth).await?;
+        environment_recovery_attempted = true;
 
         let (session_id, jwt) = match login.verified_clerk {
             Some(verified) => (verified.session_id, verified.jwt),
             None => {
                 let http = crate::net::http::browser_client()?;
                 eprintln!("Exchanging for access token via Clerk...");
-                auth::clerk_token_exchange(&http, &login.browser_auth.clerk_client_cookie).await?
+                auth::clerk_token_exchange(
+                    &http,
+                    &login.browser_auth.clerk_client_cookie,
+                    login.browser_auth.browser_environment.as_ref(),
+                )
+                .await?
             }
         };
 
         store_browser_auth_state(&mut state, login.browser_auth, session_id, jwt);
     } else if let Some(cookie) = cookie_input.as_deref() {
-        let browser_auth = auth::normalize_cookie_input(cookie)?;
+        let mut browser_auth = auth::normalize_cookie_input(cookie)?;
+        auth::enrich_browser_auth_environment(&mut browser_auth).await?;
+        environment_recovery_attempted = true;
         let http = crate::net::http::browser_client()?;
         eprintln!("Exchanging cookie for access token...");
-        let (session_id, jwt) =
-            auth::clerk_token_exchange(&http, &browser_auth.clerk_client_cookie).await?;
+        let (session_id, jwt) = auth::clerk_token_exchange(
+            &http,
+            &browser_auth.clerk_client_cookie,
+            browser_auth.browser_environment.as_ref(),
+        )
+        .await?;
 
         store_browser_auth_state(&mut state, browser_auth, session_id, jwt);
-    } else if let Some(jwt) = jwt_input {
-        store_direct_jwt_state(&mut state, jwt);
+    } else if let Some(jwt) = jwt_input.as_ref() {
+        store_direct_jwt_state(&mut state, jwt.clone());
     } else {
         eprintln!("Checking existing authentication...");
     }
 
-    let save_origin = if args.refresh {
+    let recovery_origin = state.clone();
+    let environment_recovered = if environment_recovery_attempted {
+        false
+    } else {
+        auth::recover_auth_state_environment(&mut state).await?
+    };
+    let recovery_can_be_saved_before_verify =
+        environment_recovered && !should_login && cookie_input.is_none() && jwt_input.is_none();
+    if recovery_can_be_saved_before_verify {
+        state.save_if_unchanged(Some(&recovery_origin))?;
+    }
+
+    let save_origin = if recovery_can_be_saved_before_verify || args.refresh {
         Some(state.clone())
     } else {
         original_state.clone()
     };
-    if let Some(device) = args.device.as_ref() {
-        state.device_id = Some(device.clone());
-    }
-
     let should_save_after_verify = args.refresh
         || should_login
         || cookie_input.is_some()
         || args.jwt.is_some()
         || args.jwt_stdin
-        || args.device.is_some();
+        || args.device.is_some()
+        || (environment_recovered && !recovery_can_be_saved_before_verify);
     let client = SunoClient::new_with_refresh(state.clone()).await?;
+    if let Some(device) = args.device.as_ref() {
+        client.set_device_id(device.clone());
+    }
     let info = client.billing_info().await?;
     if should_save_after_verify {
-        verified_auth_state(&client).save_if_unchanged(save_origin.as_ref())?;
+        let verified = verified_auth_state(&client);
+        if args.device.is_some() && !should_login && cookie_input.is_none() && jwt_input.is_none() {
+            verified.save_device_id_for_active_account()?;
+        } else {
+            verified.save_if_unchanged(save_origin.as_ref())?;
+        }
     }
     match ctx.fmt {
         OutputFormat::Json => output::json::success(serde_json::json!({
@@ -277,6 +313,7 @@ mod tests {
                         browser_source: Some("chrome".into()),
                         user_agent: None,
                         accept_language: Some("zh-CN,zh;q=0.9".into()),
+                        client_hints: None,
                     }),
                 })
             },
@@ -328,6 +365,7 @@ mod tests {
                 browser_source: Some("interactive-browser".into()),
                 user_agent: Some("Mozilla/5.0 Test".into()),
                 accept_language: Some("en-US,en;q=0.9".into()),
+                client_hints: None,
             }),
             ..AuthState::default()
         };
@@ -342,6 +380,7 @@ mod tests {
                     browser_source: Some("edge".into()),
                     user_agent: None,
                     accept_language: None,
+                    client_hints: None,
                 }),
             },
             "session".into(),
@@ -362,6 +401,7 @@ mod tests {
                 browser_source: Some("interactive-browser".into()),
                 user_agent: Some("Mozilla/5.0 Test".into()),
                 accept_language: Some("en-US,en;q=0.9".into()),
+                client_hints: None,
             }),
             ..AuthState::default()
         };
@@ -398,6 +438,7 @@ mod tests {
                     browser_source: Some("edge".into()),
                     user_agent: None,
                     accept_language: None,
+                    client_hints: None,
                 }),
             },
             "session".into(),
@@ -418,6 +459,7 @@ mod tests {
                 browser_source: Some("chrome".into()),
                 user_agent: Some("Mozilla/5.0 Old".into()),
                 accept_language: Some("en-US,en;q=0.9".into()),
+                client_hints: None,
             }),
             clerk_client_cookie: Some("old-client".into()),
         };
