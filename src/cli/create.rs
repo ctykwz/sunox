@@ -54,11 +54,11 @@ pub struct CreateArgs {
     #[arg(long)]
     pub token: Option<String>,
 
-    /// Force the built-in browser challenge solver before submitting.
+    /// Force browser challenge verification even when preflight says it is unnecessary.
     #[arg(long, conflicts_with = "no_captcha")]
     pub captcha: bool,
 
-    /// Do not force the built-in challenge solver; challenge preflight still runs.
+    /// Disable automatic browser challenge verification; challenge preflight still runs.
     #[arg(long)]
     pub no_captcha: bool,
 
@@ -117,11 +117,11 @@ pub struct GenerateArgs {
     #[arg(long)]
     pub token: Option<String>,
 
-    /// Force the built-in browser challenge solver before submitting.
+    /// Force browser challenge verification even when preflight says it is unnecessary.
     #[arg(long, conflicts_with = "no_captcha")]
     pub captcha: bool,
 
-    /// Do not force the built-in challenge solver; challenge preflight still runs.
+    /// Disable automatic browser challenge verification; challenge preflight still runs.
     #[arg(long)]
     pub no_captcha: bool,
 
@@ -176,12 +176,11 @@ pub struct DescribeArgs {
     #[arg(long)]
     pub token: Option<String>,
 
-    /// Force the built-in browser challenge solver before submitting.
+    /// Force browser challenge verification even when preflight says it is unnecessary.
     #[arg(long, conflicts_with = "no_captcha")]
     pub captcha: bool,
 
-    /// Skip the built-in challenge solver. This is the default unless
-    /// `--captcha` is supplied.
+    /// Disable automatic browser challenge verification; challenge preflight still runs.
     #[arg(long)]
     pub no_captcha: bool,
 
@@ -234,11 +233,11 @@ pub struct ExtendArgs {
     #[arg(long)]
     pub token: Option<String>,
 
-    /// Force the built-in browser challenge solver before submitting.
+    /// Force browser challenge verification even when preflight says it is unnecessary.
     #[arg(long, conflicts_with = "no_captcha")]
     pub captcha: bool,
 
-    /// Do not force the built-in challenge solver; challenge preflight still runs.
+    /// Disable automatic browser challenge verification; challenge preflight still runs.
     #[arg(long)]
     pub no_captcha: bool,
 }
@@ -266,11 +265,11 @@ pub struct CoverArgs {
     #[arg(long)]
     pub token: Option<String>,
 
-    /// Force the built-in browser challenge solver before submitting.
+    /// Force browser challenge verification even when preflight says it is unnecessary.
     #[arg(long, conflicts_with = "no_captcha")]
     pub captcha: bool,
 
-    /// Do not force the built-in challenge solver; challenge preflight still runs.
+    /// Disable automatic browser challenge verification; challenge preflight still runs.
     #[arg(long)]
     pub no_captcha: bool,
 }
@@ -312,11 +311,11 @@ pub struct InspireArgs {
     #[arg(long)]
     pub token: Option<String>,
 
-    /// Force the built-in browser challenge solver before submitting
+    /// Force browser challenge verification even when preflight says it is unnecessary
     #[arg(long, conflicts_with = "no_captcha")]
     pub captcha: bool,
 
-    /// Do not force the built-in challenge solver; challenge preflight still runs
+    /// Disable automatic browser challenge verification; challenge preflight still runs
     #[arg(long)]
     pub no_captcha: bool,
 }
@@ -344,11 +343,11 @@ pub struct StemsArgs {
     #[arg(long)]
     pub token: Option<String>,
 
-    /// Force the built-in browser challenge solver before submitting.
+    /// Force browser challenge verification even when preflight says it is unnecessary.
     #[arg(long, conflicts_with = "no_captcha")]
     pub captcha: bool,
 
-    /// Do not force the built-in challenge solver; challenge preflight still runs.
+    /// Disable automatic browser challenge verification; challenge preflight still runs.
     #[arg(long)]
     pub no_captcha: bool,
 }

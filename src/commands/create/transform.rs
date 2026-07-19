@@ -5,7 +5,7 @@ use crate::cli::{
 };
 use crate::core::{AppConfig, CliError};
 
-use super::support::{execute_generation_submission, output_clips};
+use super::support::{ChallengeMode, execute_generation_submission, output_clips};
 
 pub async fn concat(args: ConcatArgs, ctx: &AppContext) -> Result<(), CliError> {
     let (client, _mutation_guard) = ctx.mutation_client().await?;
@@ -22,26 +22,17 @@ pub async fn cover(args: CoverArgs, ctx: &AppContext) -> Result<(), CliError> {
             cover_model_label(args.model.as_ref(), &ctx.config)
         );
     }
-    let force_captcha = args.captcha && !args.no_captcha;
+    let challenge_mode = ChallengeMode::from_flags(args.captcha, args.no_captcha);
     let token = args.token.clone();
     let model = model.to_string();
-    let clips = execute_generation_submission(
-        token,
-        force_captcha,
-        ctx,
-        move || async move {
-            let client = ctx.client().await?;
-            let mut req = client
-                .prepare_cover_request(&args.clip_id, &model, args.tags.as_deref(), None)
-                .await?;
-            client.prepare_generation_request(&mut req).await?;
-            Ok((client, req))
-        },
-        |(client, mut req), challenge_token| async move {
-            req.set_challenge_token(challenge_token);
-            client.submit_prepared_generation(&req).await
-        },
-    )
+    let clips = execute_generation_submission(token, challenge_mode, ctx, move || async move {
+        let client = ctx.client().await?;
+        let mut req = client
+            .prepare_cover_request(&args.clip_id, &model, args.tags.as_deref(), None)
+            .await?;
+        client.prepare_generation_request(&mut req).await?;
+        Ok((client, req))
+    })
     .await?;
     output_clips(&clips, ctx);
     Ok(())
@@ -276,23 +267,14 @@ async fn require_source_clip(
 }
 
 pub async fn stems(args: StemsArgs, ctx: &AppContext) -> Result<(), CliError> {
-    let force_captcha = args.captcha && !args.no_captcha;
+    let challenge_mode = ChallengeMode::from_flags(args.captcha, args.no_captcha);
     let token = args.token.clone();
-    let clips = execute_generation_submission(
-        token,
-        force_captcha,
-        ctx,
-        move || async move {
-            let client = ctx.client().await?;
-            let mut req = client.prepare_stems_request(&args.clip_id, None).await?;
-            client.prepare_generation_request(&mut req).await?;
-            Ok((client, req))
-        },
-        |(client, mut req), challenge_token| async move {
-            req.set_challenge_token(challenge_token);
-            client.submit_prepared_generation(&req).await
-        },
-    )
+    let clips = execute_generation_submission(token, challenge_mode, ctx, move || async move {
+        let client = ctx.client().await?;
+        let mut req = client.prepare_stems_request(&args.clip_id, None).await?;
+        client.prepare_generation_request(&mut req).await?;
+        Ok((client, req))
+    })
     .await?;
     output_clips(&clips, ctx);
     Ok(())

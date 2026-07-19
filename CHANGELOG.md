@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- Matched Suno Web's generation challenge lifecycle by automatically solving required invisible
+  hCaptcha or Cloudflare Turnstile checks and preserving the detected `token_provider`.
+- Prioritized the verified stored account cookies and matching recorded browser source during
+  silent challenge verification, while retaining `--captcha`, `--no-captcha`, and external-token
+  overrides.
+
 ## [0.0.19] - 2026-07-19
 
 ### Fixed

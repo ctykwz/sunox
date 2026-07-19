@@ -5,9 +5,11 @@ use std::collections::HashSet;
 use crate::auth::AuthState;
 use crate::core::CliError;
 
+#[cfg(not(target_os = "windows"))]
 mod browser;
 mod cdp_cookie;
 
+#[cfg(not(target_os = "windows"))]
 use browser::add_live_browser_cookies;
 use cdp_cookie::{CdpCookie, add_minimal_cookies_from_header, push_cookie};
 
@@ -15,8 +17,21 @@ pub(super) fn extract_cookies(auth: &AuthState) -> Result<Vec<CdpCookie>, CliErr
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 
-    add_live_browser_cookies(&mut out, &mut seen);
+    // Persisted cookies belong to the verified account. Add them first so a
+    // different installed browser cannot replace them merely because its
+    // cookie database appears earlier in a discovery list.
     add_stored_auth_cookies(auth, &mut out, &mut seen);
+    // Chromium's Windows App-Bound encryption makes live cookie reads both
+    // unreliable and potentially disruptive while the user's browser is open.
+    // The verified stored values remain the authoritative Windows source.
+    #[cfg(not(target_os = "windows"))]
+    add_live_browser_cookies(
+        auth.browser_environment
+            .as_ref()
+            .and_then(|environment| environment.browser_source.as_deref()),
+        &mut out,
+        &mut seen,
+    );
 
     Ok(out)
 }
@@ -69,7 +84,7 @@ mod tests {
     use super::{CdpCookie, add_stored_auth_cookies};
 
     #[test]
-    fn stored_clerk_cookie_is_merged_after_partial_live_cookies() {
+    fn stored_clerk_cookie_is_available_for_challenge_browser() {
         let auth = AuthState {
             clerk_client_cookie: Some("stored-client-token".to_string()),
             ..Default::default()
@@ -99,5 +114,38 @@ mod tests {
                 && cookie["value"] == "stored-client-token"
                 && cookie["domain"] == ".suno.com"
         }));
+    }
+
+    #[test]
+    fn stored_account_cookie_wins_over_later_browser_cookie() {
+        let auth = AuthState {
+            clerk_client_cookie: Some("stored-client-token".to_string()),
+            ..Default::default()
+        };
+        let mut cookies: Vec<CdpCookie> = Vec::new();
+        let mut seen = HashSet::new();
+        add_stored_auth_cookies(&auth, &mut cookies, &mut seen);
+        push_cookie(
+            &mut cookies,
+            &mut seen,
+            "__client",
+            "different-browser-token",
+            ".suno.com",
+            true,
+        );
+
+        let cookies = serde_json::to_value(&cookies).expect("cookies serialize");
+        assert!(
+            cookies
+                .as_array()
+                .expect("cookie array")
+                .iter()
+                .any(|cookie| {
+                    cookie["name"] == "__client"
+                        && cookie["value"] == "stored-client-token"
+                        && cookie["domain"] == ".suno.com"
+                })
+        );
+        assert!(!cookies.to_string().contains("different-browser-token"));
     }
 }

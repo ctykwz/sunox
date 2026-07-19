@@ -82,9 +82,9 @@ Risk control defaults for agents:
   unless the user explicitly asks. `clip purge` and `clip empty-trash` are
   irreversible. When explicitly requested, pass `-y/--yes` because destructive
   commands require it.
-- do not force `--captcha` unless the user asks for the browser-backed solver;
-  prefer normal challenge preflight and externally supplied `--token` when
-  provided.
+- allow the normal challenge preflight to run automatic silent browser
+  verification when Suno requires it; do not force `--captcha` unless the user
+  asks, and prefer an externally supplied `--token` when provided.
 - never print or commit cookies, Clerk values, JWTs, challenge tokens, or other
   auth material.
 
@@ -275,8 +275,8 @@ sunox config set output_dir ./songs
 | `--enhance-tags` | Call Suno's tag upsample flow before submit | explicit opt-in |
 | `--instrumental` | No vocals | flag |
 | `--token` | Externally supplied challenge token | only when Suno challenges the request |
-| `--captcha` | Force browser-backed challenge solver | optional; not the default |
-| `--no-captcha` | Do not force the browser-backed solver | challenge preflight still runs |
+| `--captcha` | Force browser-backed challenge verification | runs even when preflight says unnecessary |
+| `--no-captcha` | Disable automatic browser verification | challenge preflight still runs |
 
 ## Models
 
@@ -385,8 +385,8 @@ sunox clip download $ids --output ./archive/
   Suno to enhance tags, otherwise omit it. Its tags/request_id come from the
   response; `personalization_enabled` follows the captured submit shape. The
   submit also marks `override_fields=["tags"]`.
-- Commands that submit through `/api/generate/v2-web/` preflight `POST /api/c/check` with `ctype=generation`; if Suno reports a challenge and stored Clerk refresh material exists, Sunox refreshes the JWT once and repeats the preflight before surfacing the challenge. When no challenge is required, submit uses `token=null` and `token_provider=null`.
-- If Suno requires a challenge, prefer `--token <solved>` when available; use `--captcha` only to force the built-in browser-backed solver.
+- Commands that submit through `/api/generate/v2-web/` preflight `POST /api/c/check` with `ctype=generation`; if Suno reports a challenge and stored Clerk refresh material exists, Sunox refreshes the JWT once and repeats the preflight. When a challenge remains, Sunox silently runs the matching installed browser with hCaptcha/provider 1 or Cloudflare Turnstile/provider 2 according to `captcha_version`. Stored verified account cookies and the recorded browser source take priority. When no challenge is required, submit uses `token=null` and `token_provider=null`.
+- Prefer `--token <solved>` when an external token is already available. Use `--captcha` only to force verification even when preflight says it is unnecessary, or `--no-captcha` to disable automatic browser verification.
 - Generation paths (normal, describe, voice persona, inspiration, cover, extend, generation-backed stems) use `/api/generate/v2-web/`; create, inspire, cover, extend, and stems expose `--token`, `--captcha`, and `--no-captcha`. Cover fetches the source clip and submits its title because Suno requires a string `title` for this variant. Inspiration uses one source clip and the live-captured playlist-conditioned request; do not invent uncaptured instrumental or multi-source inputs. Extend fetches the source clip first; when `GET /api/feed/?ids` omits source style metadata, it searches feed/v3 by source title and merges the exact source id. It defaults `title`, `tags`, `negative_tags`, and `make_instrumental` from the source when available; use `--title`, `--tags`, `--exclude`, `--instrumental`, or `--no-instrumental` to override. Remaster and speed use their current web edit/generation routes. `sunox clip list` supports query-only filters such as `--liked`, `--public`, `--upload`, `--cover`, `--extend`, and `--sort popular`; this is not a library sync workflow. `sunox clip stems` is not the same as Suno Web Pro Get Stems export. You usually only need the subcommands.
 - Persona list/detail/clips/create/set/processed-clip/publish/unpublish/love/unlove/toggle-love/delete/restore/purge are available through `sunox persona ...`.
 - Playlist create/list/detail/metadata/add/remove/publish/reorder/save/unsave/like/dislike/restore/delete are available through `sunox playlist ...`; use `playlist set <id> --image-file <path>` for local cover uploads.

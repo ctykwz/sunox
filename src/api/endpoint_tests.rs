@@ -1247,6 +1247,33 @@ async fn generate_posts_current_web_contract() {
 }
 
 #[tokio::test]
+async fn prepared_generation_submits_detected_turnstile_provider_without_second_preflight() {
+    let server = MockServer::json(
+        r#"{"clips":[{"id":"clip-1","title":"Demo","status":"submitted","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z"}]}"#,
+    )
+    .await;
+    let client = server.client();
+    let mut generate = GenerateRequest::new("chirp-fenix", "custom");
+    generate.metadata.user_tier = "tier-pro".into();
+    generate.set_challenge_token_with_provider(
+        Some("turnstile-token".into()),
+        crate::api::challenge::ChallengeProvider::Turnstile,
+    );
+
+    client
+        .submit_prepared_generation_after_challenge(&generate)
+        .await
+        .expect("generate");
+
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/api/generate/v2-web/");
+    let body = serde_json::from_str::<serde_json::Value>(&requests[0].body).expect("request json");
+    assert_eq!(body["token"], "turnstile-token");
+    assert_eq!(body["token_provider"], 2);
+}
+
+#[tokio::test]
 async fn generate_preserves_existing_user_tier_without_billing_lookup() {
     let server = MockServer::json(
         r#"{"clips":[{"id":"clip-1","title":"Demo","status":"submitted","model_name":"chirp-v4-5","created_at":"2026-06-30T00:00:00Z"}]}"#,
