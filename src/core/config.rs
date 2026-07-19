@@ -11,6 +11,28 @@ use serde::{Deserialize, Serialize};
 
 use super::CliError;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChallengeBrowserMode {
+    #[default]
+    Auto,
+    Existing,
+    Isolated,
+}
+
+impl ChallengeBrowserMode {
+    fn parse(key: &str, value: &str) -> Result<Self, CliError> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "existing" => Ok(Self::Existing),
+            "isolated" => Ok(Self::Isolated),
+            _ => Err(CliError::Config(format!(
+                "config key `{key}` expects auto, existing, or isolated"
+            ))),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppConfig {
     pub default_model: String,
@@ -18,6 +40,7 @@ pub struct AppConfig {
     pub poll_timeout_secs: u64,
     pub output_dir: String,
     pub serial_mutations: bool,
+    pub challenge_browser: ChallengeBrowserMode,
 }
 
 impl Default for AppConfig {
@@ -28,12 +51,12 @@ impl Default for AppConfig {
             poll_timeout_secs: 600,
             output_dir: ".".into(),
             serial_mutations: true,
+            challenge_browser: ChallengeBrowserMode::Auto,
         }
     }
 }
 
-const VALID_CONFIG_KEYS: &str =
-    "default_model, poll_interval_secs, poll_timeout_secs, output_dir, serial_mutations";
+const VALID_CONFIG_KEYS: &str = "default_model, poll_interval_secs, poll_timeout_secs, output_dir, serial_mutations, challenge_browser";
 
 impl AppConfig {
     pub fn load() -> Result<Self, CliError> {
@@ -96,6 +119,10 @@ impl AppConfig {
                 "SUNOX_SERIAL_MUTATIONS" => {
                     self.serial_mutations = parse_bool("SUNOX_SERIAL_MUTATIONS", &value)?;
                 }
+                "SUNOX_CHALLENGE_BROWSER" => {
+                    self.challenge_browser =
+                        ChallengeBrowserMode::parse("SUNOX_CHALLENGE_BROWSER", &value)?;
+                }
                 _ => {}
             }
         }
@@ -121,6 +148,9 @@ impl AppConfig {
             "poll_timeout_secs" => self.poll_timeout_secs = parse_poll_timeout(key, &value)?,
             "output_dir" => self.output_dir = value,
             "serial_mutations" => self.serial_mutations = parse_bool(key, &value)?,
+            "challenge_browser" => {
+                self.challenge_browser = ChallengeBrowserMode::parse(key, &value)?;
+            }
             _ => {
                 return Err(CliError::Config(format!(
                     "unknown config key `{key}`; valid keys: {VALID_CONFIG_KEYS}"
@@ -201,6 +231,8 @@ struct StoredConfig {
     output_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     serial_mutations: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    challenge_browser: Option<ChallengeBrowserMode>,
 }
 
 impl StoredConfig {
@@ -221,6 +253,9 @@ impl StoredConfig {
             "poll_timeout_secs" => self.poll_timeout_secs = Some(parse_poll_timeout(key, value)?),
             "output_dir" => self.output_dir = Some(value.to_string()),
             "serial_mutations" => self.serial_mutations = Some(parse_bool(key, value)?),
+            "challenge_browser" => {
+                self.challenge_browser = Some(ChallengeBrowserMode::parse(key, value)?);
+            }
             _ => {
                 return Err(CliError::Config(format!(
                     "unknown config key `{key}`; valid keys: {VALID_CONFIG_KEYS}"
@@ -308,7 +343,7 @@ mod tests {
 
     use crate::core::CliError;
 
-    use super::{AppConfig, StoredConfig, update_persisted_config};
+    use super::{AppConfig, ChallengeBrowserMode, StoredConfig, update_persisted_config};
 
     #[test]
     fn stored_config_sets_known_string_key() {
@@ -355,6 +390,40 @@ mod tests {
         let config = AppConfig::default();
 
         assert!(config.serial_mutations);
+    }
+
+    #[test]
+    fn challenge_browser_defaults_to_auto() {
+        let config = AppConfig::default();
+
+        assert_eq!(config.challenge_browser, ChallengeBrowserMode::Auto);
+    }
+
+    #[test]
+    fn challenge_browser_accepts_all_supported_modes() {
+        let mut config = StoredConfig::default();
+
+        for (value, expected) in [
+            ("auto", ChallengeBrowserMode::Auto),
+            ("existing", ChallengeBrowserMode::Existing),
+            ("isolated", ChallengeBrowserMode::Isolated),
+        ] {
+            config
+                .set("challenge_browser", value)
+                .expect("set challenge browser");
+            assert_eq!(config.challenge_browser, Some(expected));
+        }
+    }
+
+    #[test]
+    fn challenge_browser_rejects_unknown_mode() {
+        let mut config = StoredConfig::default();
+
+        let error = config
+            .set("challenge_browser", "headless")
+            .expect_err("reject unsupported mode");
+
+        assert!(error.to_string().contains("auto, existing, or isolated"));
     }
 
     #[test]

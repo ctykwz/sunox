@@ -6,7 +6,7 @@ mod paths;
 mod polling;
 mod validation;
 
-pub use config::{AppConfig, ensure_poll_timeout_secs};
+pub use config::{AppConfig, ChallengeBrowserMode, ensure_poll_timeout_secs};
 pub use error::CliError;
 pub(crate) use paths::{project_config_dir, user_home_dir};
 pub(crate) use polling::{

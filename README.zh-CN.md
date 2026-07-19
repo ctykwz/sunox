@@ -132,14 +132,25 @@ sunox update                       更新到最新 GitHub Release
 ## 生成验证
 
 每次调用生成类接口前，Sunox 都会先执行 Suno 网页端同款验证检查。Suno 没有要求验证时，
-请求会直接提交，不会启动浏览器；只有 Suno 明确要求 Challenge 时，Sunox 才会调用匹配的
-Chromium 系浏览器完成验证，并在结束后清理临时 Profile。
+请求会直接提交，不会启动浏览器。Suno 明确要求 Challenge 时，Sunox 会先请求可选的 Browser
+Bridge 扩展，在已经打开的 `suno.com` 页面中执行 invisible challenge；如果没有已配对页面响应，
+默认的 `auto` 模式才会调用匹配的 Chromium 系浏览器，并在结束后清理临时 Profile。
+
+首次使用时先解压扩展，再在 Chrome 中以“加载已解压的扩展程序”方式加载，并刷新 Suno 页面：
+
+```bash
+sunox install-browser-extension
+# 打开 chrome://extensions，启用开发者模式，然后选择“加载已解压的扩展程序”。
+```
 
 ```text
 --captcha          即使预检不要求，也强制执行浏览器验证
 --no-captcha       禁止自动调用浏览器验证
 --token <token>    使用外部已经解出的 Challenge Token
 ```
+
+`challenge_browser` 支持 `auto`（默认）、`existing`（禁止新开浏览器）和 `isolated`
+（始终使用临时浏览器）。单次命令可使用 `-c challenge_browser=existing`。
 
 ## JSON 与自动化
 
@@ -173,6 +184,7 @@ sunox install-skill --target cursor
 sunox config show
 sunox config set output_dir ./songs
 sunox config set default_model auto
+sunox config set challenge_browser auto
 ```
 
 `-c key=value` 只覆盖当前一次调用。环境变量使用 `SUNOX_*` 前缀，例如

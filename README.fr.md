@@ -138,14 +138,22 @@ Consultez `sunox --help` ou `sunox <commande> --help` pour toutes les options.
 
 Avant chaque requête de génération, Sunox effectue le même contrôle que l'application Web de
 Suno. Si aucune vérification n'est demandée, la requête part directement et aucun navigateur
-n'est lancé. Si Suno exige un challenge, Sunox utilise le navigateur Chromium compatible avec la
-session, puis supprime le profil temporaire.
+n'est lancé. Si Suno exige un challenge, Sunox demande d'abord à l'extension Browser Bridge
+d'exécuter le widget invisible dans un onglet `suno.com` existant. Sans onglet appairé, le mode
+`auto` utilise le navigateur Chromium compatible, puis supprime le profil temporaire.
+
+```bash
+sunox install-browser-extension
+# Ouvrez chrome://extensions, activez le mode développeur, puis chargez le dossier décompressé.
+```
 
 ```text
 --captcha          Effectuer la vérification même si le contrôle initial ne la demande pas
 --no-captcha       Désactiver la résolution automatique dans le navigateur
 --token <token>    Utiliser un jeton de challenge obtenu ailleurs
 ```
+
+`challenge_browser` accepte `auto`, `existing` (aucune nouvelle fenêtre) ou `isolated`.
 
 ## JSON et automatisation
 

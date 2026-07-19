@@ -137,8 +137,16 @@ Run `sunox --help` or `sunox <command> --help` for the complete set of options.
 
 Before a generation-backed request, Sunox calls Suno's generation challenge check. When no
 challenge is required, it submits directly and does not launch a browser. When Suno requires a
-challenge, Sunox uses the matching installed Chromium-family browser to complete it and closes the
-temporary profile afterward.
+challenge, Sunox first asks the optional Browser Bridge extension to execute the invisible widget
+inside an existing `suno.com` tab. If no paired tab responds, the default `auto` mode falls back to
+the matching installed Chromium-family browser and closes its temporary profile afterward.
+
+Extract the extension, load it once as an unpacked Chrome extension, then reload a Suno tab:
+
+```bash
+sunox install-browser-extension
+# Open chrome://extensions, enable Developer mode, then choose Load unpacked.
+```
 
 The relevant overrides are:
 
@@ -147,6 +155,10 @@ The relevant overrides are:
 --no-captcha       Do not run the automatic browser solver
 --token <token>    Submit an externally solved challenge token
 ```
+
+Set `challenge_browser` to `auto` (default), `existing` (never open a new browser), or `isolated`
+(always use the temporary browser). A one-command override looks like
+`-c challenge_browser=existing`.
 
 ## JSON output and automation
 
@@ -182,10 +194,12 @@ Show or change persistent settings:
 sunox config show
 sunox config set output_dir ./songs
 sunox config set default_model auto
+sunox config set challenge_browser auto
 ```
 
 Use `-c key=value` for a one-command override. Environment variables use the `SUNOX_*` prefix,
-such as `SUNOX_OUTPUT_DIR`, `SUNOX_DEFAULT_MODEL`, and `SUNOX_BROWSER_PATH`.
+such as `SUNOX_OUTPUT_DIR`, `SUNOX_DEFAULT_MODEL`, `SUNOX_CHALLENGE_BROWSER`, and
+`SUNOX_BROWSER_PATH`.
 
 Write operations are serialized per account by default. `--parallel` disables that protection for
 one command; use it only when same-account concurrent writes are intentional.

@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Sunox Browser Bridge",
+  "description": "Runs Suno generation challenges inside an existing Suno tab for the Sunox CLI.",
+  "version": "0.1.0",
+  "minimum_chrome_version": "111",
+  "host_permissions": [
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://suno.com/*"],
+      "js": ["page.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://suno.com/*"],
+      "js": ["bridge.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

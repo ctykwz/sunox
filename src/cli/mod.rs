@@ -2,6 +2,7 @@
 
 mod agent;
 mod auth;
+mod browser_extension;
 mod clip;
 mod config;
 mod create;
@@ -17,6 +18,7 @@ mod wait;
 pub use crate::api::types::RemasterVariation;
 pub use agent::{InstallSkillArgs, SkillTarget};
 pub use auth::AuthArgs;
+pub use browser_extension::InstallBrowserExtensionArgs;
 pub use clip::{ClipArgs, ClipCommand};
 pub use config::{ConfigAction, ConfigArgs};
 pub use create::{
@@ -128,6 +130,9 @@ pub enum Commands {
 
     /// Install the agent skill (teaches Codex / coding agents how to use this CLI)
     InstallSkill(InstallSkillArgs),
+
+    /// Extract the Chrome extension used for silent generation challenges
+    InstallBrowserExtension(InstallBrowserExtensionArgs),
 
     /// Self-update from GitHub Releases
     Update(UpdateArgs),
