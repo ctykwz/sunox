@@ -358,11 +358,14 @@ submit without a user-selected lyrics model confirms it.
 `/api/generate/v2-web/` mirror that preflight: if the response does not require
 a challenge, the submit body uses `token: null` and `token_provider: null`; if
 it requires a challenge and stored Clerk refresh material exists, the CLI
-refreshes the JWT once and repeats the preflight before surfacing the challenge.
-If the challenge is still required, the CLI stops before submit unless the user
-supplied `--token` or explicitly opted into `--captcha`. When a solved token is
-present, the submit body carries `token_provider: 1`. The user-facing create,
-cover, extend, and stems commands expose these challenge controls.
+refreshes the JWT once and repeats the preflight. If a challenge remains, the
+CLI silently runs browser verification and follows the current web mapping:
+captcha version 2 uses Cloudflare Turnstile with `token_provider: 2`, while
+other or missing versions use hCaptcha with `token_provider: 1`. Stored verified
+account cookies and the matching recorded browser source take priority. Use
+`--token` for an external token, `--captcha` to force verification, or
+`--no-captcha` to surface a required challenge without running the solver. The
+user-facing create, cover, inspire, extend, and stems commands expose these controls.
 On generation submits that carry a solved challenge token, a generic `invalid token`
 response is preserved as a structured challenge/API error; ordinary API requests keep
 that phrase on the JWT refresh path.
@@ -1250,7 +1253,7 @@ processing is not.
 
 ## Key Insights for Rust CLI
 
-1. **Captcha/challenge is conditional** — `POST /api/c/check` with `{"ctype":"generation"}` decides whether generation needs a solved token. The CLI mirrors this preflight before `/api/generate/v2-web/` submits. If the preflight reports a challenge and stored Clerk refresh material exists, the CLI refreshes the JWT once and repeats the preflight before surfacing the challenge. Captured submits use `token_provider: 1` only when a solved `token` is present; normal authenticated submits use `token: null` and `token_provider: null`.
+1. **Captcha/challenge is conditional** — `POST /api/c/check` with `{"ctype":"generation"}` decides whether generation needs a solved token. The CLI mirrors this preflight before `/api/generate/v2-web/` submits. If the preflight reports a challenge and stored Clerk refresh material exists, the CLI refreshes the JWT once and repeats the preflight. A remaining challenge is solved silently using hCaptcha/provider 1 or Cloudflare Turnstile/provider 2 according to `captcha_version`; normal authenticated submits use `token: null` and `token_provider: null`.
 2. **Lyrics generation is free and easy** — no captcha needed, just JWT auth
 3. **JWT refresh** — need Clerk cookie exchange or session keepalive
 4. **Browser-token header** — dynamically generated from current timestamp, base64-encoded

@@ -64,6 +64,7 @@ impl SunoClient {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) async fn submit_prepared_generation(
         &self,
         req: &GenerateRequest,
@@ -75,17 +76,24 @@ impl SunoClient {
             .await
     }
 
+    #[cfg(test)]
     async fn ensure_generation_challenge(&self, has_token: bool) -> Result<(), CliError> {
         if !has_token {
-            let mut challenge = self.generation_challenge().await?;
-            if challenge.required && self.try_refresh_jwt_for_challenge_recheck().await? {
-                challenge = self.generation_challenge().await?;
-            }
+            let challenge = self.generation_challenge_with_refresh().await?;
             if challenge.required {
                 return Err(generation_challenge_error(&challenge));
             }
         }
         Ok(())
+    }
+
+    pub(crate) async fn submit_prepared_generation_after_challenge(
+        &self,
+        req: &GenerateRequest,
+    ) -> Result<Vec<Clip>, CliError> {
+        let body = serde_json::to_value(req)?;
+        self.submit_generation_body(&body, req.token.is_some())
+            .await
     }
 
     async fn submit_generation_body(
@@ -184,6 +192,7 @@ fn validate_length(field: &str, value: Option<&str>, limit: u32) -> Result<(), C
     Ok(())
 }
 
+#[cfg(test)]
 fn generation_challenge_error(challenge: &super::challenge::GenerationChallenge) -> CliError {
     let version = challenge
         .captcha_version

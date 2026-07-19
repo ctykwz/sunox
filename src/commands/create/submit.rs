@@ -6,7 +6,7 @@ use crate::cli::{CreateArgs, DescribeArgs, ExtendArgs, GenerateArgs, ModelVersio
 use crate::core::{AppConfig, CliError};
 use crate::workflow::generation::{build_control_sliders, build_tags};
 
-use super::support::{execute_generation_submission, output_clips};
+use super::support::{ChallengeMode, execute_generation_submission, output_clips};
 
 pub async fn create(args: CreateArgs, ctx: &AppContext) -> Result<(), CliError> {
     if args.instrumental || args.lyrics.is_some() || args.lyrics_file.is_some() {
@@ -100,7 +100,7 @@ fn non_empty(value: String) -> Option<String> {
 
 async fn generate(args: GenerateArgs, ctx: &AppContext) -> Result<(), CliError> {
     let mut req = build_generate_request(&args, &ctx.config)?;
-    let force_captcha = args.captcha && !args.no_captcha;
+    let challenge_mode = ChallengeMode::from_flags(args.captcha, args.no_captcha);
     let token = args.token.clone();
     let enhance_tags = args.enhance_tags;
     let instrumental = args.instrumental;
@@ -116,21 +116,12 @@ async fn generate(args: GenerateArgs, ctx: &AppContext) -> Result<(), CliError> 
             model_label(args.model.as_ref(), &ctx.config)
         );
     }
-    let clips = execute_generation_submission(
-        token,
-        force_captcha,
-        ctx,
-        move || async move {
-            let client = ctx.client().await?;
-            maybe_enhance_tags(&mut req, enhance_tags, instrumental, &client).await?;
-            client.prepare_generation_request(&mut req).await?;
-            Ok((client, req))
-        },
-        |(client, mut req), challenge_token| async move {
-            req.set_challenge_token(challenge_token);
-            client.submit_prepared_generation(&req).await
-        },
-    )
+    let clips = execute_generation_submission(token, challenge_mode, ctx, move || async move {
+        let client = ctx.client().await?;
+        maybe_enhance_tags(&mut req, enhance_tags, instrumental, &client).await?;
+        client.prepare_generation_request(&mut req).await?;
+        Ok((client, req))
+    })
     .await?;
     output_clips(&clips, ctx);
     Ok(())
@@ -169,7 +160,7 @@ fn build_generate_request(
 
 async fn describe(args: DescribeArgs, ctx: &AppContext) -> Result<(), CliError> {
     let mut req = build_describe_request(&args, &ctx.config)?;
-    let force_captcha = args.captcha && !args.no_captcha;
+    let challenge_mode = ChallengeMode::from_flags(args.captcha, args.no_captcha);
     let token = args.token.clone();
     let enhance_tags = args.enhance_tags;
     let instrumental = args.instrumental;
@@ -180,21 +171,12 @@ async fn describe(args: DescribeArgs, ctx: &AppContext) -> Result<(), CliError> 
             model_label(args.model.as_ref(), &ctx.config)
         );
     }
-    let clips = execute_generation_submission(
-        token,
-        force_captcha,
-        ctx,
-        move || async move {
-            let client = ctx.client().await?;
-            maybe_enhance_tags(&mut req, enhance_tags, instrumental, &client).await?;
-            client.prepare_generation_request(&mut req).await?;
-            Ok((client, req))
-        },
-        |(client, mut req), challenge_token| async move {
-            req.set_challenge_token(challenge_token);
-            client.submit_prepared_generation(&req).await
-        },
-    )
+    let clips = execute_generation_submission(token, challenge_mode, ctx, move || async move {
+        let client = ctx.client().await?;
+        maybe_enhance_tags(&mut req, enhance_tags, instrumental, &client).await?;
+        client.prepare_generation_request(&mut req).await?;
+        Ok((client, req))
+    })
     .await?;
     output_clips(&clips, ctx);
     Ok(())
@@ -261,7 +243,7 @@ fn model_label<'a>(model: Option<&'a ModelVersion>, config: &'a AppConfig) -> &'
 
 pub async fn extend(args: ExtendArgs, ctx: &AppContext) -> Result<(), CliError> {
     crate::core::ensure_non_negative_finite("--at", args.at)?;
-    let force_captcha = args.captcha && !args.no_captcha;
+    let challenge_mode = ChallengeMode::from_flags(args.captcha, args.no_captcha);
     let token = args.token.clone();
     let instrumental = if args.instrumental {
         Some(true)
@@ -270,32 +252,23 @@ pub async fn extend(args: ExtendArgs, ctx: &AppContext) -> Result<(), CliError> 
     } else {
         None
     };
-    let clips = execute_generation_submission(
-        token,
-        force_captcha,
-        ctx,
-        move || async move {
-            let client = ctx.client().await?;
-            let mut req = client
-                .prepare_extend_request(ExtendClipOptions {
-                    clip_id: &args.clip_id,
-                    continue_at: args.at,
-                    tags: args.tags.as_deref(),
-                    negative_tags: args.exclude.as_deref(),
-                    lyrics: args.lyrics.as_deref(),
-                    title: args.title.as_deref(),
-                    instrumental,
-                    challenge_token: None,
-                })
-                .await?;
-            client.prepare_generation_request(&mut req).await?;
-            Ok((client, req))
-        },
-        |(client, mut req), challenge_token| async move {
-            req.set_challenge_token(challenge_token);
-            client.submit_prepared_generation(&req).await
-        },
-    )
+    let clips = execute_generation_submission(token, challenge_mode, ctx, move || async move {
+        let client = ctx.client().await?;
+        let mut req = client
+            .prepare_extend_request(ExtendClipOptions {
+                clip_id: &args.clip_id,
+                continue_at: args.at,
+                tags: args.tags.as_deref(),
+                negative_tags: args.exclude.as_deref(),
+                lyrics: args.lyrics.as_deref(),
+                title: args.title.as_deref(),
+                instrumental,
+                challenge_token: None,
+            })
+            .await?;
+        client.prepare_generation_request(&mut req).await?;
+        Ok((client, req))
+    })
     .await?;
     output_clips(&clips, ctx);
     Ok(())

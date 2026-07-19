@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+use crate::api::challenge::ChallengeProvider;
+
 use super::clip::Clip;
 use super::prompts::PromptUpsampleResponse;
 
 const WEB_CLIENT_PATHNAME: &str = "/create";
 const GENERATION_TYPE_TEXT: &str = "TEXT";
-const CHALLENGE_TOKEN_PROVIDER: u8 = 1;
 const TAG_UPSAMPLE_PERSONALIZATION_ENABLED: bool = true;
 
 /// Shared browser-facing generation fields that are common across create,
@@ -117,8 +118,16 @@ impl GenerateRequest {
     }
 
     pub fn set_challenge_token(&mut self, token: Option<String>) {
+        self.set_challenge_token_with_provider(token, ChallengeProvider::HCaptcha);
+    }
+
+    pub fn set_challenge_token_with_provider(
+        &mut self,
+        token: Option<String>,
+        provider: ChallengeProvider,
+    ) {
         self.token = token;
-        self.token_provider = self.token.as_ref().map(|_| CHALLENGE_TOKEN_PROVIDER);
+        self.token_provider = self.token.as_ref().map(|_| provider.token_provider());
     }
 }
 
@@ -286,6 +295,21 @@ mod tests {
 
         assert_eq!(body["token"], "challenge-token");
         assert_eq!(body["token_provider"], 1);
+    }
+
+    #[test]
+    fn challenge_token_preserves_detected_provider() {
+        use crate::api::challenge::ChallengeProvider;
+
+        let mut request = GenerateRequest::new("chirp-fenix", "custom");
+        request.set_challenge_token_with_provider(
+            Some("turnstile-token".into()),
+            ChallengeProvider::Turnstile,
+        );
+
+        let body = serde_json::to_value(request).expect("request body");
+        assert_eq!(body["token"], "turnstile-token");
+        assert_eq!(body["token_provider"], 2);
     }
 
     #[test]

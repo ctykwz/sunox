@@ -510,6 +510,10 @@ fn install_skill_prints_current_generation_guidance() {
         .success()
         .stdout(predicate::str::contains("token=null"))
         .stdout(predicate::str::contains("--captcha"))
+        .stdout(predicate::str::contains("Cloudflare Turnstile/provider 2"))
+        .stdout(predicate::str::contains(
+            "Disable automatic browser verification",
+        ))
         .stdout(predicate::str::contains("sunox create --title"))
         .stdout(predicate::str::contains("returned clip ID"))
         .stdout(predicate::str::contains("do not pass --parallel"))
@@ -978,6 +982,24 @@ fn agent_info_exposes_inspiration_as_supported() {
         .stdout(predicate::str::contains("\"clip_inspiration\""))
         .stdout(predicate::str::contains("\"playlist_condition_generation\"").not())
         .stdout(predicate::str::contains("\"default_model\": \"auto"));
+}
+
+#[test]
+fn agent_info_reports_automatic_versioned_challenge_verification() {
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    cmd.args(["agent-info", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "automatic silent browser verification",
+        ))
+        .stdout(predicate::str::contains("hCaptcha/provider 1"))
+        .stdout(predicate::str::contains("Turnstile/provider 2"))
+        .stdout(predicate::str::contains("matching recorded browser source"))
+        .stdout(predicate::str::contains(
+            "disable automatic browser verification",
+        ));
 }
 
 #[test]
