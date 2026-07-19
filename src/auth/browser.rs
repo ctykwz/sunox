@@ -23,7 +23,7 @@ pub(crate) fn extract_browser_auth_for_clerk(
 fn extract_browser_auth_matching(
     expected_clerk_client_cookie: Option<&str>,
 ) -> Result<BrowserAuth, CliError> {
-    let domains = vec![
+    let domains: Vec<String> = vec![
         "suno.com".into(),
         "auth.suno.com".into(),
         ".suno.com".into(),
