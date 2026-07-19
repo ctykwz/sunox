@@ -212,7 +212,7 @@ Studio 相关功能不在当前 CLI 的范围内。
 sunox login
 ```
 
-`sunox login` 会先从 Chrome、Arc、Brave、Firefox 或 Edge 读取 Clerk cookie；如果读取成功，会记录浏览器来源和可读取的公开 profile 设置，例如接受语言，但不会仅凭浏览器标签伪造 user-agent。如果读取失败，会自动打开一个 Sunox 专用且兼容 Chrome/Edge 的浏览器 profile，等你在里面登录 Suno 后捕获 Clerk session。随后它会换取 JWT，保存可刷新的本地 session，并在 JWT 过期时自动刷新。交互式登录能捕获 user-agent 和接受语言；后续 API 请求会基于选中的 user-agent 派生 Chromium client hints，发送浏览器 fetch metadata header，拿不到真实值时按字段降级。
+`sunox login` 会先从 Chrome、Arc、Brave、Firefox 或 Edge 读取 Clerk cookie；Windows 会跳过可能触发 App-Bound 解锁并关闭进程的 Chromium 在线 cookie 数据库，但仍通过非破坏性的只读 SQLite 路径读取 Firefox。若没有可复用 session，专用交互登录兜底需要本机装有 Chromium 系浏览器。读取成功后，session 会关联到实际命中的本地 profile 和具体渠道（Stable/Beta/Dev 等），再从同一浏览器二进制取得运行时 user-agent、接受语言和真实 Client Hints，全程不显示额外窗口、不访问 Suno。旧认证文件会在下一次认证请求前自动补齐：新字段优先；新探针缺失的字段保留旧值；新旧都没有时才使用内置写死值。同一套上下文同时用于 Clerk 登录/JWT 刷新和 Suno API 请求。
 
 认证信息以本地 JSON 保存，并未进入系统凭据库。Unix 下认证文件会以 `0600` 创建；Windows 下依赖配置目录的当前用户 ACL。手动传入的 `--cookie` 和 `--jwt` 可能出现在 shell 历史与进程参数中，因此优先使用 `sunox login`，或通过 `--cookie-stdin` / `--jwt-stdin` 从标准输入传入；不要把认证信息写入日志、prompt、项目文件或 commit。
 

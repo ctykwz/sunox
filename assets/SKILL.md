@@ -366,10 +366,16 @@ sunox clip download $ids --output ./archive/
 ## Notes
 
 - Auth refreshes automatically (~7-day session lifetime).
-- Browser-derived request context is real-value first: `sunox login` reuses captured
-  or profile-derived fields independently, derives Chromium client hints from the
-  selected user-agent, sends stable browser fetch metadata headers, and falls
-  back per field when a real value is unavailable.
+- On Windows, `sunox login` skips live Chromium cookie databases so App-Bound
+  decryption cannot force-close the user's browser. Firefox uses its safe
+  read-only SQLite path. The dedicated interactive fallback requires an
+  installed Chromium-family browser when no reusable session is found.
+- Browser-derived request context is real-value first: `sunox login` links cookies
+  to the matching local profile and probes the same installed browser binary for
+  runtime user-agent, language, and client hints without a visible window.
+  Legacy auth is repaired before the next authenticated command. Fresh values
+  win per field, stored values survive a failed probe, and built-in constants
+  are only the final fallback for Clerk and Suno API requests.
 - Generation metadata fills `user_tier` from the current account's
   `/api/billing/info/` `plan.id` when available, and falls back to an empty
   value when that read is unavailable.

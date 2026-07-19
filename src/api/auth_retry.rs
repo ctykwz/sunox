@@ -27,6 +27,14 @@ impl SunoClient {
         // Cross-process serialization is handled inside `refresh_state_for_retry`
         // so this retry path does not hold the in-process mutex across await.
         auth::refresh_state_for_retry(&self.client, &mut auth).await?;
+        if let Some(device_id) = self
+            .device_override
+            .lock()
+            .expect("device override mutex poisoned")
+            .clone()
+        {
+            auth.device_id = Some(device_id);
+        }
 
         {
             let mut current_auth = self.auth.lock().expect("auth mutex poisoned");

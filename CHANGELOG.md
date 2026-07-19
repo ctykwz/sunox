@@ -7,6 +7,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.0.19] - 2026-07-19
+
+### Fixed
+
+- Recovered missing browser source, user-agent, accepted-language, and client-hint metadata from
+  the matching local browser/profile before authenticated requests, including legacy auth files;
+  fresh fields override stored ones, stored values survive failed probes, and hardcoded values are
+  only the final per-field fallback for Clerk and Suno API requests.
+- Prevented concurrent JWT refreshes from overwriting newly recovered browser request metadata.
+- Preserved Stable/Beta/Dev/Canary/Developer/Nightly channel identity when pairing profile settings
+  with runtime headers, bounded metadata probes, avoided unrelated Keychain lookups, and skipped
+  destructive live Chromium cookie-database reads on Windows while keeping Firefox read-only.
+- Prevented concurrent JWT refreshes from rolling back newer device or browser metadata and avoided
+  repeating the same browser-environment recovery twice in one auth command.
+
 ## [0.0.18] - 2026-07-18
 
 ### Added

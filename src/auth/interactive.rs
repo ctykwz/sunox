@@ -15,10 +15,15 @@ use tokio_tungstenite::tungstenite::Message;
 use super::AuthState;
 use super::clerk_token_exchange;
 use super::cookie::{is_suno_auth_cookie_domain, is_suno_cookie_domain, sanitize_device_id};
-use super::environment::{accept_language_from_browser_languages, non_empty_header_value};
-use super::types::{BrowserAuth, BrowserEnvironment};
+use super::environment::{
+    accept_language_from_browser_languages, accept_language_from_system_locale,
+    non_empty_header_value,
+};
+use super::types::{BrowserAuth, BrowserClientHints, BrowserEnvironment};
 use crate::api::SunoClient;
-use crate::browser::locate_chromium_browser;
+use crate::browser::{
+    locate_chromium_browser, locate_chromium_browser_for_source, locate_firefox_browser_for_source,
+};
 use crate::core::CliError;
 use crate::net::http;
 
@@ -56,6 +61,22 @@ struct BrowserEnvironmentProbe {
     user_agent: Option<String>,
     #[serde(default)]
     languages: Vec<String>,
+    #[serde(rename = "userAgentData")]
+    user_agent_data: Option<UserAgentDataProbe>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UserAgentDataProbe {
+    #[serde(default)]
+    brands: Vec<UserAgentBrandProbe>,
+    mobile: bool,
+    platform: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UserAgentBrandProbe {
+    brand: String,
+    version: String,
 }
 
 #[derive(Serialize)]
@@ -87,6 +108,10 @@ impl InteractiveBrowserSession {
 }
 
 async fn request_browser_close(port: u16) {
+    let _ = timeout(Duration::from_secs(2), try_request_browser_close(port)).await;
+}
+
+async fn try_request_browser_close(port: u16) {
     let Ok(version) = cdp_version(port).await else {
         return;
     };
@@ -102,11 +127,7 @@ async fn request_browser_close(port: u16) {
     let Ok(mut session) = CdpSession::connect(&ws_url).await else {
         return;
     };
-    let _ = timeout(
-        Duration::from_secs(2),
-        session.call("Browser.close", serde_json::json!({})),
-    )
-    .await;
+    let _ = session.call("Browser.close", serde_json::json!({})).await;
 }
 
 async fn stop_browser_processes(child: &mut Child, processes: &mut OwnedBrowserProcesses) {
@@ -341,6 +362,315 @@ pub async fn extract_interactive_browser_auth() -> Result<(BrowserAuth, String, 
     }
     session.shutdown().await;
     result
+}
+
+/// Read the browser's actual runtime User-Agent without opening a visible
+/// window or navigating to Suno. This is used to repair legacy/cookie-derived
+/// auth states whose profile data cannot contain a runtime-generated UA.
+pub(crate) async fn probe_browser_runtime_environment(
+    browser_source: &str,
+) -> Result<BrowserEnvironment, CliError> {
+    let browser_path = locate_chromium_browser_for_source(browser_source)?;
+    let profile = tempfile::Builder::new()
+        .prefix("sunox-browser-probe-")
+        .tempdir()
+        .map_err(CliError::Io)?;
+    let profile_dir = profile.path();
+    let active_port_path = profile_dir.join("DevToolsActivePort");
+
+    let mut command = Command::new(&browser_path);
+    command
+        .arg("--headless=new")
+        .arg("--remote-debugging-address=127.0.0.1")
+        .arg("--remote-debugging-port=0")
+        .arg(format!("--user-data-dir={}", profile_dir.display()))
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg("--disable-search-engine-choice-screen")
+        .arg("--disable-extensions")
+        .arg("--disable-background-mode")
+        .arg("about:blank")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let mut child = command.spawn().map_err(|error| {
+        CliError::Config(format!(
+            "failed to start browser metadata probe at {browser_path:?}: {error}"
+        ))
+    })?;
+    let mut processes = OwnedBrowserProcesses::new(child.id(), profile_dir);
+
+    let result = timeout(Duration::from_secs(12), async {
+        let mut last_error = None;
+        for _ in 0..40 {
+            let _ = processes.active_pids();
+            if let Some(status) = child.try_wait()? {
+                return Err(CliError::Config(format!(
+                    "browser metadata probe exited before CDP became ready: {status}"
+                )));
+            }
+            match read_owned_cdp_port(&active_port_path) {
+                Ok(port) => {
+                    let version_environment = browser_environment_from_cdp_version(port).await;
+                    let page_environment = match cdp_list(port).await {
+                        Ok(targets) => {
+                            let ws_url = targets.into_iter().find_map(|target| {
+                                (target.target_type == "page")
+                                    .then_some(target.web_socket_debugger_url)
+                                    .flatten()
+                                    .and_then(|url| validate_and_pin_ws_url(&url, port).ok())
+                            });
+                            match ws_url {
+                                Some(ws_url) => match CdpSession::connect(&ws_url).await {
+                                    Ok(mut session) => {
+                                        let mut environment =
+                                            browser_environment_from_page(&mut session).await;
+                                        if environment
+                                            .as_ref()
+                                            .and_then(|value| value.client_hints.as_ref())
+                                            .is_none()
+                                        {
+                                            let _ = session
+                                                .call(
+                                                    "Page.navigate",
+                                                    serde_json::json!({
+                                                        "url": format!("http://{CDP_HOST}:{port}/json/version")
+                                                    }),
+                                                )
+                                                .await;
+                                            sleep(Duration::from_millis(100)).await;
+                                            environment = merge_browser_environments(
+                                                browser_environment_from_page(&mut session).await,
+                                                environment,
+                                            );
+                                        }
+                                        environment
+                                    }
+                                    Err(error) => {
+                                        last_error = Some(error.to_string());
+                                        None
+                                    }
+                                },
+                                None => {
+                                    last_error = Some("CDP returned no blank page target".into());
+                                    None
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            last_error = Some(error.to_string());
+                            None
+                        }
+                    };
+                    if let Some(mut environment) =
+                        merge_browser_environments(page_environment, version_environment)
+                    {
+                        environment.browser_source = Some(browser_source.to_string());
+                        environment.user_agent = environment
+                            .user_agent
+                            .map(|value| normalize_runtime_user_agent(&value));
+                        if environment.user_agent.is_some()
+                            || environment.accept_language.is_some()
+                            || environment.client_hints.is_some()
+                        {
+                            return Ok(environment);
+                        }
+                        last_error = Some(
+                            "CDP returned incomplete User-Agent, language, or client-hint metadata"
+                                .into(),
+                        );
+                    }
+                }
+                Err(error) => last_error = Some(error.to_string()),
+            }
+            sleep(Duration::from_millis(250)).await;
+        }
+        Err(CliError::Config(format!(
+            "browser metadata probe never exposed a usable CDP endpoint: {}",
+            last_error.unwrap_or_else(|| "DevToolsActivePort was not created".into())
+        )))
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Err(CliError::Config(
+            "browser metadata probe exceeded its 12-second deadline".into(),
+        ))
+    });
+
+    if let Ok(port) = read_owned_cdp_port(&active_port_path) {
+        request_browser_close(port).await;
+    }
+    stop_browser_processes(&mut child, &mut processes).await;
+    result
+}
+
+/// Read Firefox's own negotiated runtime User-Agent through its loopback-only
+/// WebDriver BiDi endpoint. `session.new` returns the real UA in capabilities,
+/// so no browser version string is synthesized by the CLI.
+pub(crate) async fn probe_firefox_runtime_environment(
+    browser_source: &str,
+) -> Result<BrowserEnvironment, CliError> {
+    let browser_path = locate_firefox_browser_for_source(browser_source)?;
+    let profile = tempfile::Builder::new()
+        .prefix("sunox-firefox-probe-")
+        .tempdir()
+        .map_err(CliError::Io)?;
+    let profile_dir = profile.path();
+
+    let mut command = Command::new(&browser_path);
+    command
+        .arg("--headless")
+        .arg("--no-remote")
+        .arg("--new-instance")
+        .arg("--profile")
+        .arg(profile_dir)
+        .arg("--remote-debugging-port")
+        .arg("0")
+        .arg("about:blank")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command.spawn().map_err(|error| {
+        CliError::Config(format!(
+            "failed to start Firefox metadata probe at {browser_path:?}: {error}"
+        ))
+    })?;
+    let mut processes = OwnedBrowserProcesses::new(child.id(), profile_dir);
+    let stderr_tail = drain_stderr(&mut child);
+
+    let result = timeout(Duration::from_secs(12), async {
+        let mut last_error = None;
+        for _ in 0..40 {
+            let _ = processes.active_pids();
+            if let Some(status) = child.try_wait()? {
+                return Err(browser_startup_error(
+                    format!(
+                        "Firefox metadata probe exited before WebDriver BiDi became ready: {status}"
+                    ),
+                    &stderr_tail,
+                ));
+            }
+            let port = stderr_tail
+                .lock()
+                .ok()
+                .and_then(|lines| firefox_bidi_port(&lines));
+            let Some(port) = port else {
+                last_error = Some("Firefox has not announced its BiDi port yet".into());
+                sleep(Duration::from_millis(250)).await;
+                continue;
+            };
+            let ws_url = format!("ws://{CDP_HOST}:{port}/session");
+            match CdpSession::connect(&ws_url).await {
+                Ok(mut session) => match session
+                    .call("session.new", serde_json::json!({ "capabilities": {} }))
+                    .await
+                {
+                    Ok(value) => {
+                        let mut environment =
+                            firefox_environment_from_session_new(&value, browser_source)?;
+                        if let Some(accept_language) =
+                            firefox_accept_language_from_bidi(&mut session).await
+                        {
+                            environment.accept_language = Some(accept_language);
+                        }
+                        let _ = timeout(
+                            Duration::from_secs(2),
+                            session.call("browser.close", serde_json::json!({})),
+                        )
+                        .await;
+                        return Ok(environment);
+                    }
+                    Err(error) => last_error = Some(error.to_string()),
+                },
+                Err(error) => last_error = Some(error.to_string()),
+            }
+            sleep(Duration::from_millis(250)).await;
+        }
+        Err(CliError::Config(format!(
+            "Firefox metadata probe never exposed a usable WebDriver BiDi endpoint: {}",
+            last_error.unwrap_or_else(|| "loopback endpoint was not ready".into())
+        )))
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Err(CliError::Config(
+            "Firefox metadata probe exceeded its 12-second deadline".into(),
+        ))
+    });
+
+    stop_browser_processes(&mut child, &mut processes).await;
+    result
+}
+
+async fn firefox_accept_language_from_bidi(session: &mut CdpSession) -> Option<String> {
+    let tree = session
+        .call("browsingContext.getTree", serde_json::json!({}))
+        .await
+        .ok()?;
+    let context = tree
+        .get("contexts")?
+        .as_array()?
+        .first()?
+        .get("context")?
+        .as_str()?;
+    let evaluated = session
+        .call(
+            "script.evaluate",
+            serde_json::json!({
+                "expression": "JSON.stringify(Array.from(navigator.languages || [navigator.language]).filter(Boolean))",
+                "target": { "context": context },
+                "awaitPromise": false,
+                "resultOwnership": "none",
+                "userActivation": false
+            }),
+        )
+        .await
+        .ok()?;
+    let payload = evaluated.get("result")?.get("value")?.as_str()?;
+    let languages = serde_json::from_str::<Vec<String>>(payload).ok()?;
+    accept_language_from_browser_languages(&languages)
+}
+
+fn firefox_bidi_port(lines: &VecDeque<String>) -> Option<u16> {
+    const PREFIX: &str = "WebDriver BiDi listening on ws://127.0.0.1:";
+    lines.iter().rev().find_map(|line| {
+        let port = line.split_once(PREFIX)?.1;
+        let port = port.split('/').next().unwrap_or(port).trim();
+        port.parse::<u16>().ok().filter(|port| *port != 0)
+    })
+}
+
+fn firefox_environment_from_session_new(
+    result: &serde_json::Value,
+    browser_source: &str,
+) -> Result<BrowserEnvironment, CliError> {
+    let user_agent = result
+        .get("capabilities")
+        .and_then(|capabilities| capabilities.get("userAgent"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| non_empty_header_value(Some(value)))
+        .ok_or_else(|| {
+            CliError::Config("Firefox WebDriver BiDi returned no runtime User-Agent".into())
+        })?;
+    Ok(BrowserEnvironment {
+        browser_source: Some(browser_source.to_string()),
+        user_agent: Some(user_agent),
+        accept_language: accept_language_from_system_locale(),
+        client_hints: None,
+    })
+}
+
+pub(crate) fn recorded_interactive_browser_source() -> Option<String> {
+    let identity_file = directories::ProjectDirs::from("com", "sunox", "sunox")?
+        .data_local_dir()
+        .join("interactive-login-browser-profile")
+        .join("sunox-browser-path.txt");
+    let browser_path = std::fs::read_to_string(identity_file).ok()?;
+    crate::browser::browser_source_for_path(Path::new(browser_path.trim())).map(str::to_string)
+}
+
+fn normalize_runtime_user_agent(user_agent: &str) -> String {
+    user_agent.replace("HeadlessChrome/", "Chrome/")
 }
 
 fn dedicated_profile_has_cookie_database(profile_dir: &Path) -> bool {
@@ -876,7 +1206,13 @@ async fn wait_for_suno_auth(
             });
             if should_validate {
                 last_validation = Some((auth.clerk_client_cookie.clone(), now));
-                match clerk_token_exchange(&http, &auth.clerk_client_cookie).await {
+                match clerk_token_exchange(
+                    &http,
+                    &auth.clerk_client_cookie,
+                    auth.browser_environment.as_ref(),
+                )
+                .await
+                {
                     Ok((session_id, jwt)) => {
                         eprintln!("Clerk issued a JWT; verifying it with the Suno API...");
                         match validate_suno_login(&auth, &session_id, &jwt).await {
@@ -978,6 +1314,7 @@ fn browser_environment_from_cdp_version_value(
             browser_source: Some(INTERACTIVE_BROWSER_SOURCE.into()),
             user_agent,
             accept_language: None,
+            client_hints: None,
         })
     }
 }
@@ -987,7 +1324,7 @@ async fn browser_environment_from_page(session: &mut CdpSession) -> Option<Brows
         .call(
             "Runtime.evaluate",
             serde_json::json!({
-                "expression": "JSON.stringify({ userAgent: navigator.userAgent, languages: Array.from(navigator.languages || [navigator.language]).filter(Boolean) })",
+                "expression": "JSON.stringify({ userAgent: navigator.userAgent, languages: Array.from(navigator.languages || [navigator.language]).filter(Boolean), userAgentData: navigator.userAgentData ? { brands: Array.from(navigator.userAgentData.brands || []), mobile: Boolean(navigator.userAgentData.mobile), platform: navigator.userAgentData.platform || '' } : null })",
                 "returnByValue": true
             }),
         )
@@ -1000,16 +1337,47 @@ async fn browser_environment_from_page(session: &mut CdpSession) -> Option<Brows
     let probe: BrowserEnvironmentProbe = serde_json::from_str(payload).ok()?;
     let user_agent = non_empty_header_value(probe.user_agent.as_deref());
     let accept_language = accept_language_from_browser_languages(&probe.languages);
+    let client_hints = probe
+        .user_agent_data
+        .and_then(browser_client_hints_from_probe);
 
-    if user_agent.is_none() && accept_language.is_none() {
+    if user_agent.is_none() && accept_language.is_none() && client_hints.is_none() {
         None
     } else {
         Some(BrowserEnvironment {
             browser_source: Some(INTERACTIVE_BROWSER_SOURCE.into()),
             user_agent,
             accept_language,
+            client_hints,
         })
     }
+}
+
+fn browser_client_hints_from_probe(probe: UserAgentDataProbe) -> Option<BrowserClientHints> {
+    let brands = probe
+        .brands
+        .into_iter()
+        .filter(|brand| !brand.brand.is_empty() && !brand.version.is_empty())
+        .map(|brand| {
+            format!(
+                "\"{}\";v=\"{}\"",
+                escape_client_hint_value(&brand.brand),
+                escape_client_hint_value(&brand.version)
+            )
+        })
+        .collect::<Vec<_>>();
+    if brands.is_empty() || probe.platform.is_empty() {
+        return None;
+    }
+    Some(BrowserClientHints {
+        sec_ch_ua: brands.join(", "),
+        sec_ch_ua_mobile: if probe.mobile { "?1" } else { "?0" }.into(),
+        sec_ch_ua_platform: format!("\"{}\"", escape_client_hint_value(&probe.platform)),
+    })
+}
+
+fn escape_client_hint_value(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn merge_browser_environments(
@@ -1021,6 +1389,7 @@ fn merge_browser_environments(
             browser_source: primary.browser_source.or(fallback.browser_source),
             user_agent: primary.user_agent.or(fallback.user_agent),
             accept_language: primary.accept_language.or(fallback.accept_language),
+            client_hints: primary.client_hints.or(fallback.client_hints),
         }),
         (Some(environment), None) | (None, Some(environment)) => Some(environment),
         (None, None) => None,
@@ -1032,6 +1401,7 @@ fn interactive_browser_environment() -> BrowserEnvironment {
         browser_source: Some(INTERACTIVE_BROWSER_SOURCE.into()),
         user_agent: None,
         accept_language: None,
+        client_hints: None,
     }
 }
 
@@ -1175,7 +1545,7 @@ fn process_uses_profile(arguments: &[std::ffi::OsString], profile_path: &Path) -
         if let Some(value) = argument.strip_prefix("--user-data-dir=") {
             return normalized_path_text(Path::new(value.trim_matches('"'))) == expected;
         }
-        argument == "--user-data-dir"
+        (argument == "--user-data-dir" || argument == "--profile" || argument == "-profile")
             && arguments.get(index + 1).is_some_and(|value| {
                 normalized_path_text(Path::new(value.to_string_lossy().trim_matches('"')))
                     == expected
@@ -1357,6 +1727,7 @@ mod tests {
                 browser_source: Some(INTERACTIVE_BROWSER_SOURCE.into()),
                 user_agent: Some("Mozilla/5.0 Test".into()),
                 accept_language: Some("en-US,en;q=0.9".into()),
+                client_hints: None,
             }),
         )
         .expect("auth");
@@ -1492,17 +1863,121 @@ mod tests {
     }
 
     #[test]
+    fn metadata_probe_does_not_persist_headless_only_user_agent() {
+        assert_eq!(
+            normalize_runtime_user_agent(
+                "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 HeadlessChrome/150.0.0.0 Safari/537.36"
+            ),
+            "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/150.0.0.0 Safari/537.36"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an installed local Chromium-family browser"]
+    async fn installed_browser_metadata_probe_returns_public_runtime_values() {
+        let source = crate::browser::installed_chromium_browser_sources()
+            .into_iter()
+            .next()
+            .expect("installed Chromium-family browser");
+
+        let environment = probe_browser_runtime_environment(&source)
+            .await
+            .expect("runtime browser environment");
+
+        assert_eq!(environment.browser_source.as_deref(), Some(source.as_str()));
+        assert!(
+            environment
+                .user_agent
+                .as_deref()
+                .is_some_and(|value| value.contains("Mozilla/5.0") && !value.contains("Headless"))
+        );
+        assert!(environment.accept_language.is_some());
+        let hints = environment.client_hints.expect("captured client hints");
+        assert!(hints.sec_ch_ua.contains("Chromium"));
+        assert_eq!(hints.sec_ch_ua_mobile, "?0");
+        assert!(!hints.sec_ch_ua_platform.is_empty());
+    }
+
+    #[test]
+    fn runtime_user_agent_data_becomes_exact_client_hint_headers() {
+        let hints = browser_client_hints_from_probe(UserAgentDataProbe {
+            brands: vec![
+                UserAgentBrandProbe {
+                    brand: "Not_A Brand".into(),
+                    version: "99".into(),
+                },
+                UserAgentBrandProbe {
+                    brand: "Chromium".into(),
+                    version: "150".into(),
+                },
+            ],
+            mobile: false,
+            platform: "macOS".into(),
+        })
+        .expect("client hints");
+
+        assert_eq!(
+            hints.sec_ch_ua,
+            r#""Not_A Brand";v="99", "Chromium";v="150""#
+        );
+        assert_eq!(hints.sec_ch_ua_mobile, "?0");
+        assert_eq!(hints.sec_ch_ua_platform, r#""macOS""#);
+    }
+
+    #[test]
+    fn firefox_bidi_session_uses_the_runtime_user_agent() {
+        let environment = firefox_environment_from_session_new(
+            &serde_json::json!({
+                "capabilities": {
+                    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:151.0) Gecko/20100101 Firefox/151.0"
+                }
+            }),
+            "firefox-developer",
+        )
+        .expect("Firefox runtime environment");
+
+        assert_eq!(
+            environment.user_agent.as_deref(),
+            Some(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:151.0) Gecko/20100101 Firefox/151.0"
+            )
+        );
+        assert_eq!(
+            environment.browser_source.as_deref(),
+            Some("firefox-developer")
+        );
+        assert_eq!(environment.client_hints, None);
+    }
+
+    #[test]
+    fn firefox_bidi_port_is_read_only_from_the_owned_process_announcement() {
+        let lines = VecDeque::from([
+            "noise on stderr".into(),
+            "WebDriver BiDi listening on ws://127.0.0.1:49152".into(),
+        ]);
+        assert_eq!(firefox_bidi_port(&lines), Some(49152));
+        assert_eq!(
+            firefox_bidi_port(&VecDeque::from([
+                "WebDriver BiDi listening on ws://example.com:49152".into()
+            ])),
+            None
+        );
+    }
+
+    #[test]
     fn browser_environment_merge_falls_back_by_field() {
         let merged = merge_browser_environments(
             Some(BrowserEnvironment {
                 browser_source: Some(INTERACTIVE_BROWSER_SOURCE.into()),
                 user_agent: None,
                 accept_language: Some("ja,en;q=0.9".into()),
+                client_hints: None,
             }),
             Some(BrowserEnvironment {
                 browser_source: Some(INTERACTIVE_BROWSER_SOURCE.into()),
                 user_agent: Some("Mozilla/5.0 VersionFallback".into()),
                 accept_language: None,
+                client_hints: None,
             }),
         )
         .expect("environment");

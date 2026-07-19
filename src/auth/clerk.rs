@@ -20,8 +20,12 @@ fn clerk_token_url(session_id: &str) -> String {
 fn apply_clerk_headers(
     builder: reqwest::RequestBuilder,
     clerk_cookie: &str,
+    browser_environment: Option<&crate::auth::BrowserEnvironment>,
 ) -> reqwest::RequestBuilder {
     builder
+        .headers(crate::api::headers::browser_environment_headers(
+            browser_environment,
+        ))
         .header("authorization", clerk_cookie)
         .header("cookie", format!("__client={clerk_cookie}"))
         .header("origin", "https://suno.com")
@@ -76,11 +80,16 @@ fn clerk_status_code(
 pub async fn clerk_token_exchange(
     client: &reqwest::Client,
     clerk_cookie: &str,
+    browser_environment: Option<&crate::auth::BrowserEnvironment>,
 ) -> Result<(String, String), CliError> {
-    let resp = apply_clerk_headers(client.get(clerk_client_url()), clerk_cookie)
-        .send()
-        .await
-        .map_err(transport_error)?;
+    let resp = apply_clerk_headers(
+        client.get(clerk_client_url()),
+        clerk_cookie,
+        browser_environment,
+    )
+    .send()
+    .await
+    .map_err(transport_error)?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -116,7 +125,7 @@ pub async fn clerk_token_exchange(
         })?
         .to_string();
 
-    let jwt = clerk_refresh_jwt(client, clerk_cookie, &session_id).await?;
+    let jwt = clerk_refresh_jwt(client, clerk_cookie, &session_id, browser_environment).await?;
     Ok((session_id, jwt))
 }
 
@@ -125,12 +134,17 @@ pub async fn clerk_refresh_jwt(
     client: &reqwest::Client,
     clerk_cookie: &str,
     session_id: &str,
+    browser_environment: Option<&crate::auth::BrowserEnvironment>,
 ) -> Result<String, CliError> {
-    let resp = apply_clerk_headers(client.post(clerk_token_url(session_id)), clerk_cookie)
-        .header("content-type", "application/x-www-form-urlencoded")
-        .send()
-        .await
-        .map_err(transport_error)?;
+    let resp = apply_clerk_headers(
+        client.post(clerk_token_url(session_id)),
+        clerk_cookie,
+        browser_environment,
+    )
+    .header("content-type", "application/x-www-form-urlencoded")
+    .send()
+    .await
+    .map_err(transport_error)?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -180,7 +194,10 @@ mod tests {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
     use reqwest::StatusCode;
 
-    use super::{clerk_status_code, redacted_response_excerpt, validate_clerk_jwt};
+    use super::{
+        apply_clerk_headers, clerk_status_code, redacted_response_excerpt, validate_clerk_jwt,
+    };
+    use crate::auth::BrowserEnvironment;
 
     #[test]
     fn clerk_status_distinguishes_rejection_from_server_failure() {
@@ -228,5 +245,36 @@ mod tests {
         assert!(validate_clerk_jwt("not-a-jwt".into()).is_err());
         let expired_claims = BASE64URL.encode(br#"{"exp":1}"#);
         assert!(validate_clerk_jwt(format!("header.{expired_claims}.signature")).is_err());
+    }
+
+    #[test]
+    fn clerk_requests_use_recovered_browser_headers() {
+        let request = apply_clerk_headers(
+            reqwest::Client::new().get("https://auth.suno.com/v1/client"),
+            "secret-cookie",
+            Some(&BrowserEnvironment {
+                browser_source: Some("chrome".into()),
+                user_agent: Some("RecoveredBrowser/150".into()),
+                accept_language: Some("zh-CN,zh;q=0.9".into()),
+                client_hints: None,
+            }),
+        )
+        .build()
+        .expect("request");
+
+        assert_eq!(
+            request
+                .headers()
+                .get("user-agent")
+                .and_then(|value| value.to_str().ok()),
+            Some("RecoveredBrowser/150")
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("accept-language")
+                .and_then(|value| value.to_str().ok()),
+            Some("zh-CN,zh;q=0.9")
+        );
     }
 }
