@@ -137,8 +137,38 @@ Run `sunox --help` or `sunox <command> --help` for the complete set of options.
 
 Before a generation-backed request, Sunox calls Suno's generation challenge check. When no
 challenge is required, it submits directly and does not launch a browser. When Suno requires a
-challenge, Sunox uses the matching installed Chromium-family browser to complete it and closes the
-temporary profile afterward.
+challenge, Sunox first asks the optional Browser Bridge extension to execute the invisible widget
+inside an existing `suno.com` tab. If no paired tab responds, the default `auto` mode falls back to
+the matching installed Chromium-family browser and closes its temporary profile afterward.
+
+### Install the Browser Bridge on macOS or Windows
+
+The Browser Bridge is bundled with the Sunox binary, so there is no separate ZIP or Chrome Web
+Store install. macOS and Windows use the same setup:
+
+1. Extract the bundled extension and note the directory printed by the command:
+
+```bash
+sunox install-browser-extension
+```
+
+2. In the same Chrome profile where you use Suno, open `chrome://extensions`.
+3. Enable **Developer mode**, choose **Load unpacked**, and select the exact directory printed by
+   Sunox. On macOS, press `Shift+Command+G` in the folder picker and paste the printed path because
+   `~/Library` is hidden by default. On Windows, paste the printed path into the folder picker's
+   address bar.
+4. Keep the extension enabled, then open or reload an authenticated `https://suno.com` tab.
+
+The extension stays installed across browser restarts. After a Sunox update that changes the
+bridge, refresh its files and reload it in Chrome:
+
+```bash
+sunox install-browser-extension --force
+```
+
+Then click **Reload** on the Sunox Browser Bridge card and reload the Suno tab. The command chooses
+the correct per-user application directory on both macOS and Windows; do not move or delete that
+directory while Chrome is using the unpacked extension.
 
 The relevant overrides are:
 
@@ -147,6 +177,12 @@ The relevant overrides are:
 --no-captcha       Do not run the automatic browser solver
 --token <token>    Submit an externally solved challenge token
 ```
+
+Set `challenge_browser` to `auto` (default), `existing` (never open a new browser), or `isolated`
+(always use the temporary browser). A one-command override looks like
+`-c challenge_browser=existing`. In `existing` mode, a missing or stale bridge is reported as an
+error instead of opening another browser. In `auto` mode, Sunox may open the isolated fallback when
+no connected Suno tab responds.
 
 ## JSON output and automation
 
@@ -182,10 +218,12 @@ Show or change persistent settings:
 sunox config show
 sunox config set output_dir ./songs
 sunox config set default_model auto
+sunox config set challenge_browser auto
 ```
 
 Use `-c key=value` for a one-command override. Environment variables use the `SUNOX_*` prefix,
-such as `SUNOX_OUTPUT_DIR`, `SUNOX_DEFAULT_MODEL`, and `SUNOX_BROWSER_PATH`.
+such as `SUNOX_OUTPUT_DIR`, `SUNOX_DEFAULT_MODEL`, `SUNOX_CHALLENGE_BROWSER`, and
+`SUNOX_BROWSER_PATH`.
 
 Write operations are serialized per account by default. `--parallel` disables that protection for
 one command; use it only when same-account concurrent writes are intentional.

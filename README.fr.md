@@ -138,14 +138,32 @@ Consultez `sunox --help` ou `sunox <commande> --help` pour toutes les options.
 
 Avant chaque requête de génération, Sunox effectue le même contrôle que l'application Web de
 Suno. Si aucune vérification n'est demandée, la requête part directement et aucun navigateur
-n'est lancé. Si Suno exige un challenge, Sunox utilise le navigateur Chromium compatible avec la
-session, puis supprime le profil temporaire.
+n'est lancé. Si Suno exige un challenge, Sunox demande d'abord à l'extension Browser Bridge
+d'exécuter le widget invisible dans un onglet `suno.com` existant. Sans onglet appairé, le mode
+`auto` utilise le navigateur Chromium compatible, puis supprime le profil temporaire.
+
+Browser Bridge est intégré au binaire Sunox et prend en charge macOS et Windows ; aucun
+téléchargement séparé ni passage par le Chrome Web Store n'est nécessaire. Exécutez
+`sunox install-browser-extension`, copiez le chemin affiché, ouvrez `chrome://extensions` dans le
+même profil Chrome que celui utilisé pour Suno, activez le mode développeur, puis choisissez
+**Charger l'extension non empaquetée**. Sélectionnez exactement ce dossier et rechargez un onglet
+`suno.com` authentifié. Sous macOS, appuyez sur `Shift+Command+G` dans le sélecteur de dossier et
+collez le chemin, car `~/Library` est masqué par défaut. Sous Windows, collez le chemin dans la
+barre d'adresse du sélecteur.
+
+Après une mise à jour de Sunox, exécutez `sunox install-browser-extension --force`, cliquez sur
+**Actualiser** dans la carte de l'extension, puis rechargez l'onglet Suno. Ne déplacez pas et ne
+supprimez pas le dossier affiché tant que Chrome utilise l'extension.
 
 ```text
 --captcha          Effectuer la vérification même si le contrôle initial ne la demande pas
 --no-captcha       Désactiver la résolution automatique dans le navigateur
 --token <token>    Utiliser un jeton de challenge obtenu ailleurs
 ```
+
+`challenge_browser` accepte `auto`, `existing` (aucune nouvelle fenêtre) ou `isolated`. Le mode
+`existing` renvoie une erreur si le Bridge ne répond pas ; `auto` peut ouvrir le navigateur isolé
+de secours.
 
 ## JSON et automatisation
 

@@ -7,6 +7,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.0.21] - 2026-07-19
+
+### Added
+
+- Added an optional paired Chrome Browser Bridge that executes required invisible hCaptcha or
+  Turnstile checks inside an existing `suno.com` tab without opening another browser window.
+- Added `sunox install-browser-extension` and the `challenge_browser=auto|existing|isolated`
+  setting on macOS and Windows. The default `auto` path preserves reliability by falling back to
+  the isolated browser.
+
 ## [0.0.20] - 2026-07-19
 
 ### Fixed

@@ -103,14 +103,14 @@ where
             async move {
                 if !ctx.quiet {
                     eprintln!(
-                        "Suno requested {}; solving silently via the installed browser...",
+                        "Suno requested {}; running the configured browser verification flow...",
                         provider.label()
                     );
                 }
                 // The preflight may have refreshed the JWT. Snapshot after it
                 // so the browser receives the newest cookies and metadata.
                 let refreshed_auth = client.auth_state_snapshot();
-                captcha::solve(&refreshed_auth, provider).await
+                captcha::solve(&refreshed_auth, provider, ctx.config.challenge_browser).await
             }
         },
     )

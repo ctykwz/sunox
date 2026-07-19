@@ -21,6 +21,7 @@ fn with_isolated_home<'a>(cmd: &'a mut Command, test_home: &Path) -> &'a mut Com
         .env_remove("SUNOX_POLL_TIMEOUT_SECS")
         .env_remove("SUNOX_OUTPUT_DIR")
         .env_remove("SUNOX_SERIAL_MUTATIONS")
+        .env_remove("SUNOX_CHALLENGE_BROWSER")
 }
 
 #[test]
@@ -42,9 +43,44 @@ fn help_lists_codex_style_commands() {
         .stdout(predicate::str::contains("login"))
         .stdout(predicate::str::contains("logout"))
         .stdout(predicate::str::contains("doctor"))
+        .stdout(predicate::str::contains("install-browser-extension"))
         .stdout(predicate::str::contains("-c, --config <key=value>"))
         .stdout(predicate::str::contains("--parallel"))
         .stdout(predicate::str::contains("generate").not());
+}
+
+#[test]
+fn browser_extension_installer_extracts_a_paired_unpacked_extension() {
+    let test_home = isolated_test_home("sunox-extension-install");
+    // The default macOS and Windows configuration paths both commonly contain spaces.
+    let extension_path = test_home.join("Sunox Browser Bridge");
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    with_isolated_home(&mut cmd, &test_home)
+        .args([
+            "install-browser-extension",
+            "--path",
+            extension_path.to_str().expect("extension path"),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"installed\": true"))
+        .stdout(predicate::str::contains("browser-extension-secret").not());
+
+    assert!(extension_path.join("manifest.json").is_file());
+    assert!(extension_path.join("transport-loopback.js").is_file());
+    assert!(extension_path.join("icons/icon-16.png").is_file());
+    assert!(extension_path.join("icons/icon-32.png").is_file());
+    assert!(extension_path.join("icons/icon-48.png").is_file());
+    assert!(extension_path.join("icons/icon-128.png").is_file());
+    let config =
+        std::fs::read_to_string(extension_path.join("config.js")).expect("extension config");
+    assert!(!config.contains("__SUNOX_BRIDGE_SECRET__"));
+    assert!(config.contains("transport: \"loopback\""));
+    assert!(config.contains("schemaVersion: 1"));
+    assert!(!config.contains("sharedSecret: \"\""));
+    assert!(!config.contains("__SUNOX_BRIDGE_"));
 }
 
 #[test]
@@ -510,7 +546,9 @@ fn install_skill_prints_current_generation_guidance() {
         .success()
         .stdout(predicate::str::contains("token=null"))
         .stdout(predicate::str::contains("--captcha"))
-        .stdout(predicate::str::contains("Cloudflare Turnstile/provider 2"))
+        .stdout(predicate::str::contains(
+            "Cloudflare Turnstile uses provider 2",
+        ))
         .stdout(predicate::str::contains(
             "Disable automatic browser verification",
         ))
@@ -1006,11 +1044,12 @@ fn agent_info_reports_automatic_versioned_challenge_verification() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "automatic silent browser verification",
+            "paired Sunox Browser Bridge to perform silent verification",
         ))
         .stdout(predicate::str::contains("hCaptcha/provider 1"))
         .stdout(predicate::str::contains("Turnstile/provider 2"))
         .stdout(predicate::str::contains("matching recorded browser source"))
+        .stdout(predicate::str::contains("challenge_browser=auto"))
         .stdout(predicate::str::contains(
             "disable automatic browser verification",
         ));

@@ -132,14 +132,30 @@ sunox update                       最新の GitHub Release に更新
 ## 生成時の Challenge
 
 生成系のリクエストを送る前に、Sunox は Suno Web と同じ Challenge チェックを行います。
-Challenge が不要ならブラウザを起動せず、そのまま送信します。Suno が明示的に要求した場合だけ、
-対応する Chromium 系ブラウザで検証を完了し、終了後に一時 Profile を削除します。
+Challenge が不要ならブラウザを起動せず、そのまま送信します。Suno が要求した場合は、まず任意の
+Browser Bridge 拡張機能が既存の `suno.com` タブ内で invisible challenge を実行します。ペアリング済み
+タブが応答しない場合、既定の `auto` モードが対応する Chromium を使用し、終了後に一時 Profile を削除します。
+
+Browser Bridge は Sunox バイナリに同梱され、macOS と Windows の両方に対応しています。
+別の ZIP や Chrome Web Store は不要です。`sunox install-browser-extension` を実行し、表示された
+パスを控えます。Suno で使う Chrome プロファイルの `chrome://extensions` を開き、デベロッパー
+モードを有効にして **パッケージ化されていない拡張機能を読み込む** を選び、そのフォルダーを
+指定してから、ログイン済みの `suno.com` タブを再読み込みしてください。macOS では `~/Library`
+が通常は非表示のため、フォルダー選択画面で `Shift+Command+G` を押してパスを貼り付けます。
+Windows では、フォルダー選択画面のアドレスバーにパスを貼り付けます。
+
+Sunox の更新後は `sunox install-browser-extension --force` を実行し、拡張機能カードの
+**再読み込み** をクリックして、Suno タブも再読み込みします。Chrome が使用している間は、
+表示された拡張機能フォルダーを移動または削除しないでください。
 
 ```text
 --captcha          事前チェックで不要でもブラウザ検証を実行
 --no-captcha       自動ブラウザ検証を無効化
 --token <token>    外部で取得した Challenge Token を使用
 ```
+
+`challenge_browser` は `auto`、`existing`（新しいウィンドウを開かない）、`isolated` を選択できます。
+`existing` は Bridge が応答しない場合にエラーを返し、`auto` は分離ブラウザーへフォールバックできます。
 
 ## JSON と自動化
 

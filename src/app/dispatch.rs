@@ -88,6 +88,9 @@ async fn dispatch_command(
         Some(Commands::Config(args)) => commands::config::run(args, ctx).await,
         Some(Commands::AgentInfo) => commands::agent::agent_info(ctx).await,
         Some(Commands::InstallSkill(args)) => commands::agent::install_skill(args, ctx).await,
+        Some(Commands::InstallBrowserExtension(args)) => {
+            commands::browser_extension::install(args, ctx).await
+        }
         Some(Commands::Update(args)) => commands::update::run(args, ctx).await,
     }
 }

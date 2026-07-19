@@ -13,7 +13,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
         "commands": [
             "create", "download", "add", "lyrics", "clip", "persona", "playlist",
             "credits", "models", "login", "logout", "auth", "config", "doctor", "agent-info",
-            "install-skill", "update"
+            "install-skill", "install-browser-extension", "update"
         ],
         "models": {
             "v5.5": "chirp-fenix",
@@ -103,12 +103,12 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "public_visibility": "do not publish clips, playlists, or personas or make them public unless the user explicitly asks",
             "persona_create_visibility": "persona create is private by default and requires explicit --public to create a public persona",
             "destructive_actions": "do not run delete, trash, purge, empty-trash, or other destructive commands unless the user explicitly asks. clip purge and clip empty-trash are irreversible and require -y/--yes.",
-            "captcha": "allow the default challenge preflight to run automatic silent browser verification when Suno requires it; do not force --captcha unless the user explicitly asks, and prefer an externally supplied --token when provided",
+            "captcha": "allow the default challenge preflight to run automatic browser verification when Suno requires it; challenge_browser=auto prefers a paired existing Suno tab and falls back to an isolated browser. Do not force --captcha unless the user explicitly asks, and prefer an externally supplied --token when provided",
             "secrets": "never print, persist in project files, or include auth cookies, Clerk values, JWTs, or challenge tokens in prompts, logs, README examples, or commits; prefer auth --cookie-stdin or --jwt-stdin over argv"
         },
         "command_notes": {
             "create": {
-                "default_challenge": "preflights POST /api/c/check with ctype=generation; if Suno reports a challenge and stored Clerk refresh material exists, refreshes the JWT once and repeats the preflight; when still required, silently solves the reported captcha_version with the matching installed browser and submits the token with provider 1 for hCaptcha or provider 2 for Cloudflare Turnstile; when not required, submits token=null and token_provider=null",
+                "default_challenge": "preflights POST /api/c/check with ctype=generation; if Suno reports a challenge and stored Clerk refresh material exists, refreshes the JWT once and repeats the preflight; when still required, challenge_browser=auto first asks the paired Sunox Browser Bridge to solve invisibly in an existing suno.com tab and falls back to an isolated matching browser, then submits provider 1 for hCaptcha or provider 2 for Cloudflare Turnstile; when not required, submits token=null and token_provider=null",
                 "challenge_flags": {
                     "--token": "use an externally supplied solved challenge token; preflight infers token_provider from the reported captcha_version and falls back to provider 1 only when a non-auth preflight error prevents detection",
                     "--captcha": "force browser-backed challenge verification even when preflight says it is unnecessary",
@@ -298,7 +298,8 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
         "config": {
             "set": "sunox config set <key> <value> persists to config.toml",
             "env_override": "SUNOX_* environment variables override persisted config values",
-            "keys": ["default_model", "poll_interval_secs", "poll_timeout_secs", "output_dir", "serial_mutations"]
+            "challenge_browser": "auto prefers a connected paired Browser Bridge in an existing Suno tab and falls back to an isolated browser; existing requires that connected paired tab and never opens another browser; isolated always uses the temporary browser",
+            "keys": ["default_model", "poll_interval_secs", "poll_timeout_secs", "output_dir", "serial_mutations", "challenge_browser"]
         },
         "resource_management": {
             "clip": {
@@ -374,7 +375,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             ],
             "login_fallback": "`sunox login` first probes existing browser cookies; if that fails, it opens a dedicated Sunox Chromium-family profile and captures the Clerk session after the user logs in. Windows skips live Chromium cookie databases so App-Bound decryption cannot force-close a running browser, while Firefox uses a non-destructive read-only SQLite path. The interactive fallback requires an installed Chromium-family browser.",
             "logout": "`sunox logout` removes stored auth, the dedicated interactive browser profile, and any legacy captcha profile",
-            "generation_challenge": "Commands that submit through /api/generate/v2-web/ preflight POST /api/c/check with ctype=generation. If Suno reports a challenge and stored Clerk refresh material exists, Sunox refreshes the JWT once and repeats the preflight. If a challenge remains, Sunox automatically performs silent browser verification with hCaptcha/provider 1 or Cloudflare Turnstile/provider 2 according to captcha_version. It prioritizes stored verified account cookies and the matching recorded browser source, launches an invocation-owned off-screen browser on a random loopback CDP port, and deletes its temporary profile after use. Use --token <solved> for an external token, --captcha to force verification, or --no-captcha to disable the automatic solver.",
+            "generation_challenge": "Commands that submit through /api/generate/v2-web/ preflight POST /api/c/check with ctype=generation. If Suno reports a challenge and stored Clerk refresh material exists, Sunox refreshes the JWT once and repeats the preflight. If a challenge remains, challenge_browser=auto first asks the paired Sunox Browser Bridge to perform silent verification inside an existing suno.com tab, using hCaptcha/provider 1 or Cloudflare Turnstile/provider 2 according to captcha_version. When no connected tab claims the request, it falls back to an invocation-owned isolated browser using stored verified account cookies and the matching recorded browser source. Use --token <solved> for an external token, --captcha to force verification, or --no-captcha to disable automatic browser verification.",
             "browser_environment": "Browser-cookie login links auth to the matching local profile and probes the same installed browser binary for runtime user-agent, accept-language, client hints, and matching device identity without a visible window or Suno navigation. Legacy auth is repaired before authenticated commands. Fresh values win per field, stored values survive failed probes, and built-in constants are only the final UA/language fallback. Device-Id is recovered from the same account when possible and otherwise omitted rather than fabricated. The recovered context is used for Clerk login/JWT refresh and Suno API requests.",
         },
         "provider": "direct_suno_unofficial",
