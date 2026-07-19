@@ -189,7 +189,7 @@ mod tests {
     fn extension_assets_share_the_bridge_contract() {
         assert!(MANIFEST.contains("https://suno.com/*"));
         assert!(MANIFEST.contains("http://127.0.0.1/*"));
-        assert!(MANIFEST.contains("\"version\": \"0.1.1\""));
+        assert!(MANIFEST.contains("\"version\": \"0.1.2\""));
         assert!(MANIFEST.contains("\"alarms\""));
         assert!(MANIFEST.contains("icons/icon-16.png"));
         assert!(MANIFEST.contains("icons/icon-128.png"));
