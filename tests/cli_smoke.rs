@@ -592,6 +592,12 @@ fn install_skill_prints_current_generation_guidance() {
         .stdout(predicate::str::contains("[Instrumental]"))
         .stdout(predicate::str::contains("success=true"))
         .stdout(predicate::str::contains("-c challenge_browser=existing"))
+        .stdout(predicate::str::contains(
+            "Confirmed installation is standing permission to run invisible challenges",
+        ))
+        .stdout(predicate::str::contains(
+            "requiring `challenge_browser=existing`, not `--no-captcha`",
+        ))
         .stdout(predicate::str::contains("simple audio analysis"))
         .stdout(predicate::str::contains("--format mp3|m4a|wav|opus"))
         .stdout(predicate::str::contains("do not publish"))
@@ -1095,6 +1101,12 @@ fn agent_info_reports_automatic_versioned_challenge_verification() {
         ))
         .stdout(predicate::str::contains(
             "use confirmed Browser Bridge installation as the command-selection boundary",
+        ))
+        .stdout(predicate::str::contains(
+            "Confirmed installation is standing permission for invisible challenges",
+        ))
+        .stdout(predicate::str::contains(
+            "Interpret no popup, no new browser, or no visible captcha as challenge_browser=existing, not --no-captcha",
         ))
         .stdout(predicate::str::contains(
             "any successful non-empty aligned word rejects",

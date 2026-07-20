@@ -185,6 +185,13 @@ l'installation confirmée de Browser Bridge comme critère : s'il est installé,
 d'un onglet Suno authentifié et actualisé, et échoue sans ouvrir un autre navigateur si nécessaire.
 S'il n'est pas installé ou si son installation est inconnue, conservez `--no-captcha`.
 
+L'installation confirmée du Bridge constitue une autorisation permanente pour les challenges
+invisibles dans l'onglet existant ; aucune autorisation captcha supplémentaire n'est nécessaire à
+chaque génération. « Sans fenêtre », « sans nouveau navigateur » ou « sans captcha visible »
+signifie `challenge_browser=existing`, et non `--no-captcha`. Conservez `--no-captcha` avec un Bridge
+installé uniquement si tous les challenges, y compris le Bridge invisible, sont explicitement
+interdits ou si cette option exacte est demandée.
+
 ## JSON et automatisation
 
 Toutes les commandes acceptent `--json`. La sortie devient aussi automatiquement du JSON quand

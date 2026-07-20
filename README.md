@@ -212,6 +212,12 @@ or installation is unknown, keep `--no-captcha`; a required challenge will then 
 submission. Merely omitting `--no-captcha` in the default `auto` mode still allows the
 isolated-browser fallback.
 
+Installing the Bridge is standing permission for Sunox to execute invisible challenges in that
+existing tab; it does not require separate permission for every generation. Requests such as “no
+popup”, “no new browser”, or “no visible captcha” mean `challenge_browser=existing`, not
+`--no-captcha`. Keep `--no-captcha` despite an installed Bridge only when every challenge mechanism,
+including the invisible Bridge, is explicitly forbidden or that exact flag is requested.
+
 ## JSON output and automation
 
 Every command supports `--json`. Sunox also selects JSON automatically when stdout is piped:

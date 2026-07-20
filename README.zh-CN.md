@@ -197,6 +197,11 @@ sunox install-browser-extension --force
 安装时，保留 `--no-captcha`，遇到挑战会在提交前停止。仅仅在默认 `auto` 模式下去掉
 `--no-captcha`，仍然允许 Sunox 启动独立浏览器兜底。
 
+安装 Browser Bridge 本身就是允许 Sunox 在现有标签页中执行 invisible challenge 的持续授权，
+每次生成不需要再次询问验证码权限。“不要弹窗”“不要新开浏览器”“不要显示验证码”等要求应映射为
+`challenge_browser=existing`，而不是 `--no-captcha`。只有用户明确禁止包括 invisible Bridge 在内的
+一切 challenge，或者明确要求传 `--no-captcha` 时，已安装 Bridge 的机器才保留该参数。
+
 ## JSON 与自动化
 
 所有命令都支持 `--json`。stdout 被 Pipe 时也会自动改用 JSON：

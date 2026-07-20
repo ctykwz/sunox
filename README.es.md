@@ -181,6 +181,12 @@ Browser Bridge como criterio: si está instalado, elimina `--no-captcha` y usa
 falla sin abrir otro navegador si no está conectada. Si no está instalado o no puedes confirmarlo,
 conserva `--no-captcha`; un challenge detendrá la operación antes del envío.
 
+La instalación confirmada del Bridge autoriza de forma permanente los challenges invisibles en la
+pestaña existente; no hace falta pedir permiso en cada generación. «Sin ventana», «sin navegador
+nuevo» o «sin captcha visible» significa `challenge_browser=existing`, no `--no-captcha`. Conserva
+`--no-captcha` con el Bridge instalado solo si se prohíben explícitamente todos los challenges,
+incluido el Bridge invisible, o se solicita exactamente esa opción.
+
 ## JSON y automatización
 
 Todos los comandos aceptan `--json`. La salida también cambia a JSON automáticamente al conectarla
