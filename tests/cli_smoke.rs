@@ -1097,6 +1097,12 @@ fn agent_info_reports_automatic_versioned_challenge_verification() {
             "use confirmed Browser Bridge installation as the command-selection boundary",
         ))
         .stdout(predicate::str::contains(
+            "Confirmed installation is standing permission for invisible challenges",
+        ))
+        .stdout(predicate::str::contains(
+            "Interpret no popup, no new browser, or no visible captcha as challenge_browser=existing, not --no-captcha",
+        ))
+        .stdout(predicate::str::contains(
             "any successful non-empty aligned word rejects",
         ))
         .stdout(predicate::str::contains(

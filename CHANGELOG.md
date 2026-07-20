@@ -7,6 +7,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- Treat confirmed Browser Bridge installation as standing permission for invisible existing-tab
+  challenges, so no-popup or no-new-browser requests select fail-closed
+  `challenge_browser=existing` instead of being misread as `--no-captcha`.
+
 ## [0.0.22] - 2026-07-20
 
 ### Changed

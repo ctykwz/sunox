@@ -87,6 +87,13 @@ Risk control defaults for agents:
   been confirmed on the current machine, omit `--no-captcha` and use
   `-c challenge_browser=existing`; that mode itself verifies that a refreshed,
   authenticated `suno.com` tab is connected and fails closed when it is not.
+  Confirmed installation is standing permission to run invisible challenges
+  through that existing tab; do not ask for per-run captcha permission. Interpret
+  "no popup", "no new browser", "no visible captcha", and equivalent requests as
+  requiring `challenge_browser=existing`, not `--no-captcha`. Use `--no-captcha`
+  despite an installed bridge only when the user explicitly forbids every
+  challenge mechanism, including the invisible Browser Bridge, or explicitly
+  requests that flag.
   When the bridge is not installed or installation is unknown, keep
   `--no-captcha` so a required challenge stops before submission. The default
   `challenge_browser=auto` may open an isolated browser when no paired tab responds.
