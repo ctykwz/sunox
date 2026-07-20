@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.0.23] - 2026-07-20
+
 ### Fixed
 
 - Treat confirmed Browser Bridge installation as standing permission for invisible existing-tab
