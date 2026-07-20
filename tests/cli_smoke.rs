@@ -441,8 +441,40 @@ fn create_help_lists_optional_captcha_flag() {
         .assert()
         .success()
         .stdout(predicate::str::contains("--captcha"))
+        .stdout(predicate::str::contains(
+            "For bracketed instrumental structure",
+        ))
         .stdout(predicate::str::contains("[default: v5.5]").not())
         .stdout(predicate::str::contains("--variation").not());
+}
+
+#[test]
+fn create_rejects_instrumental_with_lyrics_file_before_auth() {
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    cmd.args([
+        "create",
+        "--instrumental",
+        "--lyrics-file",
+        "structured-instrumental.txt",
+    ])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("--instrumental"))
+    .stderr(predicate::str::contains("--lyrics-file"))
+    .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn create_rejects_instrumental_with_inline_lyrics_before_auth() {
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    cmd.args(["create", "--instrumental", "--lyrics", "[Instrumental]"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--instrumental"))
+        .stderr(predicate::str::contains("--lyrics"))
+        .stderr(predicate::str::contains("cannot be used with"));
 }
 
 #[test]
@@ -555,6 +587,11 @@ fn install_skill_prints_current_generation_guidance() {
         .stdout(predicate::str::contains("sunox create --title"))
         .stdout(predicate::str::contains("returned clip ID"))
         .stdout(predicate::str::contains("do not pass --parallel"))
+        .stdout(predicate::str::contains("## Instrumental input modes"))
+        .stdout(predicate::str::contains("The first line must be"))
+        .stdout(predicate::str::contains("[Instrumental]"))
+        .stdout(predicate::str::contains("success=true"))
+        .stdout(predicate::str::contains("-c challenge_browser=existing"))
         .stdout(predicate::str::contains("simple audio analysis"))
         .stdout(predicate::str::contains("--format mp3|m4a|wav|opus"))
         .stdout(predicate::str::contains("do not publish"))
@@ -1050,6 +1087,18 @@ fn agent_info_reports_automatic_versioned_challenge_verification() {
         .stdout(predicate::str::contains("Turnstile/provider 2"))
         .stdout(predicate::str::contains("matching recorded browser source"))
         .stdout(predicate::str::contains("challenge_browser=auto"))
+        .stdout(predicate::str::contains(
+            "--instrumental conflicts with --lyrics and --lyrics-file",
+        ))
+        .stdout(predicate::str::contains(
+            "keep --no-captcha so a required challenge stops before submission",
+        ))
+        .stdout(predicate::str::contains(
+            "use confirmed Browser Bridge installation as the command-selection boundary",
+        ))
+        .stdout(predicate::str::contains(
+            "any successful non-empty aligned word rejects",
+        ))
         .stdout(predicate::str::contains(
             "disable automatic browser verification",
         ));

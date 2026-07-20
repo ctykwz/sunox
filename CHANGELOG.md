@@ -7,6 +7,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- Reject `--instrumental` together with `--lyrics` or `--lyrics-file` instead of silently
+  discarding the lyrics input, and document bracket-only `[Instrumental]` structure as the mode for
+  controlling instrumental sections, rhythm, edit points, or arrangement.
+- Clarify unattended challenge handling: when Browser Bridge installation is confirmed, omit
+  `--no-captcha` and use fail-closed `challenge_browser=existing`; when it is not installed or its
+  installation is unknown, keep `--no-captcha`.
+
 ## [0.0.21] - 2026-07-19
 
 ### Added

@@ -82,6 +82,26 @@ sunox create \
   --style-influence 70
 ```
 
+### Instrumental input modes
+
+Choose one mode; `--instrumental` cannot be combined with `--lyrics` or `--lyrics-file`:
+
+- Use `--instrumental` by itself when you want a no-lyrics instrumental and do not need to control
+  its internal sections.
+- To control sections, rhythm, edit points, or arrangement, omit `--instrumental` and use a
+  structured lyrics file. Put `[Instrumental]` on the first line and keep every remaining
+  non-empty line inside square brackets, with no singable body text.
+
+```text
+[Instrumental]
+[Intro — sparse felt piano, free time]
+[Build — strings enter and the pulse accelerates]
+[Final cut — hard unresolved ending]
+```
+
+After the clips complete, use `sunox clip timed-lyrics <clip_id> --json` as a vocal quality gate.
+Reject a generated version if it contains any successful non-empty aligned word.
+
 One generation request normally returns two clip IDs. Wait for them to finish, then download the
 ones you want:
 
@@ -183,6 +203,14 @@ Set `challenge_browser` to `auto` (default), `existing` (never open a new browse
 `-c challenge_browser=existing`. In `existing` mode, a missing or stale bridge is reported as an
 error instead of opening another browser. In `auto` mode, Sunox may open the isolated fallback when
 no connected Suno tab responds.
+
+For unattended runs that must never open a new window, use confirmed Browser Bridge installation
+as the command-selection boundary. When it is installed, omit `--no-captcha` and use
+`-c challenge_browser=existing`; that mode verifies that a refreshed, authenticated Suno tab is
+connected and fails without opening another browser when it is not. If the bridge is not installed
+or installation is unknown, keep `--no-captcha`; a required challenge will then stop before
+submission. Merely omitting `--no-captcha` in the default `auto` mode still allows the
+isolated-browser fallback.
 
 ## JSON output and automation
 

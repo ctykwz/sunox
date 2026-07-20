@@ -49,12 +49,8 @@ fn build_generate_args_from_create(args: CreateArgs) -> GenerateArgs {
         title: args.title,
         tags,
         exclude: args.exclude,
-        lyrics: if args.instrumental { None } else { args.lyrics },
-        lyrics_file: if args.instrumental {
-            None
-        } else {
-            args.lyrics_file
-        },
+        lyrics: args.lyrics,
+        lyrics_file: args.lyrics_file,
         model: args.model,
         vocal: if args.instrumental { None } else { args.vocal },
         weirdness: args.weirdness,
@@ -131,6 +127,13 @@ fn build_generate_request(
     args: &GenerateArgs,
     config: &AppConfig,
 ) -> Result<GenerateRequest, CliError> {
+    if args.instrumental && (args.lyrics.is_some() || args.lyrics_file.is_some()) {
+        return Err(CliError::Config(
+            "--instrumental cannot be combined with --lyrics or --lyrics-file; use --instrumental alone for an unconstrained instrumental, or omit it and use bracketed [Instrumental] structure through --lyrics/--lyrics-file"
+                .into(),
+        ));
+    }
+
     let lyrics = match (&args.lyrics, &args.lyrics_file) {
         (Some(l), _) => Some(l.clone()),
         (_, Some(path)) => Some(std::fs::read_to_string(path)?),
@@ -145,7 +148,7 @@ fn build_generate_request(
     let control_sliders = build_control_sliders(args.weirdness, args.style_influence)?;
 
     let mut req = GenerateRequest::new(model_api_key(args.model.as_ref(), config), "custom");
-    if let (Some(lyrics), false) = (lyrics, args.instrumental) {
+    if let Some(lyrics) = lyrics {
         req.prompt = lyrics;
     }
     req.title = Some(args.title.clone().unwrap_or_default());
@@ -536,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn instrumental_generate_request_omits_custom_lyrics_fields() {
+    fn instrumental_generate_request_rejects_custom_lyrics() {
         let args = crate::cli::GenerateArgs {
             title: Some("Morning Reset".into()),
             tags: Some("city pop".into()),
@@ -556,21 +559,47 @@ mod tests {
         };
         let config = config_with_default_model("chirp-crow");
 
-        let req = build_generate_request(&args, &config).expect("request");
+        let error = build_generate_request(&args, &config).expect_err("conflicting inputs");
 
+        assert!(
+            error
+                .to_string()
+                .contains("--instrumental cannot be combined with --lyrics or --lyrics-file")
+        );
+    }
+
+    #[test]
+    fn bracketed_instrumental_structure_uses_custom_lyrics_contract() {
+        let structure = "[Instrumental]\n[Intro — sparse felt piano]\n[Build — strings accelerate]";
+        let args = crate::cli::GenerateArgs {
+            title: Some("Structured Score".into()),
+            tags: Some("cinematic orchestral".into()),
+            exclude: Some("vocals, spoken word".into()),
+            lyrics: Some(structure.into()),
+            lyrics_file: None,
+            model: None,
+            vocal: None,
+            weirdness: None,
+            style_influence: None,
+            enhance_tags: false,
+            instrumental: false,
+            token: None,
+            captcha: false,
+            no_captcha: false,
+            persona: None,
+        };
+
+        let req = build_generate_request(&args, &AppConfig::default()).expect("request");
         let body = serde_json::to_value(req).expect("request json");
-        assert_eq!(body["prompt"], "");
+
+        assert_eq!(body["prompt"], structure);
+        assert_eq!(body["make_instrumental"], false);
+        assert_eq!(body["metadata"]["create_mode"], "custom");
         assert!(
             !body
                 .as_object()
                 .expect("object")
                 .contains_key("gpt_description_prompt")
-        );
-        assert!(
-            !body["metadata"]
-                .as_object()
-                .expect("metadata object")
-                .contains_key("lyrics_model")
         );
     }
 
