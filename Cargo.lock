@@ -3430,6 +3430,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rookie",
  "rusqlite",
+ "self-replace",
  "self_update",
  "serde",
  "serde_json",

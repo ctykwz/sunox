@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- Fall back to GitHub's release redirect and checksum-verified release assets when anonymous GitHub API access is rate-limited or denied during `sunox update`.
+
 ## [0.0.23] - 2026-07-20
 
 ### Fixed
