@@ -80,6 +80,24 @@ sunox create \
   --style-influence 70
 ```
 
+### 纯音乐输入模式
+
+两种模式只能选一种；`--instrumental` 不能和 `--lyrics` 或 `--lyrics-file` 同时使用：
+
+- 只要求无人声、不需要控制内部段落时，单独使用 `--instrumental`。
+- 需要控制段落、节奏、剪辑点或配器时，不要传 `--instrumental`，改用结构化歌词文件。
+  第一行写 `[Instrumental]`，其余非空行全部放在方括号中，不能留下任何可能被唱出的正文。
+
+```text
+[Instrumental]
+[Intro — sparse felt piano, free time]
+[Build — strings enter and the pulse accelerates]
+[Final cut — hard unresolved ending]
+```
+
+Clip 完成后，用 `sunox clip timed-lyrics <clip_id> --json` 做人声质量门禁。只要出现一个
+`success=true` 且内容非空的对齐词，就淘汰该生成版本。
+
 一次生成通常会返回两个 Clip ID。先等待生成结束，再下载想保留的版本：
 
 ```bash
@@ -172,6 +190,12 @@ sunox install-browser-extension --force
 （始终使用临时浏览器）。单次命令可使用 `-c challenge_browser=existing`。`existing` 模式下，
 扩展未连接或版本过旧会直接报错，不会打开其他浏览器；`auto` 模式在没有 Suno 页面响应时
 仍可能启动独立浏览器兜底。
+
+无人值守且绝对不能新开窗口时，以“本机已确认安装 Browser Bridge”作为命令选择边界：
+已安装就去掉 `--no-captcha`，并使用 `-c challenge_browser=existing`；该模式会自行确认是否有
+刷新过的登录态 Suno 页面在线，未连接时直接失败，绝不会新开浏览器。未安装或无法确认是否
+安装时，保留 `--no-captcha`，遇到挑战会在提交前停止。仅仅在默认 `auto` 模式下去掉
+`--no-captcha`，仍然允许 Sunox 启动独立浏览器兜底。
 
 ## JSON 与自动化
 

@@ -84,6 +84,20 @@ sunox create \
   --style-influence 70
 ```
 
+### Modes instrumentaux
+
+Choisissez un seul mode. `--instrumental` ne peut pas être combiné avec `--lyrics` ou
+`--lyrics-file` :
+
+- Pour un instrumental sans paroles et sans structure interne imposée, utilisez uniquement
+  `--instrumental`.
+- Pour contrôler les sections, le rythme, les points de montage ou l'arrangement, omettez
+  `--instrumental` et utilisez un fichier dont la première ligne est `[Instrumental]`. Toutes les
+  autres lignes non vides doivent rester entre crochets, sans texte susceptible d'être chanté.
+
+Après la génération, exécutez `sunox clip timed-lyrics <clip_id> --json`. Écartez la version si une
+seule entrée contient un mot aligné non vide avec `success=true`.
+
 Une génération renvoie normalement deux identifiants de clip. Attendez leur achèvement avant de
 télécharger les versions qui vous intéressent :
 
@@ -164,6 +178,12 @@ supprimez pas le dossier affiché tant que Chrome utilise l'extension.
 `challenge_browser` accepte `auto`, `existing` (aucune nouvelle fenêtre) ou `isolated`. Le mode
 `existing` renvoie une erreur si le Bridge ne répond pas ; `auto` peut ouvrir le navigateur isolé
 de secours.
+
+Pour une exécution sans surveillance qui ne doit jamais ouvrir une nouvelle fenêtre, prenez
+l'installation confirmée de Browser Bridge comme critère : s'il est installé, retirez
+`--no-captcha` et utilisez `-c challenge_browser=existing`. Ce mode vérifie lui-même la connexion
+d'un onglet Suno authentifié et actualisé, et échoue sans ouvrir un autre navigateur si nécessaire.
+S'il n'est pas installé ou si son installation est inconnue, conservez `--no-captcha`.
 
 ## JSON et automatisation
 

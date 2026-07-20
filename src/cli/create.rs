@@ -22,7 +22,8 @@ pub struct CreateArgs {
     #[arg(short, long, conflicts_with = "lyrics_file")]
     pub lyrics: Option<String>,
 
-    /// Read lyrics from file
+    /// Read custom lyrics or bracketed instrumental structure from file. Use
+    /// without --instrumental so the structure is sent to the model.
     #[arg(long)]
     pub lyrics_file: Option<String>,
 
@@ -46,8 +47,9 @@ pub struct CreateArgs {
     #[arg(long)]
     pub enhance_tags: bool,
 
-    /// Generate instrumental only
-    #[arg(long)]
+    /// Generate without lyrics. For bracketed instrumental structure, use
+    /// --lyrics or --lyrics-file without this flag.
+    #[arg(long, conflicts_with_all = ["lyrics", "lyrics_file"])]
     pub instrumental: bool,
 
     /// Challenge token (overrides the built-in solver)
@@ -85,7 +87,8 @@ pub struct GenerateArgs {
     #[arg(short, long, conflicts_with = "lyrics_file")]
     pub lyrics: Option<String>,
 
-    /// Read lyrics from file
+    /// Read custom lyrics or bracketed instrumental structure from file. Use
+    /// without --instrumental so the structure is sent to the model.
     #[arg(long)]
     pub lyrics_file: Option<String>,
 
@@ -109,8 +112,9 @@ pub struct GenerateArgs {
     #[arg(long)]
     pub enhance_tags: bool,
 
-    /// Generate instrumental only (no vocals)
-    #[arg(long)]
+    /// Generate without lyrics. For bracketed instrumental structure, use
+    /// --lyrics or --lyrics-file without this flag.
+    #[arg(long, conflicts_with_all = ["lyrics", "lyrics_file"])]
     pub instrumental: bool,
 
     /// Challenge token (overrides the built-in solver)

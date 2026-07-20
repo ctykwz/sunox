@@ -82,12 +82,48 @@ Risk control defaults for agents:
   unless the user explicitly asks. `clip purge` and `clip empty-trash` are
   irreversible. When explicitly requested, pass `-y/--yes` because destructive
   commands require it.
-- allow the normal challenge preflight to run automatic browser verification
-  when Suno requires it. `challenge_browser=auto` prefers a paired existing
-  Suno tab and falls back to an isolated browser. Do not force `--captcha`
-  unless the user asks, and prefer an externally supplied `--token` when provided.
+- for unattended generation that must not open a new window, use the Browser
+  Bridge installation as the command-selection boundary. When installation has
+  been confirmed on the current machine, omit `--no-captcha` and use
+  `-c challenge_browser=existing`; that mode itself verifies that a refreshed,
+  authenticated `suno.com` tab is connected and fails closed when it is not.
+  When the bridge is not installed or installation is unknown, keep
+  `--no-captcha` so a required challenge stops before submission. The default
+  `challenge_browser=auto` may open an isolated browser when no paired tab responds.
+  Do not force `--captcha` unless the user asks, and prefer an externally supplied
+  `--token` when provided.
 - never print or commit cookies, Clerk values, JWTs, challenge tokens, or other
   auth material.
+
+## Instrumental input modes
+
+Choose exactly one mode; Sunox rejects combinations instead of silently dropping
+the lyrics input:
+
+- For an unconstrained no-lyrics instrumental, use `--instrumental` without
+  `--lyrics` or `--lyrics-file`.
+- For controlled sections, rhythm, edit points, or arrangement, omit
+  `--instrumental` and use `--lyrics-file`. The first line must be
+  `[Instrumental]`; keep every remaining non-empty line inside square brackets so
+  there is no singable body text.
+
+```text
+[Instrumental]
+[Intro — sparse felt piano, free time]
+[Build — strings enter and the pulse accelerates]
+[Final cut — hard unresolved ending]
+```
+
+After generation completes, inspect every candidate before downstream selection:
+
+```bash
+sunox clip wait <clip_id> --json
+sunox clip timed-lyrics <clip_id> --json
+```
+
+If timed lyrics contain any entry with `success=true` and a non-empty aligned
+`word`, reject that generated version. Do not publish, download as a selected
+result, or add it to a playlist; do not delete it unless the user explicitly asks.
 
 Treat commands that return new or processing clips as asynchronous workflows.
 After `sunox create`, `sunox clip inspire`, `sunox clip cover`, `sunox clip extend`, `sunox clip
@@ -266,7 +302,7 @@ sunox config set output_dir ./songs
 | `--title` | Song title | ≤ 100 chars |
 | `--tags` | Style direction | Read `max_lengths.tags` from `sunox models --json` |
 | `--exclude` | Styles to avoid | Read `max_lengths.negative_tags` from `sunox models --json` |
-| `--lyrics` / `--lyrics-file` | Custom lyrics with `[Verse]` `[Chorus]` tags | Read `max_lengths.prompt` |
+| `--lyrics` / `--lyrics-file` | Custom lyrics, or bracket-only structure beginning with `[Instrumental]` | Read `max_lengths.prompt`; conflicts with `--instrumental` |
 | `--prompt` (describe mode) | Free-text description | Read `max_lengths.gpt_description_prompt` |
 | `--model` | Model version | account default when omitted; v5.5, v5, v4.5+, v4.5-all, v4.5, v4 |
 | `--vocal` | Vocal gender | male, female; custom mode uses Web's `metadata.vocal_gender` |
@@ -274,7 +310,7 @@ sunox config set output_dir ./songs
 | `--weirdness` | How experimental | 0–100 |
 | `--style-influence` | How strictly to follow tags | 0–100 |
 | `--enhance-tags` | Call Suno's tag upsample flow before submit | explicit opt-in |
-| `--instrumental` | No vocals | flag |
+| `--instrumental` | Unconstrained no-lyrics instrumental | conflicts with `--lyrics` and `--lyrics-file` |
 | `--token` | Externally supplied challenge token | only when Suno challenges the request |
 | `--captcha` | Force browser-backed challenge verification | runs even when preflight says unnecessary |
 | `--no-captcha` | Disable automatic browser verification | challenge preflight still runs |
