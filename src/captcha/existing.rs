@@ -21,7 +21,7 @@ use crate::core::CliError;
 
 const ACTIVE_TAB_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
 const BACKGROUND_TAB_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(27);
-const COMPLETION_TIMEOUT: Duration = Duration::from_secs(35);
+const COMPLETION_TIMEOUT: Duration = Duration::from_secs(60);
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_REQUEST_BYTES: usize = 24 * 1024;
 const CLAIM_PENDING: u8 = 0;
@@ -156,7 +156,7 @@ pub(super) async fn try_solve(provider: ChallengeProvider) -> Result<Option<Stri
     }
 
     eprintln!(
-        "Using the connected Suno browser tab for silent challenge verification (bridge port {port})..."
+        "Using the Browser Bridge managed Chrome context for silent challenge verification (bridge port {port})..."
     );
     let result = timeout(COMPLETION_TIMEOUT, result_receiver).await;
     cancellation.cancel();
@@ -165,15 +165,19 @@ pub(super) async fn try_solve(provider: ChallengeProvider) -> Result<Option<Stri
     match result {
         Ok(Ok(BridgeResult::Token(token))) => Ok(Some(token)),
         Ok(Ok(BridgeResult::Error(error))) => Err(CliError::Config(format!(
-            "existing browser challenge failed: {error}"
+            "Browser Bridge challenge failed: {error}"
         ))),
         Ok(Err(_)) => Err(CliError::Config(
-            "existing browser challenge bridge closed before returning a result".into(),
+            "Browser Bridge closed before returning a challenge result".into(),
         )),
         Err(_) => Err(CliError::Config(
-            "existing browser challenge timed out after 35 seconds".into(),
+            "Browser Bridge challenge timed out after 60 seconds".into(),
         )),
     }
+}
+
+pub(super) fn is_configured() -> Result<bool, CliError> {
+    Ok(browser_extension::bridge_secret()?.is_some())
 }
 
 async fn bind_bridge_listener() -> Result<(TcpListener, u16), CliError> {
@@ -197,7 +201,7 @@ async fn wait_for_claim(state: &BridgeState) -> bool {
     if wait_for_claim_signal(state, ACTIVE_TAB_DISCOVERY_TIMEOUT).await {
         return true;
     }
-    eprintln!("Waiting for the Chrome extension to wake a background Suno tab...");
+    eprintln!("Waiting for the Chrome extension's hidden challenge context...");
     let _ = wait_for_claim_signal(state, BACKGROUND_TAB_DISCOVERY_TIMEOUT).await;
     close_discovery(state)
 }

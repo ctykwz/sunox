@@ -158,8 +158,13 @@ Run `sunox --help` or `sunox <command> --help` for the complete set of options.
 Before a generation-backed request, Sunox calls Suno's generation challenge check. When no
 challenge is required, it submits directly and does not launch a browser. When Suno requires a
 challenge, Sunox first asks the optional Browser Bridge extension to execute the invisible widget
-inside an existing `suno.com` tab. If no paired tab responds, the default `auto` mode falls back to
-the matching installed Chromium-family browser and closes its temporary profile afterward.
+inside the user's regular Chrome profile. The extension maintains an invisible listener and creates
+a non-focused, screen-outside Suno popup only when verification needs a real top-level
+`suno.com` page. It reuses that private context for 20 minutes, then closes it. Users do not need to
+open or retain a Suno tab. If the bridge does not respond, the default `auto` mode falls back to the
+matching installed Chromium-family browser only when no Bridge pairing is configured. Once the
+Bridge has been installed, `auto` fails closed instead of launching a separate browser process.
+Use `challenge_browser=isolated` explicitly when that separate fallback is acceptable.
 
 ### Install the Browser Bridge on macOS or Windows
 
@@ -177,7 +182,7 @@ sunox install-browser-extension
    Sunox. On macOS, press `Shift+Command+G` in the folder picker and paste the printed path because
    `~/Library` is hidden by default. On Windows, paste the printed path into the folder picker's
    address bar.
-4. Keep the extension enabled, then open or reload an authenticated `https://suno.com` tab.
+4. Keep the extension enabled. No Suno tab needs to remain open.
 
 The extension stays installed across browser restarts. After a Sunox update that changes the
 bridge, refresh its files and reload it in Chrome:
@@ -186,9 +191,9 @@ bridge, refresh its files and reload it in Chrome:
 sunox install-browser-extension --force
 ```
 
-Then click **Reload** on the Sunox Browser Bridge card and reload the Suno tab. The command chooses
-the correct per-user application directory on both macOS and Windows; do not move or delete that
-directory while Chrome is using the unpacked extension.
+Then click **Reload** on the Sunox Browser Bridge card. No Suno page reload is needed. The command
+chooses the correct per-user application directory on both macOS and Windows; do not move or delete
+that directory while Chrome is using the unpacked extension.
 
 The relevant overrides are:
 
@@ -198,25 +203,30 @@ The relevant overrides are:
 --token <token>    Submit an externally solved challenge token
 ```
 
-Set `challenge_browser` to `auto` (default), `existing` (never open a new browser), or `isolated`
-(always use the temporary browser). A one-command override looks like
-`-c challenge_browser=existing`. In `existing` mode, a missing or stale bridge is reported as an
-error instead of opening another browser. In `auto` mode, Sunox may open the isolated fallback when
-no connected Suno tab responds.
+Set `challenge_browser` to `auto` (default), `existing` (require the Bridge and never launch a
+separate browser process), or `isolated` (always use the temporary browser). A one-command override
+looks like `-c challenge_browser=existing`. The `existing` name is retained for configuration
+compatibility; it now means “use the installed Bridge in the existing Chrome profile.” The Bridge
+manages its own screen-outside Suno context, so no user-visible tab is required. A missing or stale
+bridge is reported as an error instead of opening another browser. In `auto` mode, Sunox may open
+the isolated fallback only when no Bridge pairing is configured. An installed Bridge that is
+disabled, stale, or unreachable fails closed; use `isolated` explicitly to allow a separate browser
+process.
 
-For unattended runs that must never open a new window, use confirmed Browser Bridge installation
-as the command-selection boundary. When it is installed, omit `--no-captcha` and use
-`-c challenge_browser=existing`; that mode verifies that a refreshed, authenticated Suno tab is
-connected and fails without opening another browser when it is not. If the bridge is not installed
-or installation is unknown, keep `--no-captcha`; a required challenge will then stop before
-submission. Merely omitting `--no-captcha` in the default `auto` mode still allows the
-isolated-browser fallback.
+For unattended runs that must not add a Suno tab to the active browser window or launch a separate
+browser process, install the Browser Bridge and omit `--no-captcha`. Both `auto` and
+`challenge_browser=existing` then fail closed when the Bridge is unavailable; `existing` additionally
+requires the Bridge even when no pairing has been configured. If the Bridge is not installed or
+installation is unknown, keep `--no-captcha`; a required challenge will then stop before submission.
+Without a configured Bridge, merely omitting `--no-captcha` in the default `auto` mode still allows
+the isolated-browser fallback.
 
-Installing the Bridge is standing permission for Sunox to execute invisible challenges in that
-existing tab; it does not require separate permission for every generation. Requests such as “no
-popup”, “no new browser”, or “no visible captcha” mean `challenge_browser=existing`, not
-`--no-captcha`. Keep `--no-captcha` despite an installed Bridge only when every challenge mechanism,
-including the invisible Bridge, is explicitly forbidden or that exact flag is requested.
+Installing the Bridge is standing permission for Sunox to execute invisible challenges in its
+managed hidden context; it does not require separate permission for every generation. Requests such
+as “no popup”, “no new browser”, or “no visible captcha” allow the installed Bridge and do not mean
+`--no-captcha`; `challenge_browser=existing` remains the explicit Bridge-only override. Keep
+`--no-captcha` despite an installed Bridge only when every challenge mechanism, including the
+invisible Bridge, is explicitly forbidden or that exact flag is requested.
 
 ## JSON output and automation
 

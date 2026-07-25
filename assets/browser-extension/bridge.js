@@ -2,7 +2,6 @@
   if (globalThis.__sunoxBridgeContentLoaded) return;
   globalThis.__sunoxBridgeContentLoaded = true;
 
-  const clientId = crypto.randomUUID();
   let busy = false;
 
   function executeInPage(challenge) {
@@ -30,39 +29,26 @@
     });
   }
 
-  async function poll() {
-    if (busy || location.hostname !== "suno.com") return false;
+  async function execute(challenge) {
+    if (busy || location.hostname !== "suno.com") {
+      return { token: null, error: "Managed Suno page is busy or unavailable" };
+    }
     busy = true;
     try {
-      const challenge = await chrome.runtime.sendMessage({
-        type: "sunox-claim",
-        clientId,
-        pageUrl: location.href
-      });
-      if (!challenge) return false;
-
-      const result = await executeInPage(challenge);
-      await chrome.runtime.sendMessage({
-        type: "sunox-result",
-        transportReceipt: challenge.transportReceipt,
-        requestId: challenge.requestId,
-        token: result.token,
-        error: result.error
-      });
-      return true;
-    } catch {
-      // The CLI listener is normally absent. Polling failures are expected.
-      return false;
+      return await executeInPage(challenge);
+    } catch (error) {
+      return {
+        token: null,
+        error: error instanceof Error ? error.message : String(error)
+      };
     } finally {
       busy = false;
     }
   }
 
-  poll();
-  setInterval(poll, 750);
-  chrome.runtime.onMessage.addListener((message) => {
-    if (message?.type !== "sunox-wake") return false;
-    poll();
-    return false;
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type !== "sunox-execute") return false;
+    execute(message.challenge).then(sendResponse);
+    return true;
   });
 })();

@@ -82,21 +82,25 @@ Risk control defaults for agents:
   unless the user explicitly asks. `clip purge` and `clip empty-trash` are
   irreversible. When explicitly requested, pass `-y/--yes` because destructive
   commands require it.
-- for unattended generation that must not open a new window, use the Browser
-  Bridge installation as the command-selection boundary. When installation has
-  been confirmed on the current machine, omit `--no-captcha` and use
-  `-c challenge_browser=existing`; that mode itself verifies that a refreshed,
-  authenticated `suno.com` tab is connected and fails closed when it is not.
+- for unattended generation that must not add a Suno tab to the active browser
+  window or launch a separate browser process, use the Browser Bridge installation
+  as the command-selection boundary. When installation has been confirmed on the
+  current machine, omit `--no-captcha`; both `challenge_browser=auto` and
+  `challenge_browser=existing` then use the installed extension's managed hidden
+  Suno context and fail closed when the Bridge is unavailable.
   Confirmed installation is standing permission to run invisible challenges
-  through that existing tab; do not ask for per-run captcha permission. Interpret
+  through that managed context; do not ask for per-run captcha permission. Interpret
   "no popup", "no new browser", "no visible captcha", and equivalent requests as
-  requiring `challenge_browser=existing`, not `--no-captcha`. Use `--no-captcha`
+  allowing the installed Bridge, not as `--no-captcha`; `challenge_browser=existing`
+  remains the explicit Bridge-only override. Use `--no-captcha`
   despite an installed bridge only when the user explicitly forbids every
   challenge mechanism, including the invisible Browser Bridge, or explicitly
   requests that flag.
   When the bridge is not installed or installation is unknown, keep
   `--no-captcha` so a required challenge stops before submission. The default
-  `challenge_browser=auto` may open an isolated browser when no paired tab responds.
+  `challenge_browser=auto` may open an isolated browser only when no Bridge pairing
+  is configured. Use `challenge_browser=isolated` explicitly when a separate
+  challenge browser is acceptable.
   Do not force `--captcha` unless the user asks, and prefer an externally supplied
   `--token` when provided.
 - never print or commit cookies, Clerk values, JWTs, challenge tokens, or other
@@ -433,7 +437,7 @@ sunox clip download $ids --output ./archive/
   response; `personalization_enabled` follows the captured submit shape. The
   submit also marks `override_fields=["tags"]`. Vocal requests pass current
   custom lyrics as upsample context; instrumental requests omit lyrics.
-- Commands that submit through `/api/generate/v2-web/` preflight `POST /api/c/check` with `ctype=generation`; if Suno reports a challenge and stored Clerk refresh material exists, Sunox refreshes the JWT once and repeats the preflight. When a challenge remains, `challenge_browser=auto` first uses the paired Browser Bridge in an existing Suno tab and falls back to the matching isolated browser. hCaptcha uses provider 1 and Cloudflare Turnstile uses provider 2 according to `captcha_version`. Install or update the optional bridge with `sunox install-browser-extension --force`; never install or reload a browser extension without the user's authorization. When no challenge is required, submit uses `token=null` and `token_provider=null`.
+- Commands that submit through `/api/generate/v2-web/` preflight `POST /api/c/check` with `ctype=generation`; if Suno reports a challenge and stored Clerk refresh material exists, Sunox refreshes the JWT once and repeats the preflight. When a challenge remains, `challenge_browser=auto` first uses the paired Browser Bridge, which manages a hidden Suno context in the user's Chrome profile without requiring a visible tab. If a Bridge pairing is configured but unavailable, `auto` fails closed; it falls back to the matching isolated browser only when no Bridge pairing exists. hCaptcha uses provider 1 and Cloudflare Turnstile uses provider 2 according to `captcha_version`. Install or update the optional bridge with `sunox install-browser-extension --force`; never install or reload a browser extension without the user's authorization. When no challenge is required, submit uses `token=null` and `token_provider=null`.
 - Prefer `--token <solved>` when an external token is already available. Use `--captcha` only to force verification even when preflight says it is unnecessary, or `--no-captcha` to disable automatic browser verification.
 - Generation paths (normal, describe, voice persona, inspiration, cover, extend, generation-backed stems) use `/api/generate/v2-web/`; create, inspire, cover, extend, and stems expose `--token`, `--captcha`, and `--no-captcha`. Source-dependent commands read clips through the current `GET /api/clip/{id}` route; multi-clip polling uses feed/v3 exact-ID filters. Cover uses `task=cover`, `metadata.create_mode=custom`, and the source title. Inspiration uses one source clip and the live-captured playlist-conditioned request; do not invent uncaptured instrumental or multi-source inputs. Extend sets `metadata.lyrics_updated` only when replacement lyrics were supplied and uses feed/v3 exact-id metadata enrichment only when the current single-clip response lacks source style metadata. It defaults `title`, `tags`, `negative_tags`, and `make_instrumental` from the source when available; use `--title`, `--tags`, `--exclude`, `--instrumental`, or `--no-instrumental` to override. Timed lyrics use the current v3 start/poll contract; v2 is compatibility fallback only. Remaster and speed use their current web edit/generation routes. `sunox clip list` supports query-only filters such as `--liked`, `--public`, `--upload`, `--cover`, `--extend`, and `--sort popular`; this is not a library sync workflow. The production-live similar-song and lyrics-only service endpoints remain supplemental because the current Web bundle has no behaviorally equivalent replacement. `sunox clip stems` is not the same as Suno Web Pro Get Stems export. You usually only need the subcommands.
 - Persona list/detail/clips/create/set/processed-clip/publish/unpublish/love/unlove/toggle-love/delete/restore/purge are available through `sunox persona ...`.

@@ -70,6 +70,10 @@ fn browser_extension_installer_extracts_a_paired_unpacked_extension() {
 
     assert!(extension_path.join("manifest.json").is_file());
     assert!(extension_path.join("transport-loopback.js").is_file());
+    assert!(extension_path.join("shared.js").is_file());
+    assert!(extension_path.join("offscreen.html").is_file());
+    assert!(extension_path.join("offscreen.js").is_file());
+    assert!(extension_path.join("poll-worker.js").is_file());
     assert!(extension_path.join("icons/icon-16.png").is_file());
     assert!(extension_path.join("icons/icon-32.png").is_file());
     assert!(extension_path.join("icons/icon-48.png").is_file());
@@ -591,12 +595,12 @@ fn install_skill_prints_current_generation_guidance() {
         .stdout(predicate::str::contains("The first line must be"))
         .stdout(predicate::str::contains("[Instrumental]"))
         .stdout(predicate::str::contains("success=true"))
-        .stdout(predicate::str::contains("-c challenge_browser=existing"))
+        .stdout(predicate::str::contains("challenge_browser=existing"))
         .stdout(predicate::str::contains(
             "Confirmed installation is standing permission to run invisible challenges",
         ))
         .stdout(predicate::str::contains(
-            "requiring `challenge_browser=existing`, not `--no-captcha`",
+            "allowing the installed Bridge, not as `--no-captcha`",
         ))
         .stdout(predicate::str::contains("simple audio analysis"))
         .stdout(predicate::str::contains("--format mp3|m4a|wav|opus"))
@@ -1091,7 +1095,9 @@ fn agent_info_reports_automatic_versioned_challenge_verification() {
         ))
         .stdout(predicate::str::contains("hCaptcha/provider 1"))
         .stdout(predicate::str::contains("Turnstile/provider 2"))
-        .stdout(predicate::str::contains("matching recorded browser source"))
+        .stdout(predicate::str::contains(
+            "only when no Bridge pairing exists",
+        ))
         .stdout(predicate::str::contains("challenge_browser=auto"))
         .stdout(predicate::str::contains(
             "--instrumental conflicts with --lyrics and --lyrics-file",
@@ -1106,7 +1112,7 @@ fn agent_info_reports_automatic_versioned_challenge_verification() {
             "Confirmed installation is standing permission for invisible challenges",
         ))
         .stdout(predicate::str::contains(
-            "Interpret no popup, no new browser, or no visible captcha as challenge_browser=existing, not --no-captcha",
+            "Interpret no popup, no new browser, or no visible captcha as allowing the invisible Bridge, not as --no-captcha",
         ))
         .stdout(predicate::str::contains(
             "any successful non-empty aligned word rejects",

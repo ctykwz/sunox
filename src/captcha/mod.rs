@@ -22,18 +22,19 @@ pub async fn solve(
     mode: ChallengeBrowserMode,
 ) -> Result<String, CliError> {
     if mode != ChallengeBrowserMode::Isolated {
+        let bridge_configured = existing::is_configured()?;
         match existing::try_solve(provider).await {
             Ok(Some(token)) => return Ok(token),
-            Ok(None) if mode == ChallengeBrowserMode::Existing => {
+            Ok(None) if bridge_failure_is_terminal(mode, bridge_configured) => {
                 return Err(CliError::Config(
-                    "no connected Suno browser tab was found; install or update the bridge with `sunox install-browser-extension --force`, load it in Chrome, and reload suno.com"
+                    "the configured Sunox Browser Bridge did not respond; load or reload it in Chrome and keep the extension enabled. Use `-c challenge_browser=isolated` only when a separate challenge browser is acceptable"
                         .into(),
                 ));
             }
             Ok(None) => {}
-            Err(error) if mode == ChallengeBrowserMode::Existing => return Err(error),
+            Err(error) if bridge_failure_is_terminal(mode, bridge_configured) => return Err(error),
             Err(error) => eprintln!(
-                "Warning: silent verification in the existing browser was unavailable ({error}); falling back to an isolated browser"
+                "Warning: silent Browser Bridge verification was unavailable ({error}); falling back to an isolated browser"
             ),
         }
     }
@@ -52,6 +53,38 @@ pub async fn solve(
     }
 }
 
+fn bridge_failure_is_terminal(mode: ChallengeBrowserMode, bridge_configured: bool) -> bool {
+    mode == ChallengeBrowserMode::Existing
+        || (mode == ChallengeBrowserMode::Auto && bridge_configured)
+}
+
 pub(crate) fn delete_legacy_browser_profile() -> Result<(), CliError> {
     browser::delete_legacy_profile()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bridge_failure_is_terminal;
+    use crate::core::ChallengeBrowserMode;
+
+    #[test]
+    fn configured_bridge_fails_closed_in_auto_mode() {
+        assert!(bridge_failure_is_terminal(ChallengeBrowserMode::Auto, true));
+        assert!(!bridge_failure_is_terminal(
+            ChallengeBrowserMode::Auto,
+            false
+        ));
+    }
+
+    #[test]
+    fn explicit_modes_keep_their_strict_browser_policy() {
+        assert!(bridge_failure_is_terminal(
+            ChallengeBrowserMode::Existing,
+            false
+        ));
+        assert!(!bridge_failure_is_terminal(
+            ChallengeBrowserMode::Isolated,
+            true
+        ));
+    }
 }
