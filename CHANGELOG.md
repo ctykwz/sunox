@@ -11,6 +11,14 @@ backward-compatible features, upstream protocol adaptations, and fixes.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-26
+
+### Fixed
+
+- Granted the unpacked Browser Bridge Chrome's DNR feedback permission so Chrome can inspect its
+  hidden-frame response-header rule without recording `REAL_MATCH_ERROR`; the rule and host access
+  remain restricted to the managed `https://suno.com/create` subframe.
+
 ## [0.1.0] - 2026-07-26
 
 ### Changed

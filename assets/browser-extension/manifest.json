@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Sunox Browser Bridge",
   "description": "Runs Suno generation challenges in an invisible browser context for the Sunox CLI.",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "version_name": "__SUNOX_VERSION__",
   "minimum_chrome_version": "120",
   "icons": {
@@ -13,6 +13,7 @@
   },
   "permissions": [
     "alarms",
+    "declarativeNetRequestFeedback",
     "declarativeNetRequestWithHostAccess",
     "offscreen"
   ],
