@@ -1,7 +1,7 @@
 use super::SunoClient;
 use super::types::{
-    Clip, ClipAttribution, ClipComments, ClipInfo, ClipInfoSupplementalError,
-    DirectChildrenCountResponse, SimilarClipsResponse,
+    Clip, ClipAttribution, ClipComments, ClipInfo, ClipInfoSupplementalError, RemixCountResponse,
+    SimilarClipsResponse,
 };
 use crate::core::CliError;
 
@@ -35,18 +35,17 @@ impl SunoClient {
         .await
     }
 
-    /// Fetch the number of direct children derived from a clip.
-    /// GET /api/clips/direct_children_count?clip_id={clip_id}
-    pub async fn direct_children_count(&self, clip_id: &str) -> Result<u64, CliError> {
+    /// Fetch the remix count shown on the current Suno song page.
+    /// GET /api/clips/remixes/count?clip_id={clip_id}
+    pub async fn remix_count(&self, clip_id: &str) -> Result<RemixCountResponse, CliError> {
         self.with_auth_retry(|| async {
             let resp = self
-                .get("/api/clips/direct_children_count")
+                .get("/api/clips/remixes/count")
                 .query(&[("clip_id", clip_id)])
                 .send()
                 .await?;
             let resp = self.check_response(resp).await?;
-            let body: DirectChildrenCountResponse = resp.json().await?;
-            Ok(body.count)
+            Ok(resp.json().await?)
         })
         .await
     }
@@ -91,14 +90,14 @@ impl SunoClient {
                 ClipComments::default()
             }
         };
-        let direct_children_count = match self.direct_children_count(clip_id).await {
+        let remix_count = match self.remix_count(clip_id).await {
             Ok(value) => value,
             Err(error) => {
                 if should_abort_supplemental_error(&error) {
                     return Err(error);
                 }
-                supplemental_errors.push(supplemental_error("direct_children_count", error));
-                0
+                supplemental_errors.push(supplemental_error("remix_count", error));
+                RemixCountResponse::default()
             }
         };
         let similar_clips = match self.similar_clips(clip_id).await {
@@ -115,7 +114,7 @@ impl SunoClient {
             clip,
             attribution,
             comments,
-            direct_children_count,
+            remix_count,
             similar_clips,
             supplemental_errors,
         })

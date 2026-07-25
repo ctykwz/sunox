@@ -23,9 +23,6 @@ pub enum PersonaCommand {
     /// Update voice persona metadata
     Set(PersonaSetArgs),
 
-    /// Show processed vocal clip status
-    ProcessedClip(PersonaProcessedClipArgs),
-
     /// Make a voice persona public
     Publish(PersonaPublishArgs),
 
@@ -180,12 +177,6 @@ pub struct PersonaSetArgs {
     /// Vocal range end in seconds
     #[arg(long)]
     pub vocal_end: Option<f64>,
-}
-
-#[derive(clap::Args)]
-pub struct PersonaProcessedClipArgs {
-    /// Processed clip ID to inspect
-    pub id: String,
 }
 
 #[derive(clap::Args)]

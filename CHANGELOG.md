@@ -5,7 +5,42 @@ All notable changes to Sunox are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+Sunox is pre-1.0. Until its public contracts stabilize, the second number changes when CLI,
+configuration, JSON, or default-behavior compatibility changes; the third number is for
+backward-compatible features, upstream protocol adaptations, and fixes.
+
 ## [Unreleased]
+
+## [0.1.0] - 2026-07-26
+
+### Changed
+
+- Moved Browser Bridge challenge execution into a managed invisible Suno context. Once the
+  extension is paired, generation no longer needs an open Suno tab or a separate browser window,
+  and a missing or stale Bridge fails closed instead of silently changing browser behavior.
+- Made the Browser Bridge card display the bundled Sunox release version while retaining an
+  independent, monotonic extension build version for future browser-store updates.
+- Bumped the Browser Bridge wire protocol so older popup-based extension builds fail closed.
+  After updating Sunox, run `sunox install-browser-extension --force` and click **Reload** on the
+  extension in Chrome.
+- Migrated standalone lyrics generation from the removed submit-and-poll protocol to Suno Web's
+  current synchronous Cowrite Lyrics `apply_user_request` request and response shape.
+- Replaced `clip info`'s obsolete `direct_children_count` read with the current remix count
+  contract. JSON now exposes `remix_count.count` and `remix_count.is_capped`; table output labels
+  the value as `Remixes`.
+- Matched the current Web Turnstile generation lifecycle in both Browser Bridge and isolated
+  browser modes, including interaction-only rendering, recoverable error and timeout callbacks,
+  and separate idle and interactive deadlines.
+
+### Fixed
+
+- Made the isolated browser's CDP response deadline absolute so unrelated page events cannot keep
+  extending a stalled challenge indefinitely.
+
+### Removed
+
+- Removed `sunox persona processed-clip` and its obsolete `GET /api/processed_clip/{id}` contract;
+  current persona details continue to expose the available vocal clip and range fields.
 
 ## [0.0.24] - 2026-07-20
 

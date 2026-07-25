@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
-use tokio::time::timeout;
+use tokio::time::{Instant, timeout_at};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::core::CliError;
@@ -36,6 +36,16 @@ impl CdpSession {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, CliError> {
+        self.call_with_timeout(method, params, Duration::from_secs(60))
+            .await
+    }
+
+    pub(super) async fn call_with_timeout(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        response_timeout: Duration,
+    ) -> Result<serde_json::Value, CliError> {
         self.next_id += 1;
         let id = self.next_id;
         let req = CdpRequest { id, method, params };
@@ -46,8 +56,11 @@ impl CdpSession {
             .await
             .map_err(|e| CliError::Config(format!("CDP ws send {method}: {e}")))?;
 
+        // A busy page can emit unrelated CDP events continuously. Keep one
+        // absolute deadline for the request so those events cannot extend it.
+        let deadline = Instant::now() + response_timeout;
         loop {
-            let msg = timeout(Duration::from_secs(60), self.ws.next())
+            let msg = timeout_at(deadline, self.ws.next())
                 .await
                 .map_err(|_| CliError::Config(format!("CDP {method} timeout")))?
                 .ok_or_else(|| CliError::Config(format!("CDP {method} ws closed")))?
@@ -75,5 +88,56 @@ impl CdpSession {
                     .unwrap_or(serde_json::Value::Null));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::net::TcpListener;
+    use tokio::time::timeout;
+    use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+    use super::CdpSession;
+
+    #[tokio::test]
+    async fn unrelated_events_do_not_extend_the_response_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut websocket = accept_async(stream).await.unwrap();
+            websocket.next().await.unwrap().unwrap();
+
+            loop {
+                websocket
+                    .send(Message::Text(
+                        r#"{"method":"Network.dataReceived","params":{}}"#.into(),
+                    ))
+                    .await
+                    .unwrap();
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+
+        let mut session = CdpSession::connect(&format!("ws://{address}"))
+            .await
+            .unwrap();
+        let result = timeout(
+            Duration::from_millis(250),
+            session.call_with_timeout(
+                "Runtime.evaluate",
+                serde_json::json!({}),
+                Duration::from_millis(40),
+            ),
+        )
+        .await
+        .expect("the absolute CDP deadline was extended by unrelated events");
+
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("CDP Runtime.evaluate timeout"), "{error}");
+        server.abort();
     }
 }

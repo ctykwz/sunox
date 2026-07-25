@@ -158,10 +158,10 @@ Run `sunox --help` or `sunox <command> --help` for the complete set of options.
 Before a generation-backed request, Sunox calls Suno's generation challenge check. When no
 challenge is required, it submits directly and does not launch a browser. When Suno requires a
 challenge, Sunox first asks the optional Browser Bridge extension to execute the invisible widget
-inside the user's regular Chrome profile. The extension maintains an invisible listener and creates
-a non-focused, screen-outside Suno popup only when verification needs a real top-level
-`suno.com` page. It reuses that private context for 20 minutes, then closes it. Users do not need to
-open or retain a Suno tab. If the bridge does not respond, the default `auto` mode falls back to the
+inside the user's regular Chrome profile. The extension maintains an invisible listener and embeds
+an offscreen `suno.com` challenge frame only when verification needs one. It reuses that private
+context for 20 minutes, then removes it. Users do not need to open or retain a Suno tab, and the
+Bridge does not create a browser window. If the bridge does not respond, the default `auto` mode falls back to the
 matching installed Chromium-family browser only when no Bridge pairing is configured. Once the
 Bridge has been installed, `auto` fails closed instead of launching a separate browser process.
 Use `challenge_browser=isolated` explicitly when that separate fallback is acceptable.
@@ -207,7 +207,7 @@ Set `challenge_browser` to `auto` (default), `existing` (require the Bridge and 
 separate browser process), or `isolated` (always use the temporary browser). A one-command override
 looks like `-c challenge_browser=existing`. The `existing` name is retained for configuration
 compatibility; it now means “use the installed Bridge in the existing Chrome profile.” The Bridge
-manages its own screen-outside Suno context, so no user-visible tab is required. A missing or stale
+manages its own offscreen Suno frame, so no browser tab or window is required. A missing or stale
 bridge is reported as an error instead of opening another browser. In `auto` mode, Sunox may open
 the isolated fallback only when no Bridge pairing is configured. An installed Bridge that is
 disabled, stale, or unreachable fails closed; use `isolated` explicitly to allow a separate browser

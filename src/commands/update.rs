@@ -445,10 +445,17 @@ fn ensure_install_directory_writable() -> Result<(), CliError> {
 
 fn output_update_result(current: &str, latest: &str, up_to_date: bool, ctx: &AppContext) {
     let status = if up_to_date { "up_to_date" } else { "updated" };
+    let bridge_configured = !up_to_date
+        && crate::commands::browser_extension::bridge_secret()
+            .ok()
+            .flatten()
+            .is_some();
+    let next_steps = update_next_steps(up_to_date, bridge_configured);
     let result = serde_json::json!({
         "current_version": current,
         "latest_version": latest,
         "status": status,
+        "next_steps": &next_steps,
     });
     match ctx.fmt {
         OutputFormat::Json => output::json::success(&result),
@@ -457,10 +464,25 @@ fn output_update_result(current: &str, latest: &str, up_to_date: bool, ctx: &App
                 eprintln!("Already up to date (v{current})");
             } else {
                 eprintln!("Updated: v{current} -> v{latest}");
-                eprintln!("Run `sunox install-skill --force` to refresh the agent skill");
+                for step in next_steps {
+                    eprintln!("{step}");
+                }
             }
         }
     }
+}
+
+fn update_next_steps(up_to_date: bool, bridge_configured: bool) -> Vec<&'static str> {
+    if up_to_date {
+        return Vec::new();
+    }
+    let mut steps = vec!["Run `sunox install-skill --force` to refresh the agent skill"];
+    if bridge_configured {
+        steps.push(
+            "Run `sunox install-browser-extension --force`, then click Reload on the Sunox Browser Bridge in Chrome",
+        );
+    }
+    steps
 }
 
 fn release_checksum_for_asset(sums: &str, asset_name: &str) -> Result<String, CliError> {
@@ -529,9 +551,20 @@ mod tests {
         MAX_EXTRACTED_BINARY_BYTES, download_and_extract_web_release, download_limited,
         download_limited_with_idle_timeout, latest_release_tag, release_asset_name,
         release_checksum_for_asset, release_tag_from_url, replace_file_with_rollback,
-        update_available, validate_binary_size, validate_extracted_binary_size,
+        update_available, update_next_steps, validate_binary_size, validate_extracted_binary_size,
         verify_release_checksum,
     };
+
+    #[test]
+    fn successful_update_steps_refresh_a_configured_browser_bridge() {
+        assert!(update_next_steps(true, true).is_empty());
+        assert_eq!(update_next_steps(false, false).len(), 1);
+
+        let steps = update_next_steps(false, true);
+        assert_eq!(steps.len(), 2);
+        assert!(steps[1].contains("install-browser-extension --force"));
+        assert!(steps[1].contains("click Reload"));
+    }
 
     #[test]
     fn release_checksum_selects_the_exact_platform_asset() {

@@ -201,7 +201,7 @@ fn build_describe_request(
     let mut req = GenerateRequest::new(model_api_key(args.model.as_ref(), config), "simple");
     req.gpt_description_prompt = Some(args.prompt.clone());
     req.metadata.lyrics_model = Some("default".into());
-    req.title = Some(args.title.clone().unwrap_or_default());
+    req.title = args.title.clone();
     req.tags = tags;
     req.negative_tags = args.exclude.clone().unwrap_or_default();
     req.make_instrumental = args.instrumental;
@@ -335,14 +335,19 @@ mod tests {
     }
 
     #[test]
-    fn describe_request_sends_empty_title_by_default() {
+    fn describe_request_omits_title_by_default() {
         let config = AppConfig::default();
 
         let req = build_describe_request(&describe_args(None, Some(ModelVersion::V55)), &config)
             .expect("request");
 
         let body = serde_json::to_value(req).expect("request json");
-        assert_eq!(body["title"], "");
+        assert!(
+            !body
+                .as_object()
+                .expect("request object")
+                .contains_key("title")
+        );
         assert_eq!(body["metadata"]["create_mode"], "simple");
         assert_eq!(
             body["gpt_description_prompt"],
@@ -365,6 +370,21 @@ mod tests {
 
         let body = serde_json::to_value(req).expect("request json");
         assert_eq!(body["title"], "Morning Reset");
+    }
+
+    #[test]
+    fn describe_request_omits_unspecified_title_and_tags() {
+        let config = AppConfig::default();
+        let mut args = describe_args(None, Some(ModelVersion::V55));
+        args.tags = None;
+
+        let req = build_describe_request(&args, &config).expect("request");
+
+        let body = serde_json::to_value(req).expect("request json");
+        let object = body.as_object().expect("request object");
+        assert!(!object.contains_key("title"));
+        assert!(!object.contains_key("tags"));
+        assert_eq!(body["override_fields"], serde_json::json!([]));
     }
 
     #[test]
@@ -473,11 +493,11 @@ mod tests {
                 .contains_key("lyrics_model")
         );
         assert!(
-            body.as_object()
+            !body
+                .as_object()
                 .expect("object")
                 .contains_key("token_provider")
         );
-        assert!(body["token_provider"].is_null());
     }
 
     #[test]

@@ -4,6 +4,10 @@ use super::types::{
 };
 use crate::core::CliError;
 
+// Despite the Web helper's `modelSupportsFeature` name, current Create checks
+// this key in billing model `capabilities` (including `all`), not `features`.
+const CREATE_CONTROL_SLIDERS_CAPABILITY: &str = "create_control_sliders";
+
 impl SunoClient {
     /// Submit a music generation request (custom mode or inspiration mode).
     /// Posts only to the current `/api/generate/v2-web/` route. The older
@@ -22,7 +26,8 @@ impl SunoClient {
         &self,
         req: &mut GenerateRequest,
     ) -> Result<(), CliError> {
-        if !req.metadata.user_tier.trim().is_empty() && req.mv != "auto" {
+        let needs_model_capabilities = req.mv == "auto" || req.metadata.control_sliders.is_some();
+        if !req.metadata.user_tier.trim().is_empty() && !needs_model_capabilities {
             return Ok(());
         }
 
@@ -31,6 +36,12 @@ impl SunoClient {
             Err(error) => {
                 if error.is_auth_or_rate_limit() {
                     return Err(error);
+                }
+                if req.metadata.control_sliders.is_some() {
+                    return Err(CliError::Config(
+                        "could not verify whether the selected Suno model supports --weirdness/--style-influence; refusing to submit without the requested controls"
+                            .into(),
+                    ));
                 }
                 if req.mv == "auto" {
                     req.mv = "chirp-fenix".into();
@@ -54,6 +65,14 @@ impl SunoClient {
 
         let model = select_generation_model(&info.models, &req.mv)?;
         req.mv = model.external_key.clone();
+        if req.metadata.control_sliders.is_some()
+            && !model.supports_capability(CREATE_CONTROL_SLIDERS_CAPABILITY)
+        {
+            return Err(CliError::Config(format!(
+                "Suno model `{}` does not support --weirdness/--style-influence; refusing to submit while preserving the requested controls",
+                model.external_key
+            )));
+        }
         let uses_account_generation_limits =
             matches!(req.task.as_deref(), None | Some("playlist_condition"));
         if uses_account_generation_limits {
@@ -243,6 +262,8 @@ mod tests {
             can_use,
             is_default_model,
             description: "fixture".into(),
+            capabilities: Vec::new(),
+            features: Vec::new(),
             max_lengths,
             extra: Default::default(),
         }

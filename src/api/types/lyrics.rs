@@ -3,20 +3,19 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Deserialize)]
-pub struct LyricsSubmitResponse {
-    pub id: String,
-}
-
 #[derive(Debug, Deserialize, Serialize)]
-pub struct LyricsResult {
-    pub text: String,
-    pub title: String,
-    pub status: String,
+pub struct CowriteLyricsResponse {
+    pub edited_lyrics: String,
     #[serde(default)]
-    pub error_message: String,
+    pub lyrics_request_id: Option<String>,
     #[serde(default)]
-    pub tags: Vec<String>,
+    pub lyrics_id: Option<String>,
+    #[serde(default)]
+    pub variants: Option<Vec<String>>,
+    #[serde(default)]
+    pub artist_to_tag_mapping: Option<Value>,
+    #[serde(default)]
+    pub next_prompts: Option<Vec<String>>,
     #[serde(default, flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -39,11 +38,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lyrics_result_unknown_fields_round_trip_at_the_original_level() {
-        let result: LyricsResult = serde_json::from_value(serde_json::json!({
-            "text": "Hello",
-            "title": "Greeting",
-            "status": "complete",
+    fn cowrite_lyrics_unknown_fields_round_trip_at_the_original_level() {
+        let result: CowriteLyricsResponse = serde_json::from_value(serde_json::json!({
+            "edited_lyrics": "Hello",
+            "lyrics_request_id": "request-1",
+            "lyrics_id": "lyrics-1",
             "model_name": "new-lyrics-model",
             "safety": {"reviewed": true}
         }))

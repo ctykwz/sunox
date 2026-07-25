@@ -1,9 +1,5 @@
-use crate::api::types::LyricsResult;
+use crate::api::types::CowriteLyricsResponse;
 
-pub fn lyrics(result: &LyricsResult) {
-    println!("Title: {}\n", result.title);
-    println!("{}", result.text);
-    if !result.tags.is_empty() {
-        println!("\nSuggested style: {}", result.tags.join(", "));
-    }
+pub fn lyrics(result: &CowriteLyricsResponse) {
+    println!("{}", result.edited_lyrics);
 }

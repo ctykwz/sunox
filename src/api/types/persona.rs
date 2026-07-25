@@ -124,20 +124,6 @@ pub struct EditPersonaRequest {
     pub vocal_end_s: Option<f64>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct ProcessedClipInfo {
-    pub id: String,
-    pub status: String,
-    #[serde(default)]
-    pub vocal_start_s: Option<f64>,
-    #[serde(default)]
-    pub vocal_end_s: Option<f64>,
-    #[serde(default)]
-    pub vocal_audio_url: Option<String>,
-    #[serde(default, flatten)]
-    pub extra: BTreeMap<String, Value>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::{CreatePersonaRequest, EditPersonaRequest, PersonaInfo, TogglePersonaLoveResponse};

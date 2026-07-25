@@ -78,6 +78,12 @@ fn browser_extension_installer_extracts_a_paired_unpacked_extension() {
     assert!(extension_path.join("icons/icon-32.png").is_file());
     assert!(extension_path.join("icons/icon-48.png").is_file());
     assert!(extension_path.join("icons/icon-128.png").is_file());
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(extension_path.join("manifest.json")).expect("extension manifest"),
+    )
+    .expect("valid extension manifest");
+    assert_eq!(manifest["version_name"], env!("CARGO_PKG_VERSION"));
+    assert!(!manifest.to_string().contains("__SUNOX_VERSION__"));
     let config =
         std::fs::read_to_string(extension_path.join("config.js")).expect("extension config");
     assert!(!config.contains("__SUNOX_BRIDGE_SECRET__"));
@@ -385,7 +391,7 @@ fn persona_help_lists_management_subcommands() {
         .stdout(predicate::str::contains("clips"))
         .stdout(predicate::str::contains("create"))
         .stdout(predicate::str::contains("set"))
-        .stdout(predicate::str::contains("processed-clip"))
+        .stdout(predicate::str::contains("processed-clip").not())
         .stdout(predicate::str::contains("publish"))
         .stdout(predicate::str::contains("unpublish"))
         .stdout(predicate::str::contains("love"))
@@ -394,6 +400,18 @@ fn persona_help_lists_management_subcommands() {
         .stdout(predicate::str::contains("delete"))
         .stdout(predicate::str::contains("restore"))
         .stdout(predicate::str::contains("purge"));
+}
+
+#[test]
+fn persona_rejects_removed_processed_clip_command() {
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    cmd.args(["persona", "processed-clip", "processed-a"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "unrecognized subcommand 'processed-clip'",
+        ));
 }
 
 #[test]
@@ -580,7 +598,9 @@ fn install_skill_prints_current_generation_guidance() {
     cmd.args(["install-skill", "--print"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("token=null"))
+        .stdout(predicate::str::contains(
+            "`token` and `token_provider` are omitted",
+        ))
         .stdout(predicate::str::contains("--captcha"))
         .stdout(predicate::str::contains(
             "Cloudflare Turnstile uses provider 2",
@@ -1242,7 +1262,7 @@ fn agent_info_reports_submit_wait_download_workflow() {
         .stdout(predicate::str::contains("\"persona_clips\""))
         .stdout(predicate::str::contains("\"persona_set_visibility\""))
         .stdout(predicate::str::contains("\"persona_set_metadata\""))
-        .stdout(predicate::str::contains("\"persona_processed_clip\""))
+        .stdout(predicate::str::contains("\"persona_processed_clip\"").not())
         .stdout(predicate::str::contains("\"persona_love\""))
         .stdout(predicate::str::contains("\"persona_unlove\""))
         .stdout(predicate::str::contains("\"persona_toggle_love\""))
@@ -1255,7 +1275,9 @@ fn agent_info_reports_submit_wait_download_workflow() {
         .stdout(predicate::str::contains("\"clip_fade\""))
         .stdout(predicate::str::contains("\"download_formats\""))
         .stdout(predicate::str::contains("\"persona_list\""))
-        .stdout(predicate::str::contains("token=null"))
+        .stdout(predicate::str::contains(
+            "token and token_provider are omitted",
+        ))
         .stdout(predicate::str::contains("--captcha"))
         .stdout(predicate::str::contains("\"audio_upload\""))
         .stdout(predicate::str::contains("\"persona_delete\""))

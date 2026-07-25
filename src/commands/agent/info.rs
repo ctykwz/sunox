@@ -6,7 +6,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
         .map(|dir| dir.join("auth.json").display().to_string())
         .unwrap_or_else(|| "~/.config/sunox/auth.json".into());
 
-    let info = serde_json::json!({
+    let mut info = serde_json::json!({
         "name": "sunox",
         "version": env!("CARGO_PKG_VERSION"),
         "description": "Suno AI music generation CLI — direct Suno web workflow",
@@ -109,7 +109,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
         },
         "command_notes": {
             "create": {
-                "default_challenge": "preflights POST /api/c/check with ctype=generation; if Suno reports a challenge and stored Clerk refresh material exists, refreshes the JWT once and repeats the preflight; when still required, challenge_browser=auto first asks the paired Sunox Browser Bridge to solve invisibly in its managed hidden Suno context. A configured but unavailable Bridge fails closed; auto falls back to an isolated matching browser only when no Bridge pairing exists. It then submits provider 1 for hCaptcha or provider 2 for Cloudflare Turnstile; when no challenge is required, submits token=null and token_provider=null",
+                "default_challenge": "preflights POST /api/c/check with ctype=generation; if Suno reports a challenge and stored Clerk refresh material exists, refreshes the JWT once and repeats the preflight; when still required, challenge_browser=auto first asks the paired Sunox Browser Bridge to solve invisibly in its managed hidden Suno context. A configured but unavailable Bridge fails closed; auto falls back to an isolated matching browser only when no Bridge pairing exists. It then submits provider 1 for hCaptcha or provider 2 for Cloudflare Turnstile; when no challenge is required, token and token_provider are omitted to match the Web client",
                 "challenge_flags": {
                     "--token": "use an externally supplied solved challenge token; preflight infers token_provider from the reported captcha_version and falls back to provider 1 only when a non-auth preflight error prevents detection",
                     "--captcha": "force browser-backed challenge verification even when preflight says it is unnecessary",
@@ -151,10 +151,10 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                     "GET /api/clip/<clip_id>",
                     "GET /api/clips/{clip_id}/attribution",
                     "GET /api/gen/{clip_id}/comments?order=most_liked",
-                    "GET /api/clips/direct_children_count?clip_id=<clip_id>",
+                    "GET /api/clips/remixes/count?clip_id=<clip_id>",
                     "GET /api/clips/get_similar/?id=<clip_id>"
                 ],
-                "json_shape": "main clip fields remain top-level; attribution, comments, direct_children_count, and similar_clips are added as semantic song-page context; if a non-auth, non-rate-limit supplemental read fails, the base clip is still returned with supplemental_errors; auth and rate-limit errors still abort normally"
+                "json_shape": "main clip fields remain top-level; attribution, comments, remix_count={count,is_capped,...}, and similar_clips are added as semantic song-page context; if a non-auth, non-rate-limit supplemental read fails, the base clip is still returned with supplemental_errors; auth and rate-limit errors still abort normally"
             },
             "clip remaster": {
                 "route": "POST /api/generate/upsample",
@@ -263,7 +263,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "clip_like", "clip_dislike", "optional_captcha_solver", "audio_upload", "audio_upload_status",
             "id3_lyrics_embedding", "clip_list_filters", "voice_persona", "persona_list",
             "persona_info", "persona_clips", "persona_create",
-            "persona_set_metadata", "persona_processed_clip",
+            "persona_set_metadata",
             "persona_set_visibility", "persona_love",
             "persona_unlove", "persona_toggle_love", "persona_delete",
             "persona_restore", "persona_purge",
@@ -318,14 +318,13 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "persona": {
                 "commands": [
                     "persona list", "persona info", "persona clips", "persona create",
-                    "persona set", "persona processed-clip",
+                    "persona set",
                     "persona publish", "persona unpublish",
                     "persona love", "persona unlove", "persona toggle-love",
                     "persona delete", "persona restore", "persona purge"
                 ],
                 "clips_status": "implemented via GET /api/persona/get-persona-paginated/{id}/?page=N",
                 "edit_status": "implemented via PUT /api/persona/edit-persona/{id}/",
-                "processed_clip_status": "implemented via GET /api/processed_clip/{id}",
                 "visibility_status": "implemented via PUT /api/persona/set_visibility/{id}/?is_public=true|false",
                 "trash_status": "implemented via PUT /api/persona/trash-persona/{id}/?undo=false&hide=false",
                 "restore_status": "implemented via PUT /api/persona/trash-persona/{id}/?undo=true&hide=false",
@@ -383,6 +382,12 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
         "provider": "direct_suno_unofficial",
         "auth_required": true,
         "default_model": "auto (account usable default; chirp-fenix fallback only when billing info is unavailable)",
+    });
+    info["command_notes"]["lyrics"] = serde_json::json!({
+        "route": "POST /api/generate/cowrite-lyrics/",
+        "mode": "apply_user_request",
+        "request_contract": "selected, context_before, and context_after are empty strings; the user prompt is sent as instruction; title and style are empty strings; references is empty; the default lyrics model is selected with thinking disabled; no legacy submit/status polling is used",
+        "response_contract": "returns the current edited_lyrics, lyrics_request_id, lyrics_id, variants, artist_to_tag_mapping, next_prompts, and any additional response fields without mapping them back to the removed text/title/status/tags shape"
     });
     println!("{}", serde_json::to_string_pretty(&info)?);
     Ok(())

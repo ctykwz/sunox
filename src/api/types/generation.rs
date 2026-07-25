@@ -35,11 +35,14 @@ pub struct GenerateRequest {
     /// Optional anti-bot challenge token. Suno accepts many authenticated
     /// generation requests without one; callers can still force or supply a
     /// solved token when an account/session is challenged.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
     pub generation_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<String>,
     /// Always present, defaults to an empty string.
     pub negative_tags: String,
@@ -74,6 +77,7 @@ pub struct GenerateRequest {
     pub stem_task: Option<String>,
     /// Random UUID generated per request.
     pub transaction_uuid: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub token_provider: Option<u8>,
 }
 
@@ -161,8 +165,8 @@ impl GenerateMetadata {
     fn new_with_context(create_mode: &str, context: &GenerationWebContext) -> Self {
         Self {
             web_client_pathname: WEB_CLIENT_PATHNAME.to_string(),
-            is_max_mode: Some(false),
-            is_mumble: Some(false),
+            is_max_mode: None,
+            is_mumble: None,
             create_mode: create_mode.to_string(),
             user_tier: context.user_tier_value(),
             create_session_token: uuid::Uuid::new_v4().to_string(),
@@ -256,6 +260,24 @@ mod tests {
         assert_eq!(body["metadata"]["user_tier"], "tier-pro");
         assert!(body["metadata"]["create_session_token"].as_str().is_some());
         assert!(body["transaction_uuid"].as_str().is_some());
+        for omitted in ["token", "token_provider", "title", "tags"] {
+            assert!(
+                !body
+                    .as_object()
+                    .expect("request object")
+                    .contains_key(omitted),
+                "{omitted} should follow the Web client's undefined-field semantics"
+            );
+        }
+        for omitted in ["is_max_mode", "is_mumble"] {
+            assert!(
+                !body["metadata"]
+                    .as_object()
+                    .expect("metadata object")
+                    .contains_key(omitted),
+                "{omitted} should be absent when the mode is disabled"
+            );
+        }
     }
 
     #[test]

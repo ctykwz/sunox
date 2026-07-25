@@ -6,8 +6,20 @@ use super::session::CdpSession;
 use crate::api::challenge::ChallengeProvider;
 use crate::auth::AuthState;
 use crate::captcha::cookies::extract_cookies;
-use crate::captcha::{SUNO_HCAPTCHA_SITEKEY, SUNO_TURNSTILE_SITEKEY};
+use crate::captcha::{
+    SUNO_HCAPTCHA_ASSET_HOST, SUNO_HCAPTCHA_ENDPOINT, SUNO_HCAPTCHA_IMAGE_HOST,
+    SUNO_HCAPTCHA_REPORT_API, SUNO_HCAPTCHA_SITEKEY, SUNO_TURNSTILE_SCRIPT_URL,
+};
 use crate::core::CliError;
+
+// Bound one recoverable error reset in both idle and interactive states.
+const SOLVER_EVALUATION_TIMEOUT_MS: u64 = 300_000;
+#[cfg(test)]
+const _: () = assert!(
+    SOLVER_EVALUATION_TIMEOUT_MS
+        > 3 * crate::captcha::SUNO_TURNSTILE_IDLE_TIMEOUT_MS
+            + 2 * crate::captcha::SUNO_TURNSTILE_INTERACTIVE_TIMEOUT_MS
+);
 
 pub(in crate::captcha) async fn render_and_execute(
     ws_url: &str,
@@ -77,13 +89,14 @@ async fn execute_with_session(
     sleep(Duration::from_secs(2)).await;
 
     let result = session
-        .call(
+        .call_with_timeout(
             "Runtime.evaluate",
             serde_json::json!({
                 "expression": solve_script(provider),
                 "awaitPromise": true,
                 "returnByValue": true,
             }),
+            Duration::from_millis(SOLVER_EVALUATION_TIMEOUT_MS),
         )
         .await?;
 
@@ -183,24 +196,28 @@ async fn load_turnstile_script(session: &mut CdpSession) -> Result<(), CliError>
     session
         .call(
             "Runtime.evaluate",
-            serde_json::json!({
-                "expression": r#"
-                    (() => {
-                        if (window.turnstile || document.querySelector('script[data-sunox-turnstile]')) {
-                            return;
-                        }
-                        const script = document.createElement('script');
-                        script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
-                        script.async = true;
-                        script.defer = true;
-                        script.dataset.sunoxTurnstile = 'true';
-                        document.head.appendChild(script);
-                    })()
-                "#,
-            }),
+            serde_json::json!({ "expression": turnstile_loader_script() }),
         )
         .await?;
     Ok(())
+}
+
+fn turnstile_loader_script() -> String {
+    format!(
+        r#"
+            (() => {{
+                if (window.turnstile || document.querySelector('script[data-sunox-turnstile]')) {{
+                    return;
+                }}
+                const script = document.createElement('script');
+                script.src = '{SUNO_TURNSTILE_SCRIPT_URL}';
+                script.async = true;
+                script.defer = true;
+                script.dataset.sunoxTurnstile = 'true';
+                document.head.appendChild(script);
+            }})()
+        "#
+    )
 }
 
 fn solve_script(provider: ChallengeProvider) -> String {
@@ -222,10 +239,10 @@ fn hcaptcha_solve_script() -> String {
                     sitekey: '{SUNO_HCAPTCHA_SITEKEY}',
                     size: 'invisible',
                     sentry: false,
-                    endpoint: 'https://hcaptcha-endpoint-prod.suno.com',
-                    assethost: 'https://hcaptcha-assets-prod.suno.com',
-                    imghost: 'https://hcaptcha-imgs-prod.suno.com',
-                    reportapi: 'https://hcaptcha-reportapi-prod.suno.com',
+                    endpoint: '{SUNO_HCAPTCHA_ENDPOINT}',
+                    assethost: '{SUNO_HCAPTCHA_ASSET_HOST}',
+                    imghost: '{SUNO_HCAPTCHA_IMAGE_HOST}',
+                    reportapi: '{SUNO_HCAPTCHA_REPORT_API}',
                 }});
                 const r = await hcaptcha.execute(id, {{ async: true }});
                 return (r && r.response) ? r.response : '';
@@ -238,42 +255,7 @@ fn hcaptcha_solve_script() -> String {
 }
 
 fn turnstile_solve_script() -> String {
-    format!(
-        r#"
-        (async () => {{
-            try {{
-                const div = document.createElement('div');
-                div.id = 'sunox-generation-turnstile';
-                document.body.appendChild(div);
-                return await new Promise((resolve) => {{
-                    let settled = false;
-                    const finish = (value) => {{
-                        if (settled) return;
-                        settled = true;
-                        clearTimeout(timeout);
-                        resolve(value || '');
-                    }};
-                    const timeout = setTimeout(
-                        () => finish('ERR:Turnstile produced no callback within 20 seconds'),
-                        20000
-                    );
-                    const id = turnstile.render(div, {{
-                        sitekey: '{SUNO_TURNSTILE_SITEKEY}',
-                        execution: 'execute',
-                        callback: finish,
-                        'error-callback': (code) => finish('ERR:Turnstile error ' + String(code || 'unknown')),
-                        'expired-callback': () => finish('ERR:Turnstile token expired'),
-                        'timeout-callback': () => finish('ERR:Turnstile challenge timed out'),
-                        'unsupported-callback': () => finish('ERR:Turnstile unsupported in this browser'),
-                    }});
-                    turnstile.execute(id);
-                }});
-            }} catch (e) {{
-                return 'ERR:' + String(e);
-            }}
-        }})()
-        "#
-    )
+    include_str!("turnstile_solver.js").to_string()
 }
 
 async fn page_state_excerpt(session: &mut CdpSession) -> Result<String, CliError> {
@@ -310,18 +292,48 @@ async fn page_state_excerpt(session: &mut CdpSession) -> Result<String, CliError
 
 #[cfg(test)]
 mod tests {
-    use super::solve_script;
+    use super::{solve_script, turnstile_loader_script};
     use crate::api::challenge::ChallengeProvider;
+    use crate::captcha::{
+        SUNO_HCAPTCHA_ASSET_HOST, SUNO_HCAPTCHA_ENDPOINT, SUNO_HCAPTCHA_IMAGE_HOST,
+        SUNO_HCAPTCHA_REPORT_API, SUNO_HCAPTCHA_SITEKEY, SUNO_TURNSTILE_IDLE_TIMEOUT_MS,
+        SUNO_TURNSTILE_INTERACTIVE_TIMEOUT_MS, SUNO_TURNSTILE_SCRIPT_URL, SUNO_TURNSTILE_SITEKEY,
+    };
 
     #[test]
     fn solver_script_matches_challenge_provider() {
         let hcaptcha = solve_script(ChallengeProvider::HCaptcha);
         assert!(hcaptcha.contains("hcaptcha.render"));
-        assert!(hcaptcha.contains("d65453de-3f1a-4aac-9366-a0f06e52b2ce"));
+        for expected in [
+            SUNO_HCAPTCHA_SITEKEY,
+            SUNO_HCAPTCHA_ENDPOINT,
+            SUNO_HCAPTCHA_ASSET_HOST,
+            SUNO_HCAPTCHA_IMAGE_HOST,
+            SUNO_HCAPTCHA_REPORT_API,
+        ] {
+            assert!(hcaptcha.contains(expected));
+        }
+        assert!(hcaptcha.contains("size: 'invisible'"));
+        assert!(hcaptcha.contains("sentry: false"));
+        assert!(hcaptcha.contains("hcaptcha.execute(id, { async: true })"));
+        assert!(hcaptcha.contains("r && r.response"));
 
         let turnstile = solve_script(ChallengeProvider::Turnstile);
         assert!(turnstile.contains("turnstile.render"));
-        assert!(turnstile.contains("0x4AAAAAADI7xDNyj-3LcIbi"));
+        assert!(turnstile.contains(SUNO_TURNSTILE_SITEKEY));
+        assert!(turnstile_loader_script().contains(SUNO_TURNSTILE_SCRIPT_URL));
+        assert!(turnstile.contains("execution: \"execute\""));
+        assert!(turnstile.contains("appearance: \"interaction-only\""));
+        assert!(turnstile.contains("callback: finish"));
+        assert!(turnstile.contains("\"error-callback\""));
+        assert!(turnstile.contains("\"expired-callback\""));
+        assert!(turnstile.contains("\"timeout-callback\""));
+        assert!(turnstile.contains("\"unsupported-callback\""));
+        assert!(turnstile.contains("\"before-interactive-callback\""));
+        assert!(turnstile.contains("\"after-interactive-callback\""));
+        assert!(turnstile.contains(&SUNO_TURNSTILE_IDLE_TIMEOUT_MS.to_string()));
+        assert!(turnstile.contains(&SUNO_TURNSTILE_INTERACTIVE_TIMEOUT_MS.to_string()));
+        assert!(turnstile.contains("turnstile.execute(widgetId)"));
         assert!(!turnstile.contains("top:-9999px"));
     }
 }

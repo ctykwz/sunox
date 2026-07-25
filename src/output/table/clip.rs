@@ -59,10 +59,12 @@ pub fn clip_detail(info: &ClipInfo) {
     ]);
     table.add_row(vec!["Plays", &clip.play_count.to_string()]);
     table.add_row(vec!["Upvotes", &clip.upvote_count.to_string()]);
-    table.add_row(vec![
-        "Direct Children",
-        &info.direct_children_count.to_string(),
-    ]);
+    let remix_count = if info.remix_count.is_capped {
+        format!("{}+", info.remix_count.count)
+    } else {
+        info.remix_count.count.to_string()
+    };
+    table.add_row(vec!["Remixes", &remix_count]);
     table.add_row(vec![
         "Source Clips",
         &info.attribution.source_clips.len().to_string(),
@@ -150,7 +152,7 @@ mod tests {
             clip,
             attribution: ClipAttribution::default(),
             comments: ClipComments::default(),
-            direct_children_count: 0,
+            remix_count: Default::default(),
             similar_clips: Vec::new(),
             supplemental_errors: Vec::new(),
         };

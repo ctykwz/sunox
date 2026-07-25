@@ -14,6 +14,13 @@ impl ChallengeProvider {
         self as u8
     }
 
+    pub const fn bridge_name(self) -> &'static str {
+        match self {
+            Self::HCaptcha => "hcaptcha",
+            Self::Turnstile => "turnstile",
+        }
+    }
+
     pub const fn label(self) -> &'static str {
         match self {
             Self::HCaptcha => "hCaptcha",
@@ -102,5 +109,7 @@ mod tests {
             .provider(),
             ChallengeProvider::Turnstile
         );
+        assert_eq!(ChallengeProvider::HCaptcha.bridge_name(), "hcaptcha");
+        assert_eq!(ChallengeProvider::Turnstile.bridge_name(), "turnstile");
     }
 }
