@@ -221,11 +221,13 @@ mod tests {
     fn extension_assets_share_the_bridge_contract() {
         assert!(MANIFEST.contains("https://suno.com/*"));
         assert!(MANIFEST.contains("http://127.0.0.1/*"));
-        assert!(MANIFEST.contains("\"version\": \"0.3.4\""));
+        assert!(MANIFEST.contains("\"version\": \"0.3.5\""));
         assert!(MANIFEST.contains("\"version_name\": \"__SUNOX_VERSION__\""));
         assert!(MANIFEST.contains("\"alarms\""));
+        assert!(MANIFEST.contains("\"declarativeNetRequestFeedback\""));
         assert!(MANIFEST.contains("\"declarativeNetRequestWithHostAccess\""));
         assert!(MANIFEST.contains("\"offscreen\""));
+        assert!(!MANIFEST.contains("\"activeTab\""));
         assert!(!MANIFEST.contains("\"storage\""));
         assert!(!MANIFEST.contains("\"tabs\""));
         assert!(MANIFEST.contains("\"all_frames\": true"));
@@ -296,7 +298,7 @@ mod tests {
         let manifest: serde_json::Value =
             serde_json::from_str(&render_manifest()).expect("rendered extension manifest");
 
-        assert_eq!(manifest["version"], "0.3.4");
+        assert_eq!(manifest["version"], "0.3.5");
         assert_eq!(manifest["version_name"], env!("CARGO_PKG_VERSION"));
         assert!(!render_manifest().contains("__SUNOX_VERSION__"));
     }

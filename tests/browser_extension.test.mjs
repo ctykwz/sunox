@@ -1451,9 +1451,11 @@ test("all Browser Bridge scripts parse as standalone extension scripts", () => {
 });
 
 test("manifest and frame scripts expose only the invisible iframe transport", () => {
-  assert.equal(manifest.version, "0.3.4");
+  assert.equal(manifest.version, "0.3.5");
   assert.equal(manifest.version_name, "__SUNOX_VERSION__");
+  assert.ok(manifest.permissions.includes("declarativeNetRequestFeedback"));
   assert.ok(manifest.permissions.includes("declarativeNetRequestWithHostAccess"));
+  assert.equal(manifest.permissions.includes("activeTab"), false);
   assert.ok(manifest.permissions.includes("offscreen"));
   assert.equal(manifest.permissions.includes("tabs"), false);
   assert.equal(manifest.permissions.includes("storage"), false);
