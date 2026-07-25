@@ -4,8 +4,8 @@ use crate::api::types::{CreatePersonaRequest, EditPersonaRequest, PersonaListSco
 use crate::app::AppContext;
 use crate::cli::{
     PersonaArgs, PersonaClipsArgs, PersonaCommand, PersonaCreateArgs, PersonaDeleteArgs,
-    PersonaInfoArgs, PersonaListArgs, PersonaListKind, PersonaLoveArgs, PersonaProcessedClipArgs,
-    PersonaPublishArgs, PersonaRestoreArgs, PersonaSetArgs, PersonaToggleLoveArgs,
+    PersonaInfoArgs, PersonaListArgs, PersonaListKind, PersonaLoveArgs, PersonaPublishArgs,
+    PersonaRestoreArgs, PersonaSetArgs, PersonaToggleLoveArgs,
 };
 use crate::core::{CliError, ensure_destructive_confirmed, ensure_time_range};
 use crate::output::{self, OutputFormat};
@@ -17,7 +17,6 @@ pub async fn run(args: PersonaArgs, ctx: &AppContext) -> Result<(), CliError> {
         PersonaCommand::Clips(args) => clips(args, ctx).await,
         PersonaCommand::Create(args) => create(*args, ctx).await,
         PersonaCommand::Set(args) => set(args, ctx).await,
-        PersonaCommand::ProcessedClip(args) => processed_clip(args, ctx).await,
         PersonaCommand::Publish(args) => publish(args, ctx, true).await,
         PersonaCommand::Unpublish(args) => publish(args, ctx, false).await,
         PersonaCommand::Love(args) => love(args, ctx).await,
@@ -152,27 +151,6 @@ async fn set(args: PersonaSetArgs, ctx: &AppContext) -> Result<(), CliError> {
         OutputFormat::Table => {
             output::table::persona(&persona);
             eprintln!("Updated persona {}", persona.id);
-        }
-    }
-    Ok(())
-}
-
-async fn processed_clip(args: PersonaProcessedClipArgs, ctx: &AppContext) -> Result<(), CliError> {
-    let processed = ctx.client().await?.get_processed_clip(&args.id).await?;
-    match ctx.fmt {
-        OutputFormat::Json => output::json::success(&processed),
-        OutputFormat::Table => {
-            println!("ID: {}", processed.id);
-            println!("Status: {}", processed.status);
-            if let Some(start) = processed.vocal_start_s {
-                println!("Vocal start: {start:.2}s");
-            }
-            if let Some(end) = processed.vocal_end_s {
-                println!("Vocal end: {end:.2}s");
-            }
-            if let Some(url) = processed.vocal_audio_url {
-                println!("Vocal audio: {url}");
-            }
         }
     }
     Ok(())

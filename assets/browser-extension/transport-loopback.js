@@ -88,14 +88,14 @@
       bridge.clientNonce,
       bridge.serverNonce
     ])));
-    const proof = await sign("sunox-bridge-receipt-v1", [payload]);
+    const proof = await sign("sunox-bridge-receipt-v2", [payload]);
     return `${payload}.${proof}`;
   }
 
   async function openReceipt(receipt) {
     if (!/^[A-Za-z0-9_-]+\.[0-9a-f]{64}$/.test(receipt || "")) return null;
     const [payload, proof] = receipt.split(".");
-    if (!await verify(proof, "sunox-bridge-receipt-v1", [payload])) return null;
+    if (!await verify(proof, "sunox-bridge-receipt-v2", [payload])) return null;
     try {
       const [port, clientNonce, serverNonce] = JSON.parse(
         textDecoder.decode(decodeBase64Url(payload))
@@ -132,7 +132,7 @@
   async function authenticateBridge(port) {
     const clientNonce = crypto.randomUUID();
     try {
-      const response = await bridgeRequest(port, "/v1/challenge/hello", {
+      const response = await bridgeRequest(port, "/v2/challenge/hello", {
         version: settings.protocolVersion,
         client_nonce: clientNonce
       });
@@ -142,7 +142,7 @@
         && typeof hello.server_nonce === "string"
         && await verify(
           hello.proof,
-          "sunox-bridge-server-v1",
+          "sunox-bridge-server-v2",
           [port, clientNonce, hello.server_nonce]
         );
       return valid ? { port, clientNonce, serverNonce: hello.server_nonce } : null;
@@ -165,13 +165,13 @@
         message.pageUrl
       ];
       try {
-        const response = await bridgeRequest(bridge.port, "/v1/challenge/claim", {
+        const response = await bridgeRequest(bridge.port, "/v2/challenge/claim", {
           version: settings.protocolVersion,
           client_id: message.clientId,
           page_url: message.pageUrl,
           client_nonce: bridge.clientNonce,
           server_nonce: bridge.serverNonce,
-          proof: await sign("sunox-bridge-client-v1", fields)
+          proof: await sign("sunox-bridge-client-v2", fields)
         });
         if (!response.ok) continue;
         const challenge = await response.json();
@@ -206,14 +206,14 @@
       value
     ];
     try {
-      const response = await bridgeRequest(bridge.port, "/v1/challenge/result", {
+      const response = await bridgeRequest(bridge.port, "/v2/challenge/result", {
         version: settings.protocolVersion,
         request_id: message.requestId,
         client_nonce: bridge.clientNonce,
         server_nonce: bridge.serverNonce,
         token: kind === "token" ? value : null,
         error: kind === "error" ? value : null,
-        proof: await sign("sunox-bridge-result-v1", fields)
+        proof: await sign("sunox-bridge-result-v2", fields)
       });
       return { accepted: response.ok };
     } catch {

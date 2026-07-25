@@ -13,6 +13,10 @@ const LOOPBACK_TRANSPORT: &str =
     include_str!("../../assets/browser-extension/transport-loopback.js");
 const BRIDGE: &str = include_str!("../../assets/browser-extension/bridge.js");
 const PAGE: &str = include_str!("../../assets/browser-extension/page.js");
+const SHARED: &str = include_str!("../../assets/browser-extension/shared.js");
+const OFFSCREEN_HTML: &str = include_str!("../../assets/browser-extension/offscreen.html");
+const OFFSCREEN: &str = include_str!("../../assets/browser-extension/offscreen.js");
+const POLL_WORKER: &str = include_str!("../../assets/browser-extension/poll-worker.js");
 const CONFIG_TEMPLATE: &str = include_str!("../../assets/browser-extension/config.js");
 const ICON_16: &[u8] = include_bytes!("../../assets/browser-extension/icons/icon-16.png");
 const ICON_32: &[u8] = include_bytes!("../../assets/browser-extension/icons/icon-32.png");
@@ -48,11 +52,15 @@ pub async fn install(args: InstallBrowserExtensionArgs, ctx: &AppContext) -> Res
     let staging = tempfile::Builder::new()
         .prefix("sunox-browser-extension-")
         .tempdir_in(parent)?;
-    write_asset(staging.path(), "manifest.json", MANIFEST)?;
+    write_asset(staging.path(), "manifest.json", &render_manifest())?;
     write_asset(staging.path(), "service-worker.js", SERVICE_WORKER)?;
     write_asset(staging.path(), "transport-loopback.js", LOOPBACK_TRANSPORT)?;
     write_asset(staging.path(), "bridge.js", BRIDGE)?;
     write_asset(staging.path(), "page.js", PAGE)?;
+    write_asset(staging.path(), "shared.js", SHARED)?;
+    write_asset(staging.path(), "offscreen.html", OFFSCREEN_HTML)?;
+    write_asset(staging.path(), "offscreen.js", OFFSCREEN)?;
+    write_asset(staging.path(), "poll-worker.js", POLL_WORKER)?;
     std::fs::create_dir(staging.path().join("icons"))?;
     write_binary_asset(staging.path(), "icons/icon-16.png", ICON_16)?;
     write_binary_asset(staging.path(), "icons/icon-32.png", ICON_32)?;
@@ -70,7 +78,7 @@ pub async fn install(args: InstallBrowserExtensionArgs, ctx: &AppContext) -> Res
                 "Open chrome://extensions",
                 "Enable Developer mode",
                 if updating { "Click Reload on the existing extension" } else { "Choose Load unpacked and select the reported path" },
-                "Reload an existing suno.com tab"
+                "No Suno tab needs to remain open"
             ]
         })),
         OutputFormat::Table => {
@@ -88,7 +96,7 @@ pub async fn install(args: InstallBrowserExtensionArgs, ctx: &AppContext) -> Res
                 );
             }
             eprintln!(
-                "Then reload an existing suno.com tab. Auto and existing challenge modes can now use the bridge; auto still falls back to an isolated browser when needed."
+                "No Suno tab needs to remain open. The bridge uses an invisible offscreen Suno frame only when a challenge requires one; once paired, auto fails closed instead of launching an isolated browser."
             );
         }
     }
@@ -110,6 +118,10 @@ fn render_config(secret: &str) -> String {
             &LOOPBACK_PORT_COUNT.to_string(),
         )
         .replace("__SUNOX_BRIDGE_SECRET__", secret)
+}
+
+fn render_manifest() -> String {
+    MANIFEST.replace("__SUNOX_VERSION__", env!("CARGO_PKG_VERSION"))
 }
 
 fn load_or_create_secret(config_dir: &Path) -> Result<String, CliError> {
@@ -201,29 +213,59 @@ fn replace_directory(staging: tempfile::TempDir, destination: &Path) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::{
-        BRIDGE, CONFIG_TEMPLATE, LOOPBACK_TRANSPORT, MANIFEST, PAGE, SERVICE_WORKER, render_config,
+        BRIDGE, CONFIG_TEMPLATE, LOOPBACK_TRANSPORT, MANIFEST, OFFSCREEN, OFFSCREEN_HTML, PAGE,
+        POLL_WORKER, SERVICE_WORKER, SHARED, render_config, render_manifest,
     };
 
     #[test]
     fn extension_assets_share_the_bridge_contract() {
         assert!(MANIFEST.contains("https://suno.com/*"));
         assert!(MANIFEST.contains("http://127.0.0.1/*"));
-        assert!(MANIFEST.contains("\"version\": \"0.1.3\""));
+        assert!(MANIFEST.contains("\"version\": \"0.3.4\""));
+        assert!(MANIFEST.contains("\"version_name\": \"__SUNOX_VERSION__\""));
         assert!(MANIFEST.contains("\"alarms\""));
+        assert!(MANIFEST.contains("\"declarativeNetRequestWithHostAccess\""));
+        assert!(MANIFEST.contains("\"offscreen\""));
+        assert!(!MANIFEST.contains("\"storage\""));
+        assert!(!MANIFEST.contains("\"tabs\""));
+        assert!(MANIFEST.contains("\"all_frames\": true"));
         assert!(MANIFEST.contains("icons/icon-16.png"));
         assert!(MANIFEST.contains("icons/icon-128.png"));
-        assert!(SERVICE_WORKER.contains("SUNOX_BRIDGE_TRANSPORTS"));
-        assert!(SERVICE_WORKER.contains("transport?.contractVersion !== 1"));
-        assert!(SERVICE_WORKER.contains("transport-${transportName}.js"));
-        assert!(!SERVICE_WORKER.contains("transport-loopback.js"));
+        assert!(SERVICE_WORKER.contains("chrome.offscreen.createDocument"));
+        assert!(SERVICE_WORKER.contains("chrome.declarativeNetRequest.updateSessionRules"));
+        assert!(SERVICE_WORKER.contains("content-security-policy"));
+        assert!(SERVICE_WORKER.contains("x-frame-options"));
+        assert!(SERVICE_WORKER.contains("reasons: [\"IFRAME_SCRIPTING\", \"WORKERS\"]"));
         assert!(SERVICE_WORKER.contains("chrome.alarms"));
-        assert!(SERVICE_WORKER.contains("transport.claimChallenge"));
-        assert!(SERVICE_WORKER.contains("transport.submitResult"));
-        assert!(LOOPBACK_TRANSPORT.contains("sunox-bridge-server-v1"));
+        assert!(!SERVICE_WORKER.contains("chrome.windows.create"));
+        assert!(!SERVICE_WORKER.contains("chrome.tabs.create"));
+        assert!(OFFSCREEN_HTML.contains("transport-loopback.js"));
+        assert!(OFFSCREEN_HTML.contains("offscreen.js"));
+        assert!(OFFSCREEN_HTML.contains("shared.js"));
+        assert!(OFFSCREEN.contains("transport.claimChallenge"));
+        assert!(OFFSCREEN.contains("transport.submitResult"));
+        assert!(OFFSCREEN.contains("document.createElement(\"iframe\")"));
+        assert!(OFFSCREEN.contains("sunox-managed-frame-execute-v1"));
+        assert!(OFFSCREEN.contains("new Worker(\"poll-worker.js\")"));
+        assert!(POLL_WORKER.contains("sunox-poll"));
+        assert!(SHARED.contains("errorMessage(error)"));
         assert!(LOOPBACK_TRANSPORT.contains("contractVersion: 1"));
-        assert!(LOOPBACK_TRANSPORT.contains("/v1/challenge/claim"));
+        for expected in [
+            "/v2/challenge/hello",
+            "/v2/challenge/claim",
+            "/v2/challenge/result",
+            "sunox-bridge-server-v2",
+            "sunox-bridge-client-v2",
+            "sunox-bridge-result-v2",
+            "sunox-bridge-receipt-v2",
+        ] {
+            assert!(LOOPBACK_TRANSPORT.contains(expected));
+        }
+        assert!(!LOOPBACK_TRANSPORT.contains("/v1/challenge/"));
+        assert!(!LOOPBACK_TRANSPORT.contains("sunox-bridge-receipt-v1"));
         assert!(!LOOPBACK_TRANSPORT.contains("Authorization"));
-        assert!(BRIDGE.contains("sunox-wake"));
+        assert!(BRIDGE.contains("chrome.runtime.connect"));
+        assert!(BRIDGE.contains("sunox-managed-frame-result-v1"));
         assert!(PAGE.contains("hcaptcha.execute"));
         assert!(PAGE.contains("turnstile.execute"));
         assert!(CONFIG_TEMPLATE.contains("schemaVersion: 1"));
@@ -232,8 +274,7 @@ mod tests {
         assert!(CONFIG_TEMPLATE.contains("__SUNOX_BRIDGE_PORT_START__"));
         assert!(CONFIG_TEMPLATE.contains("__SUNOX_BRIDGE_PORT_COUNT__"));
         assert!(CONFIG_TEMPLATE.contains("__SUNOX_BRIDGE_SECRET__"));
-        assert!(LOOPBACK_TRANSPORT.contains("sunox-bridge-receipt-v1"));
-        assert!(BRIDGE.contains("transportReceipt"));
+        assert!(OFFSCREEN.contains("transportReceipt"));
         assert!(!BRIDGE.contains("bridgePort"));
         assert!(!BRIDGE.contains("clientNonce"));
         assert!(!BRIDGE.contains("serverNonce"));
@@ -243,10 +284,20 @@ mod tests {
     fn rendered_config_uses_the_rust_bridge_contract() {
         let config = render_config("secret-value");
 
-        assert!(config.contains("protocolVersion: 1"));
+        assert!(config.contains("protocolVersion: 2"));
         assert!(config.contains("portStart: 29764"));
         assert!(config.contains("portCount: 8"));
         assert!(config.contains("sharedSecret: \"secret-value\""));
         assert!(!config.contains("__SUNOX_BRIDGE_"));
+    }
+
+    #[test]
+    fn rendered_manifest_displays_the_cli_version() {
+        let manifest: serde_json::Value =
+            serde_json::from_str(&render_manifest()).expect("rendered extension manifest");
+
+        assert_eq!(manifest["version"], "0.3.4");
+        assert_eq!(manifest["version_name"], env!("CARGO_PKG_VERSION"));
+        assert!(!render_manifest().contains("__SUNOX_VERSION__"));
     }
 }

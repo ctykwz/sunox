@@ -21,7 +21,8 @@ use crate::core::CliError;
 
 const ACTIVE_TAB_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
 const BACKGROUND_TAB_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(27);
-const COMPLETION_TIMEOUT: Duration = Duration::from_secs(35);
+const COMPLETION_TIMEOUT_MS: u64 = 360_000;
+const COMPLETION_TIMEOUT: Duration = Duration::from_millis(COMPLETION_TIMEOUT_MS);
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_REQUEST_BYTES: usize = 24 * 1024;
 const CLAIM_PENDING: u8 = 0;
@@ -156,7 +157,7 @@ pub(super) async fn try_solve(provider: ChallengeProvider) -> Result<Option<Stri
     }
 
     eprintln!(
-        "Using the connected Suno browser tab for silent challenge verification (bridge port {port})..."
+        "Using the Browser Bridge managed Chrome context for silent challenge verification (bridge port {port})..."
     );
     let result = timeout(COMPLETION_TIMEOUT, result_receiver).await;
     cancellation.cancel();
@@ -165,15 +166,20 @@ pub(super) async fn try_solve(provider: ChallengeProvider) -> Result<Option<Stri
     match result {
         Ok(Ok(BridgeResult::Token(token))) => Ok(Some(token)),
         Ok(Ok(BridgeResult::Error(error))) => Err(CliError::Config(format!(
-            "existing browser challenge failed: {error}"
+            "Browser Bridge challenge failed: {error}"
         ))),
         Ok(Err(_)) => Err(CliError::Config(
-            "existing browser challenge bridge closed before returning a result".into(),
+            "Browser Bridge closed before returning a challenge result".into(),
         )),
-        Err(_) => Err(CliError::Config(
-            "existing browser challenge timed out after 35 seconds".into(),
-        )),
+        Err(_) => Err(CliError::Config(format!(
+            "Browser Bridge challenge timed out after {} seconds",
+            COMPLETION_TIMEOUT.as_secs()
+        ))),
     }
+}
+
+pub(super) fn is_configured() -> Result<bool, CliError> {
+    Ok(browser_extension::bridge_secret()?.is_some())
 }
 
 async fn bind_bridge_listener() -> Result<(TcpListener, u16), CliError> {
@@ -197,7 +203,7 @@ async fn wait_for_claim(state: &BridgeState) -> bool {
     if wait_for_claim_signal(state, ACTIVE_TAB_DISCOVERY_TIMEOUT).await {
         return true;
     }
-    eprintln!("Waiting for the Chrome extension to wake a background Suno tab...");
+    eprintln!("Waiting for the Chrome extension's hidden challenge context...");
     let _ = wait_for_claim_signal(state, BACKGROUND_TAB_DISCOVERY_TIMEOUT).await;
     close_discovery(state)
 }
@@ -273,9 +279,9 @@ fn route_request(request: &HttpRequest, state: &BridgeState) -> Result<HttpRespo
     }
 
     match request.path.as_str() {
-        "/v1/challenge/hello" => hello(request, state),
-        "/v1/challenge/claim" => claim(request, state),
-        "/v1/challenge/result" => receive_result(request, state),
+        "/v2/challenge/hello" => hello(request, state),
+        "/v2/challenge/claim" => claim(request, state),
+        "/v2/challenge/result" => receive_result(request, state),
         _ => Ok(HttpResponse::empty(404, "Not Found")),
     }
 }
@@ -297,7 +303,7 @@ fn hello(request: &HttpRequest, state: &BridgeState) -> Result<HttpResponse, Cli
             server_nonce: &state.server_nonce,
             proof: authentication_proof(
                 &state.secret,
-                "sunox-bridge-server-v1",
+                "sunox-bridge-server-v2",
                 &[&port, &hello.client_nonce, &state.server_nonce],
             ),
         },
@@ -321,7 +327,7 @@ fn claim(request: &HttpRequest, state: &BridgeState) -> Result<HttpResponse, Cli
     let port = state.port.to_string();
     let expected_proof = authentication_proof(
         &state.secret,
-        "sunox-bridge-client-v1",
+        "sunox-bridge-client-v2",
         &[
             &port,
             &claim.client_nonce,
@@ -354,10 +360,7 @@ fn claim(request: &HttpRequest, state: &BridgeState) -> Result<HttpResponse, Cli
         ClaimResponse {
             version: PROTOCOL_VERSION,
             request_id: &state.request_id,
-            provider: match state.provider {
-                ChallengeProvider::HCaptcha => "hcaptcha",
-                ChallengeProvider::Turnstile => "turnstile",
-            },
+            provider: state.provider.bridge_name(),
         },
     )
 }
@@ -396,7 +399,7 @@ fn receive_result(request: &HttpRequest, state: &BridgeState) -> Result<HttpResp
     let port = state.port.to_string();
     let expected_proof = authentication_proof(
         &state.secret,
-        "sunox-bridge-result-v1",
+        "sunox-bridge-result-v2",
         &[
             &port,
             &result.client_nonce,
@@ -590,19 +593,65 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        BridgeResult, BridgeState, CLAIM_CLOSED, CLAIM_PENDING, HttpRequest, authentication_proof,
-        constant_time_eq, is_suno_page, route_request, serve, valid_extension_origin,
+        BridgeResult, BridgeState, CLAIM_CLOSED, CLAIM_PENDING, COMPLETION_TIMEOUT_MS, HttpRequest,
+        PROTOCOL_VERSION, authentication_proof, constant_time_eq, is_suno_page, route_request,
+        serve, valid_extension_origin,
     };
     use crate::api::challenge::ChallengeProvider;
+    use crate::captcha::{
+        SUNO_CHALLENGE_SDK_READY_TIMEOUT_MS, SUNO_TURNSTILE_IDLE_TIMEOUT_MS,
+        SUNO_TURNSTILE_INTERACTIVE_TIMEOUT_MS,
+    };
 
-    fn state(secret: &str) -> (BridgeState, oneshot::Receiver<BridgeResult>) {
+    fn javascript_number(source: &str, name: &str) -> u64 {
+        let declaration = format!("const {name} = ");
+        let start = source
+            .find(&declaration)
+            .unwrap_or_else(|| panic!("missing JavaScript declaration {name}"))
+            + declaration.len();
+        source[start..]
+            .split(';')
+            .next()
+            .expect("JavaScript numeric constant")
+            .replace('_', "")
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("invalid JavaScript numeric constant {name}"))
+    }
+
+    #[test]
+    fn bridge_timeout_layers_cover_cold_start_and_interactive_challenge() {
+        let page = include_str!("../../assets/browser-extension/page.js");
+        let bridge = include_str!("../../assets/browser-extension/bridge.js");
+        let offscreen = include_str!("../../assets/browser-extension/offscreen.js");
+
+        let sdk_ready_timeout = javascript_number(page, "CHALLENGE_SDK_READY_TIMEOUT_MS");
+        let interactive_timeout = javascript_number(page, "TURNSTILE_INTERACTIVE_TIMEOUT_MS");
+        let page_timeout = javascript_number(bridge, "challengePageTimeoutMs");
+        let frame_ready_timeout = javascript_number(offscreen, "frameReadyTimeoutMs");
+        let frame_result_timeout = javascript_number(offscreen, "challengeTimeoutMs");
+
+        assert_eq!(sdk_ready_timeout, SUNO_CHALLENGE_SDK_READY_TIMEOUT_MS);
+        assert_eq!(interactive_timeout, SUNO_TURNSTILE_INTERACTIVE_TIMEOUT_MS);
+        assert!(
+            page_timeout
+                > sdk_ready_timeout + 3 * SUNO_TURNSTILE_IDLE_TIMEOUT_MS + 2 * interactive_timeout
+        );
+        assert!(frame_result_timeout > page_timeout);
+        assert!(COMPLETION_TIMEOUT_MS > frame_ready_timeout + frame_result_timeout);
+    }
+
+    fn state_with_provider(
+        secret: &str,
+        provider: ChallengeProvider,
+    ) -> (BridgeState, oneshot::Receiver<BridgeResult>) {
         let (sender, receiver) = oneshot::channel();
         (
             BridgeState {
                 port: 29_764,
                 request_id: "request-a".into(),
                 server_nonce: "server-nonce-00000001".into(),
-                provider: ChallengeProvider::HCaptcha,
+                provider,
                 secret: secret.into(),
                 claim_state: CLAIM_PENDING.into(),
                 claimed_notify: Notify::new(),
@@ -611,6 +660,10 @@ mod tests {
             },
             receiver,
         )
+    }
+
+    fn state(secret: &str) -> (BridgeState, oneshot::Receiver<BridgeResult>) {
+        state_with_provider(secret, ChallengeProvider::HCaptcha)
     }
 
     fn request(path: &str, body: serde_json::Value) -> HttpRequest {
@@ -637,14 +690,14 @@ mod tests {
             page_url,
         ];
         request(
-            "/v1/challenge/claim",
+            "/v2/challenge/claim",
             serde_json::json!({
-                "version": 1,
+                "version": PROTOCOL_VERSION,
                 "client_id": "client-a",
                 "page_url": page_url,
                 "client_nonce": "client-nonce-00000001",
                 "server_nonce": "server-nonce-00000001",
-                "proof": authentication_proof(secret, "sunox-bridge-client-v1", &fields)
+                "proof": authentication_proof(secret, "sunox-bridge-client-v2", &fields)
             }),
         )
     }
@@ -659,15 +712,15 @@ mod tests {
             token,
         ];
         request(
-            "/v1/challenge/result",
+            "/v2/challenge/result",
             serde_json::json!({
-                "version": 1,
+                "version": PROTOCOL_VERSION,
                 "request_id": "request-a",
                 "client_nonce": "client-nonce-00000001",
                 "server_nonce": "server-nonce-00000001",
                 "token": token,
                 "error": null,
-                "proof": authentication_proof(secret, "sunox-bridge-result-v1", &fields)
+                "proof": authentication_proof(secret, "sunox-bridge-result-v2", &fields)
             }),
         )
     }
@@ -703,6 +756,50 @@ mod tests {
     }
 
     #[test]
+    fn obsolete_v1_bridge_cannot_complete_the_v2_handshake() {
+        assert_eq!(PROTOCOL_VERSION, 2);
+        let (state, _receiver) = state("secret-value");
+        let old_route = request(
+            "/v1/challenge/hello",
+            serde_json::json!({
+                "version": 1,
+                "client_nonce": "client-nonce-00000001"
+            }),
+        );
+        let old_version = request(
+            "/v2/challenge/hello",
+            serde_json::json!({
+                "version": 1,
+                "client_nonce": "client-nonce-00000001"
+            }),
+        );
+        let current = request(
+            "/v2/challenge/hello",
+            serde_json::json!({
+                "version": PROTOCOL_VERSION,
+                "client_nonce": "client-nonce-00000001"
+            }),
+        );
+
+        assert_eq!(
+            route_request(&old_route, &state).expect("old route").status,
+            404
+        );
+        assert_eq!(
+            route_request(&old_version, &state)
+                .expect("old version")
+                .status,
+            422
+        );
+        assert_eq!(
+            route_request(&current, &state)
+                .expect("current version")
+                .status,
+            200
+        );
+    }
+
+    #[test]
     fn first_valid_suno_tab_claims_the_challenge() {
         let (state, _receiver) = state("secret-value");
         let claim = claim_request("secret-value", "https://suno.com/create");
@@ -712,6 +809,23 @@ mod tests {
 
         assert_eq!(first.status, 200);
         assert_eq!(second.status, 409);
+    }
+
+    #[test]
+    fn claim_response_serializes_each_challenge_provider() {
+        for (provider, expected) in [
+            (ChallengeProvider::HCaptcha, "hcaptcha"),
+            (ChallengeProvider::Turnstile, "turnstile"),
+        ] {
+            let (state, _receiver) = state_with_provider("secret-value", provider);
+            let claim = claim_request("secret-value", "https://suno.com/create");
+            let response = route_request(&claim, &state).expect("claim response");
+            let body: serde_json::Value =
+                serde_json::from_slice(&response.body).expect("claim response json");
+
+            assert_eq!(response.status, 200);
+            assert_eq!(body["provider"], expected);
+        }
     }
 
     #[test]
@@ -778,17 +892,17 @@ mod tests {
         ));
 
         let hello_body = serde_json::json!({
-            "version": 1,
+            "version": PROTOCOL_VERSION,
             "client_nonce": "client-nonce-00000001"
         })
         .to_string();
-        let hello_response = raw_request(address, "/v1/challenge/hello", &hello_body).await;
+        let hello_response = raw_request(address, "/v2/challenge/hello", &hello_body).await;
         assert!(hello_response.starts_with("HTTP/1.1 200 OK"));
         assert!(!hello_response.contains("secret-value"));
 
         let claim = claim_request("secret-value", "https://suno.com/create");
         let claim_body = String::from_utf8(claim.body).expect("claim body");
-        let claim_response = raw_request(address, "/v1/challenge/claim", &claim_body).await;
+        let claim_response = raw_request(address, "/v2/challenge/claim", &claim_body).await;
         assert!(claim_response.starts_with("HTTP/1.1 200 OK"));
         assert!(claim_response.contains(
             "Access-Control-Allow-Origin: chrome-extension://abcdefghijklmnopabcdefghijklmnop"
@@ -797,7 +911,7 @@ mod tests {
 
         let result = result_request("secret-value", "abcdefghijklmnopqrstuvwxyz");
         let result_body = String::from_utf8(result.body).expect("result body");
-        let result_response = raw_request(address, "/v1/challenge/result", &result_body).await;
+        let result_response = raw_request(address, "/v2/challenge/result", &result_body).await;
         assert!(result_response.starts_with("HTTP/1.1 204 No Content"));
         let BridgeResult::Token(token) = receiver.await.expect("bridge result") else {
             panic!("expected token");
@@ -812,9 +926,9 @@ mod tests {
     fn hello_response_proves_server_identity_without_receiving_the_secret() {
         let (state, _receiver) = state("secret-value");
         let hello = request(
-            "/v1/challenge/hello",
+            "/v2/challenge/hello",
             serde_json::json!({
-            "version": 1,
+                "version": PROTOCOL_VERSION,
                 "client_nonce": "client-nonce-00000001"
             }),
         );
@@ -823,7 +937,7 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&response.body).expect("hello JSON");
         let expected = authentication_proof(
             "secret-value",
-            "sunox-bridge-server-v1",
+            "sunox-bridge-server-v2",
             &["29764", "client-nonce-00000001", "server-nonce-00000001"],
         );
 
@@ -831,7 +945,7 @@ mod tests {
         assert_eq!(body["proof"], expected);
         assert_eq!(
             expected,
-            "e036e106ebdc8445e1afe3c875cb914ff8b3288383afe780e62e67475b1f38b7"
+            "f629f0215a73c7579aedb03d45d2c5689909ad34ada012da1a2a2d6bc467460f"
         );
         assert!(
             !String::from_utf8(response.body)

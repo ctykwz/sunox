@@ -11,7 +11,7 @@ pub struct ClipInfo {
     pub clip: Clip,
     pub attribution: ClipAttribution,
     pub comments: ClipComments,
-    pub direct_children_count: u64,
+    pub remix_count: RemixCountResponse,
     pub similar_clips: Vec<Clip>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supplemental_errors: Vec<ClipInfoSupplementalError>,
@@ -110,10 +110,14 @@ pub struct ClipComment {
     pub extra: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct DirectChildrenCountResponse {
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct RemixCountResponse {
     #[serde(default)]
     pub count: u64,
+    #[serde(default)]
+    pub is_capped: bool,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -153,5 +157,14 @@ mod tests {
         assert_eq!(attribution["source_clips"][0]["user"]["badge"], "verified");
         assert_eq!(comments["next_cursor"], "cursor-2");
         assert_eq!(comments["results"][0]["moderation_state"], "clean");
+    }
+
+    #[test]
+    fn remix_count_matches_web_defaults_for_omitted_fields() {
+        let response: RemixCountResponse =
+            serde_json::from_value(serde_json::json!({})).expect("remix count");
+
+        assert_eq!(response.count, 0);
+        assert!(!response.is_capped);
     }
 }

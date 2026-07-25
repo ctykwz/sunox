@@ -34,8 +34,8 @@ pub use media::{DownloadArgs, DownloadFormat, TimedLyricsArgs, UploadArgs, Uploa
 pub use models::{CoverModel, ModelVersion, RemasterModel, VocalGender};
 pub use persona::{
     PersonaArgs, PersonaClipsArgs, PersonaCommand, PersonaCreateArgs, PersonaDeleteArgs,
-    PersonaInfoArgs, PersonaListArgs, PersonaListKind, PersonaLoveArgs, PersonaProcessedClipArgs,
-    PersonaPublishArgs, PersonaRestoreArgs, PersonaSetArgs, PersonaToggleLoveArgs,
+    PersonaInfoArgs, PersonaListArgs, PersonaListKind, PersonaLoveArgs, PersonaPublishArgs,
+    PersonaRestoreArgs, PersonaSetArgs, PersonaToggleLoveArgs,
 };
 pub use playlist::{
     AddArgs, PlaylistArgs, PlaylistCommand, PlaylistCreateArgs, PlaylistDeleteArgs,
@@ -92,7 +92,7 @@ pub enum Commands {
     /// Add clip(s) to a playlist
     Add(AddArgs),
 
-    /// Generate lyrics only (free, no credits used)
+    /// Generate lyrics with Suno's current Cowrite flow
     Lyrics(LyricsArgs),
 
     /// Manage clips

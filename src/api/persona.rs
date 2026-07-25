@@ -3,8 +3,7 @@ use serde_json::Value;
 use super::SunoClient;
 use super::types::{
     CreatePersonaRequest, EditPersonaRequest, PersonaClipsResponse, PersonaInfo,
-    PersonaListResponse, PersonaListScope, ProcessedClipInfo, TogglePersonaLoveResponse,
-    TrashPersonasResponse,
+    PersonaListResponse, PersonaListScope, TogglePersonaLoveResponse, TrashPersonasResponse,
 };
 use crate::core::CliError;
 
@@ -60,23 +59,6 @@ impl SunoClient {
             let resp = self
                 .get(&format!("/api/persona/get-persona-paginated/{persona_id}/"))
                 .query(&[("page", page.to_string())])
-                .send()
-                .await?;
-            let resp = self.check_response(resp).await?;
-            Ok(resp.json().await?)
-        })
-        .await
-    }
-
-    /// Fetch processed vocal clip status and vocal preview URL.
-    /// GET /api/processed_clip/{processed_clip_id}
-    pub async fn get_processed_clip(
-        &self,
-        processed_clip_id: &str,
-    ) -> Result<ProcessedClipInfo, CliError> {
-        self.with_auth_retry(|| async {
-            let resp = self
-                .get(&format!("/api/processed_clip/{processed_clip_id}"))
                 .send()
                 .await?;
             let resp = self.check_response(resp).await?;

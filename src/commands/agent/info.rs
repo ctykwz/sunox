@@ -6,7 +6,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
         .map(|dir| dir.join("auth.json").display().to_string())
         .unwrap_or_else(|| "~/.config/sunox/auth.json".into());
 
-    let info = serde_json::json!({
+    let mut info = serde_json::json!({
         "name": "sunox",
         "version": env!("CARGO_PKG_VERSION"),
         "description": "Suno AI music generation CLI — direct Suno web workflow",
@@ -103,13 +103,13 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "public_visibility": "do not publish clips, playlists, or personas or make them public unless the user explicitly asks",
             "persona_create_visibility": "persona create is private by default and requires explicit --public to create a public persona",
             "destructive_actions": "do not run delete, trash, purge, empty-trash, or other destructive commands unless the user explicitly asks. clip purge and clip empty-trash are irreversible and require -y/--yes.",
-            "captcha": "for unattended no-new-window generation, use confirmed Browser Bridge installation as the command-selection boundary: when installed, omit --no-captcha and use challenge_browser=existing, which verifies that a refreshed authenticated suno.com tab is connected and fails closed when it is not. Confirmed installation is standing permission for invisible challenges in that existing tab and does not require per-run captcha permission. Interpret no popup, no new browser, or no visible captcha as challenge_browser=existing, not --no-captcha. Use --no-captcha with an installed bridge only when the user explicitly forbids every challenge mechanism including the invisible Browser Bridge, or explicitly requests that flag. When the bridge is absent or installation is unknown, keep --no-captcha so a required challenge stops before submission. The default challenge_browser=auto may open an isolated browser when no paired tab responds. Do not force --captcha unless the user explicitly asks, and prefer an externally supplied --token when provided",
+            "captcha": "for unattended generation that must not add a Suno tab to the active browser window or launch a separate browser process, use confirmed Browser Bridge installation as the command-selection boundary: when installed, omit --no-captcha; both challenge_browser=auto and challenge_browser=existing use the extension-managed hidden Suno context and fail closed when the Bridge is unavailable. Confirmed installation is standing permission for invisible challenges in that managed context and does not require per-run captcha permission. Interpret no popup, no new browser, or no visible captcha as allowing the invisible Bridge, not as --no-captcha. Use --no-captcha with an installed bridge only when the user explicitly forbids every challenge mechanism including the invisible Browser Bridge, or explicitly requests that flag. When the bridge is absent or installation is unknown, keep --no-captcha so a required challenge stops before submission. The default challenge_browser=auto may open an isolated browser only when no Bridge pairing is configured; use challenge_browser=isolated explicitly when a separate challenge browser is acceptable. Do not force --captcha unless the user explicitly asks, and prefer an externally supplied --token when provided",
             "structured_instrumental": "choose exactly one input mode: use --instrumental without --lyrics/--lyrics-file for an unconstrained no-lyrics instrumental; for controlled sections, rhythm, or arrangement, omit --instrumental and send a custom lyrics file whose first line is [Instrumental] and whose remaining non-empty lines are bracketed directions. After clip wait, inspect clip timed-lyrics --json and reject a generated version from downstream selection if any successful non-empty aligned word is present; never delete it without explicit authorization",
             "secrets": "never print, persist in project files, or include auth cookies, Clerk values, JWTs, or challenge tokens in prompts, logs, README examples, or commits; prefer auth --cookie-stdin or --jwt-stdin over argv"
         },
         "command_notes": {
             "create": {
-                "default_challenge": "preflights POST /api/c/check with ctype=generation; if Suno reports a challenge and stored Clerk refresh material exists, refreshes the JWT once and repeats the preflight; when still required, challenge_browser=auto first asks the paired Sunox Browser Bridge to solve invisibly in an existing suno.com tab and falls back to an isolated matching browser, then submits provider 1 for hCaptcha or provider 2 for Cloudflare Turnstile; when not required, submits token=null and token_provider=null",
+                "default_challenge": "preflights POST /api/c/check with ctype=generation; if Suno reports a challenge and stored Clerk refresh material exists, refreshes the JWT once and repeats the preflight; when still required, challenge_browser=auto first asks the paired Sunox Browser Bridge to solve invisibly in its managed hidden Suno context. A configured but unavailable Bridge fails closed; auto falls back to an isolated matching browser only when no Bridge pairing exists. It then submits provider 1 for hCaptcha or provider 2 for Cloudflare Turnstile; when no challenge is required, token and token_provider are omitted to match the Web client",
                 "challenge_flags": {
                     "--token": "use an externally supplied solved challenge token; preflight infers token_provider from the reported captcha_version and falls back to provider 1 only when a non-auth preflight error prevents detection",
                     "--captcha": "force browser-backed challenge verification even when preflight says it is unnecessary",
@@ -151,10 +151,10 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                     "GET /api/clip/<clip_id>",
                     "GET /api/clips/{clip_id}/attribution",
                     "GET /api/gen/{clip_id}/comments?order=most_liked",
-                    "GET /api/clips/direct_children_count?clip_id=<clip_id>",
+                    "GET /api/clips/remixes/count?clip_id=<clip_id>",
                     "GET /api/clips/get_similar/?id=<clip_id>"
                 ],
-                "json_shape": "main clip fields remain top-level; attribution, comments, direct_children_count, and similar_clips are added as semantic song-page context; if a non-auth, non-rate-limit supplemental read fails, the base clip is still returned with supplemental_errors; auth and rate-limit errors still abort normally"
+                "json_shape": "main clip fields remain top-level; attribution, comments, remix_count={count,is_capped,...}, and similar_clips are added as semantic song-page context; if a non-auth, non-rate-limit supplemental read fails, the base clip is still returned with supplemental_errors; auth and rate-limit errors still abort normally"
             },
             "clip remaster": {
                 "route": "POST /api/generate/upsample",
@@ -263,7 +263,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "clip_like", "clip_dislike", "optional_captcha_solver", "audio_upload", "audio_upload_status",
             "id3_lyrics_embedding", "clip_list_filters", "voice_persona", "persona_list",
             "persona_info", "persona_clips", "persona_create",
-            "persona_set_metadata", "persona_processed_clip",
+            "persona_set_metadata",
             "persona_set_visibility", "persona_love",
             "persona_unlove", "persona_toggle_love", "persona_delete",
             "persona_restore", "persona_purge",
@@ -300,7 +300,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
         "config": {
             "set": "sunox config set <key> <value> persists to config.toml",
             "env_override": "SUNOX_* environment variables override persisted config values",
-            "challenge_browser": "auto prefers a connected paired Browser Bridge in an existing Suno tab and falls back to an isolated browser; existing requires that connected paired tab and never opens another browser; isolated always uses the temporary browser",
+            "challenge_browser": "auto prefers the paired Browser Bridge, fails closed when a configured Bridge is unavailable, and falls back to an isolated browser only when no Bridge pairing exists; existing is the compatibility name for always requiring the Bridge-managed hidden Suno context; isolated always uses the temporary browser",
             "keys": ["default_model", "poll_interval_secs", "poll_timeout_secs", "output_dir", "serial_mutations", "challenge_browser"]
         },
         "resource_management": {
@@ -318,14 +318,13 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "persona": {
                 "commands": [
                     "persona list", "persona info", "persona clips", "persona create",
-                    "persona set", "persona processed-clip",
+                    "persona set",
                     "persona publish", "persona unpublish",
                     "persona love", "persona unlove", "persona toggle-love",
                     "persona delete", "persona restore", "persona purge"
                 ],
                 "clips_status": "implemented via GET /api/persona/get-persona-paginated/{id}/?page=N",
                 "edit_status": "implemented via PUT /api/persona/edit-persona/{id}/",
-                "processed_clip_status": "implemented via GET /api/processed_clip/{id}",
                 "visibility_status": "implemented via PUT /api/persona/set_visibility/{id}/?is_public=true|false",
                 "trash_status": "implemented via PUT /api/persona/trash-persona/{id}/?undo=false&hide=false",
                 "restore_status": "implemented via PUT /api/persona/trash-persona/{id}/?undo=true&hide=false",
@@ -377,12 +376,18 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             ],
             "login_fallback": "`sunox login` first probes existing browser cookies; if that fails, it opens a dedicated Sunox Chromium-family profile and captures the Clerk session after the user logs in. Windows skips live Chromium cookie databases so App-Bound decryption cannot force-close a running browser, while Firefox uses a non-destructive read-only SQLite path. The interactive fallback requires an installed Chromium-family browser.",
             "logout": "`sunox logout` removes stored auth, the dedicated interactive browser profile, and any legacy captcha profile",
-            "generation_challenge": "Commands that submit through /api/generate/v2-web/ preflight POST /api/c/check with ctype=generation. If Suno reports a challenge and stored Clerk refresh material exists, Sunox refreshes the JWT once and repeats the preflight. If a challenge remains, challenge_browser=auto first asks the paired Sunox Browser Bridge to perform silent verification inside an existing suno.com tab, using hCaptcha/provider 1 or Cloudflare Turnstile/provider 2 according to captcha_version. When no connected tab claims the request, it falls back to an invocation-owned isolated browser using stored verified account cookies and the matching recorded browser source. Use --token <solved> for an external token, --captcha to force verification, or --no-captcha to disable automatic browser verification.",
+            "generation_challenge": "Commands that submit through /api/generate/v2-web/ preflight POST /api/c/check with ctype=generation. If Suno reports a challenge and stored Clerk refresh material exists, Sunox refreshes the JWT once and repeats the preflight. If a challenge remains, challenge_browser=auto first asks the paired Sunox Browser Bridge to perform silent verification in its managed hidden Suno context, using hCaptcha/provider 1 or Cloudflare Turnstile/provider 2 according to captcha_version. No user-opened Suno tab is required. A configured but unavailable Bridge fails closed; auto falls back to an invocation-owned isolated browser only when no Bridge pairing exists. Use challenge_browser=isolated explicitly to allow that separate browser. Use --token <solved> for an external token, --captcha to force verification, or --no-captcha to disable automatic browser verification.",
             "browser_environment": "Browser-cookie login links auth to the matching local profile and probes the same installed browser binary for runtime user-agent, accept-language, client hints, and matching device identity without a visible window or Suno navigation. Legacy auth is repaired before authenticated commands. Fresh values win per field, stored values survive failed probes, and built-in constants are only the final UA/language fallback. Device-Id is recovered from the same account when possible and otherwise omitted rather than fabricated. The recovered context is used for Clerk login/JWT refresh and Suno API requests.",
         },
         "provider": "direct_suno_unofficial",
         "auth_required": true,
         "default_model": "auto (account usable default; chirp-fenix fallback only when billing info is unavailable)",
+    });
+    info["command_notes"]["lyrics"] = serde_json::json!({
+        "route": "POST /api/generate/cowrite-lyrics/",
+        "mode": "apply_user_request",
+        "request_contract": "selected, context_before, and context_after are empty strings; the user prompt is sent as instruction; title and style are empty strings; references is empty; the default lyrics model is selected with thinking disabled; no legacy submit/status polling is used",
+        "response_contract": "returns the current edited_lyrics, lyrics_request_id, lyrics_id, variants, artist_to_tag_mapping, next_prompts, and any additional response fields without mapping them back to the removed text/title/status/tags shape"
     });
     println!("{}", serde_json::to_string_pretty(&info)?);
     Ok(())

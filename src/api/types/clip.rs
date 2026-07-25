@@ -55,12 +55,25 @@ mod tests {
             "model_name": "chirp-carp",
             "created_at": "2026-07-19T00:00:00Z",
             "allow_comments": true,
-            "ownership": {"can_edit": true},
-            "media_urls": {"audio": "https://cdn.example/demo.mp3"},
+            "action_config": {
+                "actions": [{
+                    "action_type": "download_song",
+                    "disabled": false,
+                    "visible": true
+                }]
+            },
+            "ownership": {"ownership_reason": "subscribed"},
+            "media_urls": [{
+                "url": "https://cdn.example/demo.mp3",
+                "content_type": "mp3",
+                "delivery": "progressive"
+            }],
             "metadata": {
                 "prompt": "[Verse]",
                 "duration": 120.0,
+                "model_badges": {"songcard": {"display_name": "v5.5"}},
                 "priority": 10,
+                "refund_credits": false,
                 "uses_latest_model": true
             }
         }))
@@ -68,12 +81,21 @@ mod tests {
 
         let output = serde_json::to_value(clip).expect("serialize clip response");
         assert_eq!(output["allow_comments"], true);
-        assert_eq!(output["ownership"]["can_edit"], true);
         assert_eq!(
-            output["media_urls"]["audio"],
+            output["action_config"]["actions"][0]["action_type"],
+            "download_song"
+        );
+        assert_eq!(output["ownership"]["ownership_reason"], "subscribed");
+        assert_eq!(
+            output["media_urls"][0]["url"],
             "https://cdn.example/demo.mp3"
         );
+        assert_eq!(
+            output["metadata"]["model_badges"]["songcard"]["display_name"],
+            "v5.5"
+        );
         assert_eq!(output["metadata"]["priority"], 10);
+        assert_eq!(output["metadata"]["refund_credits"], false);
         assert_eq!(output["metadata"]["uses_latest_model"], true);
         assert!(output.get("extra").is_none());
         assert!(output["metadata"].get("extra").is_none());

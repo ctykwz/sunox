@@ -144,21 +144,50 @@ sunox update                       最新の GitHub Release に更新
 ## 生成時の Challenge
 
 生成系のリクエストを送る前に、Sunox は Suno Web と同じ Challenge チェックを行います。
-Challenge が不要ならブラウザを起動せず、そのまま送信します。Suno が要求した場合は、まず任意の
-Browser Bridge 拡張機能が既存の `suno.com` タブ内で invisible challenge を実行します。ペアリング済み
-タブが応答しない場合、既定の `auto` モードが対応する Chromium を使用し、終了後に一時 Profile を削除します。
+Challenge が不要なら、ブラウザを起動せずにそのまま送信します。Suno が Challenge を要求した
+場合は、まずオプションの Browser Bridge 拡張機能が、普段使っている Chrome プロファイル内で
+不可視の検証ウィジェットを実行します。拡張機能は通常、不可視のリスナーだけを維持し、検証が
+必要なときだけオフスクリーンの `suno.com` Challenge Frame を作成します。この専用コンテキストは
+20 分間再利用された後、自動的に削除されます。Suno のタブを開いたり残したりする必要はなく、
+Bridge がブラウザウィンドウを作成することもありません。
 
-Browser Bridge は Sunox バイナリに同梱され、macOS と Windows の両方に対応しています。
-別の ZIP や Chrome Web Store は不要です。`sunox install-browser-extension` を実行し、表示された
-パスを控えます。Suno で使う Chrome プロファイルの `chrome://extensions` を開き、デベロッパー
-モードを有効にして **パッケージ化されていない拡張機能を読み込む** を選び、そのフォルダーを
-指定してから、ログイン済みの `suno.com` タブを再読み込みしてください。macOS では `~/Library`
-が通常は非表示のため、フォルダー選択画面で `Shift+Command+G` を押してパスを貼り付けます。
-Windows では、フォルダー選択画面のアドレスバーにパスを貼り付けます。
+既定の `auto` モードが対応する Chromium 系ブラウザへフォールバックするのは、Bridge の
+ペアリング情報がまだ設定されていない場合だけです。一度 Bridge をインストールしてペアリング
+すると、Bridge が利用できない場合はエラーで停止し、別のブラウザプロセスを起動しません。
+別ブラウザへのフォールバックを明示的に許可する場合だけ、`challenge_browser=isolated` を
+使用してください。
 
-Sunox の更新後は `sunox install-browser-extension --force` を実行し、拡張機能カードの
-**再読み込み** をクリックして、Suno タブも再読み込みします。Chrome が使用している間は、
-表示された拡張機能フォルダーを移動または削除しないでください。
+### macOS または Windows に Browser Bridge をインストールする
+
+Browser Bridge は Sunox バイナリに同梱されているため、別の ZIP を用意したり、Chrome Web
+Store 経由でインストールしたりする必要はありません。macOS と Windows で手順は同じです。
+
+1. 次のコマンドで拡張機能を展開し、表示されたフォルダーを控えます。
+
+```bash
+sunox install-browser-extension
+```
+
+2. Suno で普段使っている Chrome プロファイルで `chrome://extensions` を開きます。
+3. **デベロッパー モード**を有効にし、**パッケージ化されていない拡張機能を読み込む**を選んで、
+   Sunox が表示したフォルダーをそのまま指定します。macOS では `~/Library` が通常は非表示のため、
+   フォルダー選択画面で `Shift+Command+G` を押してパスを貼り付けます。Windows では、
+   フォルダー選択画面のアドレスバーにパスを貼り付けます。
+4. 拡張機能を有効にしたままにします。Suno のタブを開いておく必要はありません。
+
+拡張機能は Chrome を再起動してもそのまま利用できます。Sunox の更新に新しい Bridge が含まれて
+いる場合は、次のコマンドで拡張機能のファイルを更新します。
+
+```bash
+sunox install-browser-extension --force
+```
+
+続いて、Sunox Browser Bridge の拡張機能カードで **再読み込み** をクリックします。Suno のページを
+再読み込みする必要はありません。Sunox は macOS と Windows のどちらでも、ユーザーごとの
+アプリケーション設定フォルダーを自動的に選びます。Chrome がこのパッケージ化されていない
+拡張機能を使用している間は、そのフォルダーを移動または削除しないでください。
+
+関連する上書きオプションは次のとおりです。
 
 ```text
 --captcha          事前チェックで不要でもブラウザ検証を実行
@@ -166,19 +195,31 @@ Sunox の更新後は `sunox install-browser-extension --force` を実行し、�
 --token <token>    外部で取得した Challenge Token を使用
 ```
 
-`challenge_browser` は `auto`、`existing`（新しいウィンドウを開かない）、`isolated` を選択できます。
-`existing` は Bridge が応答しない場合にエラーを返し、`auto` は分離ブラウザーへフォールバックできます。
+`challenge_browser` には `auto`（既定）、`existing`（Bridge を必須とし、別ブラウザを起動しない）、
+`isolated`（常に一時ブラウザを使用）を指定できます。1 回だけ上書きする場合は
+`-c challenge_browser=existing` を使います。`existing` という名前は既存設定との互換性のために
+残されており、現在は「既存の Chrome プロファイルにインストールされた Bridge を使う」という
+意味です。Bridge 自身がオフスクリーンの Suno Frame を管理するため、タブもウィンドウも不要です。
+Bridge が見つからない、古い、または応答しない場合は、別ブラウザを開かずにエラーになります。
+`auto` で一時ブラウザへフォールバックできるのは、Bridge のペアリング情報が未設定の場合だけです。
+インストール済みの Bridge が無効、古い、または到達不能な場合、`auto` もエラーで停止します。
+別ブラウザを許可する場合は、`isolated` を明示的に指定してください。
 
-無人実行で新しいウィンドウを絶対に開かない場合は、Browser Bridge のインストール確認を基準にします。
-インストール済みなら `--no-captcha` を外して `-c challenge_browser=existing` を使います。このモードが
-更新済みのログイン済み Suno タブへの接続を確認し、未接続なら別ブラウザーを開かずに失敗します。
-未インストールまたはインストールを確認できない場合は `--no-captcha` を残します。
+無人実行で Suno のタブを追加せず、別のブラウザプロセスも起動したくない場合は、Browser Bridge を
+インストールして `--no-captcha` を外します。この状態では `auto` と
+`challenge_browser=existing` のどちらも、Bridge が利用できなければエラーで停止します。
+`existing` は、ペアリング情報がまだない場合でも Bridge を必須とします。Bridge が未インストール、
+またはインストール済みか確認できない場合は `--no-captcha` を残してください。Challenge が必要に
+なれば、送信前に停止します。Bridge が未設定の状態で、既定の `auto` から単に `--no-captcha` を
+外すだけでは、一時ブラウザへのフォールバックが許可されたままです。
 
-Bridge のインストール確認は、既存タブ内の invisible challenge を継続的に許可したものとして扱い、
-生成のたびに captcha の許可を取り直しません。「ポップアップなし」「新しいブラウザーなし」
-「表示される captcha なし」は `--no-captcha` ではなく `challenge_browser=existing` を意味します。
-インストール済みでも `--no-captcha` を使うのは、invisible Bridge を含むすべての challenge が明示的に
-禁止された場合、またはそのフラグ自体が指定された場合だけです。
+Browser Bridge のインストールは、Sunox が管理する非表示コンテキストで不可視の Challenge を実行
+することへの継続的な許可とみなされます。生成のたびに確認を取り直す必要はありません。
+「ポップアップなし」「新しいブラウザなし」「表示される CAPTCHA なし」といった指定は、
+インストール済みの Bridge の利用を許可するものであり、`--no-captcha` を意味しません。
+Bridge だけに限定する明示的な設定は、引き続き `challenge_browser=existing` です。Bridge を
+インストール済みでも `--no-captcha` を使うのは、不可視の Bridge を含むすべての Challenge が
+明示的に禁止された場合、またはそのフラグ自体が明示された場合だけです。
 
 ## JSON と自動化
 

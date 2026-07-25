@@ -7,10 +7,10 @@ use super::SunoClient;
 use super::extend::ExtendClipOptions;
 use super::inspiration::InspirationOptions;
 use super::types::{
-    Clip, ClipReaction, CreateAudioUploadRequest, CreateAudioUploadSpec, CreateImageUploadRequest,
-    CreatePersonaRequest, EditPersonaRequest, FeedFilters, FinishAudioUploadRequest,
-    GenerateRequest, InitializeAudioClipRequest, PersonaListScope, PlaylistReaction,
-    SetMetadataRequest,
+    Clip, ClipReaction, ControlSliders, CreateAudioUploadRequest, CreateAudioUploadSpec,
+    CreateImageUploadRequest, CreatePersonaRequest, EditPersonaRequest, FeedFilters,
+    FinishAudioUploadRequest, GenerateRequest, InitializeAudioClipRequest, PersonaListScope,
+    PlaylistReaction, SetMetadataRequest,
 };
 use crate::auth::{AuthState, BrowserEnvironment};
 use crate::core::CliError;
@@ -50,6 +50,7 @@ fn billing_info_response(plan_id: &str) -> String {
                 "can_use": true,
                 "is_default_model": true,
                 "description": "default test model",
+                "capabilities": ["create_control_sliders"],
                 "max_lengths": {}
             },
             {
@@ -939,7 +940,7 @@ async fn clip_info_fetches_song_page_supplemental_contract() {
     let server = MockServer::json_sequence(&[
         r#"{"source_clips":[{"clip_id":"source-1","title":"Source Song","image_url":"https://cdn2.suno.ai/image_source-1.jpeg","audio_url":"https://cdn1.suno.ai/source-1.mp3","is_deleted":true,"relationship":"COV","user":{"user_id":"user-1","user_display_name":"Source User","user_handle":"source"}}]}"#,
         r#"{"results":[{"id":"comment-1","clip_id":"clip-a","content":"Nice","num_likes":2}],"allow_comment":true,"total_count":1}"#,
-        r#"{"count":3}"#,
+        r#"{"count":3,"is_capped":true,"ranking_version":2}"#,
         r#"{"similar_clips":[{"id":"similar-1","title":"Similar","status":"complete","model_name":"chirp-fenix","created_at":"2026-07-03T00:00:00Z"}]}"#,
     ])
     .await;
@@ -974,7 +975,9 @@ async fn clip_info_fetches_song_page_supplemental_contract() {
         Some("Source Song")
     );
     assert_eq!(info.comments.total_count, 1);
-    assert_eq!(info.direct_children_count, 3);
+    assert_eq!(info.remix_count.count, 3);
+    assert!(info.remix_count.is_capped);
+    assert_eq!(info.remix_count.extra["ranking_version"], 2);
     assert_eq!(info.similar_clips[0].id, "similar-1");
     assert!(info.supplemental_errors.is_empty());
     let requests = server.captured_all().await;
@@ -985,10 +988,7 @@ async fn clip_info_fetches_song_page_supplemental_contract() {
         requests[1].path,
         "/api/gen/clip-a/comments?order=most_liked"
     );
-    assert_eq!(
-        requests[2].path,
-        "/api/clips/direct_children_count?clip_id=clip-a"
-    );
+    assert_eq!(requests[2].path, "/api/clips/remixes/count?clip_id=clip-a");
     assert_eq!(requests[3].path, "/api/clips/get_similar/?id=clip-a");
 }
 
@@ -1031,7 +1031,8 @@ async fn clip_info_keeps_base_clip_when_supplemental_read_fails() {
     );
     assert!(info.attribution.source_clips.is_empty());
     assert_eq!(info.comments.total_count, 0);
-    assert_eq!(info.direct_children_count, 0);
+    assert_eq!(info.remix_count.count, 0);
+    assert!(!info.remix_count.is_capped);
     assert!(info.similar_clips.is_empty());
     assert_eq!(info.supplemental_errors.len(), 1);
     assert_eq!(info.supplemental_errors[0].field, "attribution");
@@ -1430,6 +1431,30 @@ async fn generate_preserves_existing_user_tier_without_billing_lookup() {
 }
 
 #[tokio::test]
+async fn generate_rejects_control_sliders_for_a_model_without_the_web_capability() {
+    let billing = billing_info_response("tier-pro");
+    let server = MockServer::json(&billing).await;
+    let client = server.client();
+    let mut generate = GenerateRequest::new("chirp-v4-5", "custom");
+    generate.metadata.user_tier = "existing-tier".into();
+    generate.metadata.control_sliders = Some(ControlSliders {
+        weirdness_constraint: Some(0.4),
+        style_weight: Some(0.7),
+    });
+    generate.set_challenge_token(Some("captcha-token".into()));
+
+    let error = client
+        .generate(&generate)
+        .await
+        .expect_err("unsupported controls must stop before generation");
+
+    let requests = server.captured_all().await;
+    assert!(matches!(error, CliError::Config(message) if message.contains("does not support")));
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/api/billing/info/");
+}
+
+#[tokio::test]
 async fn generation_challenge_posts_current_web_contract() {
     let server = MockServer::json(r#"{"required":true,"captcha_version":1}"#).await;
     let client = server.client();
@@ -1631,6 +1656,13 @@ async fn generate_without_token_preflights_then_submits_when_challenge_is_not_re
     assert_eq!(requests[2].path, "/api/generate/v2-web/");
     let body = serde_json::from_str::<serde_json::Value>(&requests[2].body).expect("request json");
     assert_eq!(body["metadata"]["user_tier"], "tier-pro");
+    assert!(!body.as_object().expect("body object").contains_key("token"));
+    assert!(
+        !body
+            .as_object()
+            .expect("body object")
+            .contains_key("token_provider")
+    );
 }
 
 #[tokio::test]
@@ -1657,6 +1689,30 @@ async fn generate_falls_back_when_billing_info_is_unavailable() {
     assert_eq!(requests[2].path, "/api/generate/v2-web/");
     let body = serde_json::from_str::<serde_json::Value>(&requests[2].body).expect("request json");
     assert_eq!(body["metadata"]["user_tier"], "");
+}
+
+#[tokio::test]
+async fn generate_does_not_drop_requested_controls_when_billing_is_unavailable() {
+    let server =
+        MockServer::json_status_sequence(&[(500, r#"{"detail":"billing unavailable"}"#)]).await;
+    let client = server.client();
+    let mut generate = GenerateRequest::new("chirp-fenix", "custom");
+    generate.metadata.control_sliders = Some(ControlSliders {
+        weirdness_constraint: Some(0.4),
+        style_weight: None,
+    });
+
+    let error = client
+        .generate(&generate)
+        .await
+        .expect_err("unknown model capability must stop before generation");
+
+    assert!(
+        matches!(error, CliError::Config(message) if message.contains("could not verify whether"))
+    );
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/api/billing/info/");
 }
 
 #[tokio::test]
@@ -2429,8 +2485,13 @@ async fn stems_posts_current_web_contract() {
     assert_eq!(requests[3].method, "POST");
     assert_eq!(requests[3].path, "/api/generate/v2-web/");
     let body = serde_json::from_str::<serde_json::Value>(&requests[3].body).expect("request json");
-    assert_eq!(body["token"], serde_json::Value::Null);
-    assert_eq!(body["token_provider"], serde_json::Value::Null);
+    assert!(!body.as_object().expect("body object").contains_key("token"));
+    assert!(
+        !body
+            .as_object()
+            .expect("body object")
+            .contains_key("token_provider")
+    );
     assert_eq!(body["task"], "gen_stem");
     assert_eq!(body["mv"], "chirp-v3-0");
     assert_eq!(body["title"], "Source Song");
@@ -2617,11 +2678,10 @@ async fn extend_metadata_fallback_does_not_merge_same_title_different_clip() {
 }
 
 #[tokio::test]
-async fn lyrics_generation_posts_and_polls_current_web_contract() {
-    let server = MockServer::json_sequence(&[
-        r#"{"id":"lyrics-job-1"}"#,
-        r#"{"text":"[Verse]\nHello","title":"Demo","status":"complete","tags":["pop"]}"#,
-    ])
+async fn lyrics_generation_uses_current_cowrite_contract() {
+    let server = MockServer::json(
+        r#"{"edited_lyrics":"[Verse]\nHello","lyrics_request_id":"request-1","lyrics_id":"lyrics-1","variants":null,"artist_to_tag_mapping":{"A":"pop"},"next_prompts":["add a chorus"],"generation_trace":"trace-1"}"#,
+    )
     .await;
     let client = server.client();
 
@@ -2630,69 +2690,41 @@ async fn lyrics_generation_posts_and_polls_current_web_contract() {
         .await
         .expect("lyrics");
 
-    assert_eq!(result.status, "complete");
-    assert_eq!(result.tags, vec!["pop"]);
+    assert_eq!(result.edited_lyrics, "[Verse]\nHello");
+    assert_eq!(result.lyrics_request_id.as_deref(), Some("request-1"));
+    assert_eq!(result.lyrics_id.as_deref(), Some("lyrics-1"));
+    assert!(result.variants.is_none());
+    assert_eq!(result.artist_to_tag_mapping.as_ref().unwrap()["A"], "pop");
+    assert_eq!(
+        result.next_prompts.as_ref().expect("next prompts"),
+        &["add a chorus".to_string()]
+    );
+    assert_eq!(result.extra["generation_trace"], "trace-1");
     let requests = server.captured_all().await;
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].method, "POST");
-    assert_eq!(requests[0].path, "/api/generate/lyrics/");
+    assert_eq!(requests[0].path, "/api/generate/cowrite-lyrics/");
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&requests[0].body).expect("request json"),
-        serde_json::json!({ "prompt": "write a pop hook" })
+        serde_json::json!({
+            "selected": "",
+            "context_before": "",
+            "context_after": "",
+            "instruction": "write a pop hook",
+            "title": "",
+            "style": "",
+            "mode": "apply_user_request",
+            "references": [],
+            "num_variants": null,
+            "lyricist_id": null,
+            "metadata": {
+                "lyrics_model": "default",
+                "enable_thinking": false
+            },
+            "create_session_token": null,
+            "lyrics_project_id": null
+        })
     );
-    assert_eq!(requests[1].method, "GET");
-    assert_eq!(requests[1].path, "/api/generate/lyrics/lyrics-job-1");
-    assert_eq!(requests[1].body, "");
-}
-
-#[tokio::test]
-async fn lyrics_rejects_invalid_polling_before_submission() {
-    let server = MockServer::json_until_idle(r#"{"id":"lyrics-1"}"#, 1).await;
-    let client = server.client();
-
-    let error = client
-        .generate_lyrics_with_polling(
-            "write lyrics",
-            super::PollingOptions {
-                timeout: Duration::from_secs(1),
-                interval: Duration::ZERO,
-            },
-        )
-        .await
-        .expect_err("invalid polling must fail before lyrics submission");
-
-    assert!(matches!(error, CliError::Config(message) if message.contains("poll interval")));
-    assert!(server.captured_all().await.is_empty());
-}
-
-#[tokio::test]
-async fn lyrics_poll_deadline_bounds_an_in_flight_request() {
-    let server = MockServer::delayed_response_sequence(vec![
-        (200, r#"{"id":"lyrics-job-1"}"#.to_string(), Duration::ZERO),
-        (
-            200,
-            r#"{"text":"","title":"","status":"pending","tags":[]}"#.to_string(),
-            Duration::from_millis(200),
-        ),
-    ])
-    .await;
-    let client = server.client();
-
-    let error = timeout(
-        Duration::from_millis(50),
-        client.generate_lyrics_with_polling(
-            "write a pop hook",
-            super::PollingOptions {
-                timeout: Duration::from_millis(10),
-                interval: Duration::from_millis(1),
-            },
-        ),
-    )
-    .await
-    .expect("lyrics polling deadline must bound the request")
-    .expect_err("delayed lyrics status must time out");
-
-    assert!(matches!(error, CliError::GenerationFailed(message) if message.contains("timed out")));
 }
 
 #[tokio::test]
@@ -3539,30 +3571,6 @@ async fn get_persona_clips_uses_current_web_paginated_contract() {
         request.path,
         "/api/persona/get-persona-paginated/persona-1/?page=2"
     );
-    assert_eq!(request.body, "");
-}
-
-#[tokio::test]
-async fn get_processed_clip_uses_current_web_contract() {
-    let server = MockServer::json(
-        r#"{"id":"processed-1","status":"complete","vocal_start_s":0.0,"vocal_end_s":19.92,"vocal_audio_url":"https://cdn1.suno.ai/processed_vocals.m4a"}"#,
-    )
-    .await;
-    let client = server.client();
-
-    let processed = client
-        .get_processed_clip("processed-1")
-        .await
-        .expect("get processed clip");
-
-    assert_eq!(processed.status, "complete");
-    assert_eq!(
-        processed.vocal_audio_url.as_deref(),
-        Some("https://cdn1.suno.ai/processed_vocals.m4a")
-    );
-    let request = server.captured().await;
-    assert_eq!(request.method, "GET");
-    assert_eq!(request.path, "/api/processed_clip/processed-1");
     assert_eq!(request.body, "");
 }
 
