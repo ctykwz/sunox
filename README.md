@@ -170,7 +170,7 @@ closed. The frame is also removed immediately after a token or terminal error, a
 visible fallback. Raw provider errors never cross the Bridge boundary or enter storage or logs.
 This flow is supported on macOS and Windows. If the Bridge does not
 respond, the default `auto` mode falls back to the matching installed Chromium-family browser only
-when no Bridge pairing is configured. Once the Bridge has been installed, `auto` fails closed
+when no Bridge installation has been recorded. Once the Bridge has been installed, `auto` fails closed
 instead of launching that separate browser. Use `challenge_browser=isolated` explicitly when the
 separate fallback is acceptable.
 
@@ -192,7 +192,7 @@ sunox install-browser-extension
    address bar.
 4. Keep the extension enabled. The Bridge creates no Suno tab or browser window.
 
-Verify the pairing without creating a song, running a challenge, or consuming credits:
+Verify the Bridge transport without creating a song, running a challenge, or consuming credits:
 
 ```bash
 sunox doctor --browser-bridge
@@ -205,12 +205,14 @@ bridge, refresh its files and reload it in Chrome:
 sunox install-browser-extension --force
 ```
 
-The command compares the generated bundle with the extracted files first. Click **Reload** on the
-Sunox Browser Bridge card only when it reports that the bundle was updated; if it reports
-`already_current`, no Chrome reload is needed. A computer or Chrome restart by itself never requires
-reinstalling or reloading the Bridge. No Suno page reload is needed. The command chooses the correct
-per-user application directory on both macOS and Windows; do not move or delete that directory while
-Chrome is using the unpacked extension.
+The command compares the generated bundle with the extracted files first. Use its
+`reload_required` field as the only reload decision: click **Reload** on the Sunox Browser Bridge
+card when it is `true`, including the rare case where the files are `already_current` but Chrome
+has not yet acknowledged that runtime. When `reload_required=false`, no Chrome reload is needed.
+A computer or Chrome restart by itself never requires reinstalling or reloading the Bridge. No
+Suno page reload is needed. The command chooses the correct per-user application directory on both
+macOS and Windows; do not move or delete that directory while Chrome is using the unpacked
+extension.
 
 The relevant overrides are:
 
@@ -228,7 +230,7 @@ automatically creates and removes its nonce-bound offscreen iframe, so no user-o
 Suno tab or browser window is created. It accepts only the currently supported Suno/Clerk redirect
 shape and does not execute until the return URL has been cleaned and stabilized. A configured
 Bridge that is missing, stale, or protocol-drifted is reported as an error instead of opening another browser. In `auto` mode, Sunox may open
-the isolated fallback only when no Bridge pairing is configured. An installed Bridge that is
+the isolated fallback only when no Bridge installation has been recorded. An installed Bridge that is
 disabled, stale, or unreachable fails closed; use `isolated` explicitly to allow a separate browser
 process.
 

@@ -161,7 +161,7 @@ iframe y falla de forma segura. El iframe también se elimina tras el token o el
 ninguna alternativa visible. Este comportamiento es compatible tanto con macOS como con Windows.
 
 Si el Bridge no responde, el modo predeterminado `auto` solo recurre a un navegador de la familia
-Chromium instalado cuando no hay un emparejamiento del Bridge configurado. Una vez instalado el
+Chromium instalado cuando no se ha registrado ninguna instalación del Bridge. Una vez instalado el
 Bridge, `auto` falla de forma segura en vez de iniciar un proceso de navegador separado. Usa
 `challenge_browser=isolated` explícitamente cuando aceptes esa alternativa independiente.
 
@@ -183,7 +183,7 @@ Web Store. La configuración es la misma en macOS y Windows:
    indicada en la barra de direcciones del selector.
 4. Mantén activada la extensión. No es necesario conservar ninguna pestaña de Suno abierta.
 
-Comprueba el emparejamiento sin crear una canción, ejecutar un challenge ni consumir créditos:
+Comprueba el transporte del Bridge sin crear una canción, ejecutar un challenge ni consumir créditos:
 
 ```bash
 sunox doctor --browser-bridge
@@ -196,12 +196,14 @@ Sunox que cambie el Bridge, actualiza sus archivos y recárgala en Chrome:
 sunox install-browser-extension --force
 ```
 
-El comando compara primero el paquete generado con los archivos extraídos. Pulsa **Recargar** en la
-tarjeta Sunox Browser Bridge solo cuando informe `updated` o `reload_required`; si informa
-`already_current`, no hace falta recargarla en Chrome. Reiniciar el ordenador o Chrome por sí solo
-nunca exige reinstalar ni recargar el Bridge. Tampoco es necesario recargar ninguna página de
-Suno. El comando elige el directorio de aplicación correcto de cada usuario tanto en macOS como en
-Windows; no muevas ni borres ese directorio mientras Chrome use la extensión sin empaquetar.
+El comando compara primero el paquete generado con los archivos extraídos. Usa
+`reload_required` como único criterio: pulsa **Recargar** en la tarjeta Sunox Browser Bridge cuando
+sea `true`, incluso si los archivos figuran como `already_current` pero Chrome aún no ha confirmado
+ese runtime. Con `reload_required=false` no hace falta recargarla en Chrome. Reiniciar el ordenador
+o Chrome por sí solo nunca exige reinstalar ni recargar el Bridge. Tampoco es necesario recargar
+ninguna página de Suno. El comando elige el directorio de aplicación correcto de cada usuario tanto
+en macOS como en Windows; no muevas ni borres ese directorio mientras Chrome use la extensión sin
+empaquetar.
 
 ```text
 --captcha          Verificar aunque la comprobación inicial no lo solicite
@@ -216,8 +218,9 @@ por compatibilidad de configuración: ahora significa «usar el Bridge instalado
 Chrome existente». El Bridge crea y elimina automáticamente un iframe offscreen vinculado a un
 nonce; no abre ninguna pestaña ni ventana. Un Bridge ya configurado que esté ausente u obsoleto se comunica como error en
 vez de abrir otro navegador o recurrir a un contexto visible.
-En modo `auto`, Sunox puede abrir el respaldo aislado solo si no hay un emparejamiento del Bridge
-configurado. Si el Bridge instalado está desactivado, obsoleto o no es accesible, falla de forma
+En modo `auto`, Sunox puede abrir el respaldo aislado solo si no se ha registrado ninguna instalación
+del Bridge. Si el Bridge instalado está desactivado, obsoleto, no es accesible o perdió su secreto de
+emparejamiento, falla de forma
 segura; usa `isolated` explícitamente para permitir un proceso de navegador separado.
 
 Para ejecuciones desatendidas que no deban añadir una pestaña de Suno a la ventana activa ni abrir

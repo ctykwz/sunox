@@ -31,11 +31,15 @@ backward-compatible features, upstream protocol adaptations, and fixes.
 - Made the Browser Bridge survive Chrome restarts by starting its offscreen loopback listener
   independently of Suno network probes and recovering a stalled polling worker without requiring
   an open Suno tab.
-- Kept the Manifest V3 service worker alive during long challenges with authenticated Port
-  heartbeats and bounded offscreen-worker recovery across extension restarts.
+- Kept the Manifest V3 service worker reachable during long challenges with authenticated Port
+  heartbeats. A worker disconnect now fails the in-flight frame closed within bounded deadlines,
+  while the independent offscreen polling worker recovers without a visible fallback.
 - Restricted challenge scripts to the extension-owned first-level frame and an exact nonce-bound,
   clean canonical URL. Protocol drift, unexpected reloads, navigation, identity mismatch, or
   disconnects fail closed, while raw page errors never reach storage or logs.
+- Refreshed Suno's current non-empty CSP before every frame-rule activation. A failed refresh,
+  non-canonical redirect, or policy that cannot be preserved removes stale rules and blocks the
+  challenge without stopping the authenticated local Bridge probe.
 - Bounded silent challenge failures through explicit nested timeouts instead of retaining the
   previous six-minute fallback.
 - Extended the hidden frame's cold-start allowance after real Chrome acceptance showed that the
@@ -44,10 +48,12 @@ backward-compatible features, upstream protocol adaptations, and fixes.
   load/error event counts.
 - Added a side-effect-free `sunox doctor --browser-bridge` transport probe and distinguished a busy
   Bridge from an unavailable one so diagnostics do not interrupt an in-flight challenge.
-- Made Browser Bridge updates idempotent and prevented `--path --force` from replacing directories
+- Made Browser Bridge updates idempotent and prevented forced updates from replacing directories
   that Sunox does not own.
-- Kept configured Bridge failures fail-closed when the pairing secret cannot be read instead of
-  silently launching an isolated browser.
+- Persisted installation evidence separately from the pairing secret, so a recorded Bridge with a
+  missing or corrupt secret still fails closed instead of silently launching an isolated browser.
+- Protected the Bridge bundle, pairing secret, installation state, reload marker, and installer
+  lock with owner-only Unix modes and protected per-user Windows DACLs.
 - Accepted Chrome offscreen-frame connections when the optional runtime `documentId` is absent,
   while retaining extension identity, no-tab, frame, origin, URL, and one-time nonce validation.
 
@@ -58,6 +64,9 @@ backward-compatible features, upstream protocol adaptations, and fixes.
 - Removed the Browser Bridge's DNR feedback permission and the matching-rule inspection that caused
   `REAL_MATCH_ERROR`; the extension retains only the host-scoped permission needed to install its
   two exact subframe response-header rules.
+- Disabled arbitrary Browser Bridge `--path` destinations because an untrusted custom parent
+  directory can replace the bundle during installation; the option remains only to return a clear
+  migration error, while an explicit managed default path is still accepted.
 
 ## [0.1.1] - 2026-07-26
 

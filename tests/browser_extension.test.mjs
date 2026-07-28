@@ -32,6 +32,15 @@ const manifest = JSON.parse(await readFile(
   new URL("../assets/browser-extension/manifest.json", import.meta.url),
   "utf8"
 ));
+const bridgeContractSource = await readFile(
+  new URL("../src/captcha/bridge_contract.rs", import.meta.url),
+  "utf8"
+);
+const runtimeBuildMatch = bridgeContractSource.match(
+  /BROWSER_BRIDGE_RUNTIME_BUILD:\s*&str\s*=\s*"([^"]+)"/
+);
+assert.ok(runtimeBuildMatch, "missing Browser Bridge runtime build contract");
+const runtimeBuild = runtimeBuildMatch[1];
 
 function flushAsync() {
   return new Promise((resolve) => setTimeout(resolve, 0));
@@ -98,7 +107,7 @@ function loadLoopbackTransport(fetchImpl, {
         portCount,
         portStart: 29_764,
         protocolVersion: 3,
-        runtimeBuild: "0.3.15",
+        runtimeBuild,
         sharedSecret: "a".repeat(64)
       }
     },
@@ -138,6 +147,7 @@ function popupServiceWorkerHarness({
   existingWindowUrl = null,
   initialStoredState = undefined,
   existingSessionRules = [],
+  fetchImpl = null,
   storageSetError = null,
   windowGetError = null,
   windowGetErrorSequence = [],
@@ -154,6 +164,8 @@ function popupServiceWorkerHarness({
     createdWindows: [],
     dynamicRules: [],
     notifications: [],
+    offscreenCloses: 0,
+    offscreenStarts: 0,
     removedTabs: [],
     removedWindows: [],
     reloadedTabs: [],
@@ -231,7 +243,9 @@ function popupServiceWorkerHarness({
       }
     },
     offscreen: {
-      async closeDocument() {},
+      async closeDocument() {
+        calls.offscreenCloses += 1;
+      },
       async createDocument(options) {
         calls.createdOffscreen.push(options);
       }
@@ -266,6 +280,7 @@ function popupServiceWorkerHarness({
       },
       async sendMessage(message) {
         if (message.type === "sunox-offscreen-start-v1") {
+          calls.offscreenStarts += 1;
           return { accepted: true };
         }
         if (message.type === "sunox-offscreen-ping-v1") {
@@ -497,7 +512,7 @@ function popupServiceWorkerHarness({
       }
     },
     Date,
-    fetch: async () => ({
+    fetch: fetchImpl || (async () => ({
       headers: new Headers({
         "content-security-policy":
           "default-src 'self'; frame-ancestors 'none'; font-src 'self'"
@@ -505,7 +520,7 @@ function popupServiceWorkerHarness({
       ok: true,
       status: 200,
       url: "https://suno.com/create"
-    }),
+    })),
     Headers,
     Promise,
     setInterval(callback, delay) {
@@ -685,6 +700,132 @@ test("bootstrap repairs a reusable Suno frame rule when the Clerk rule is missin
       harness.calls.sessionRules[0].addRules.map((rule) => rule.id)
     )),
     [29_764, 29_765]
+  );
+});
+
+function reusableFrameRules() {
+  return [{
+    id: 29_764,
+    priority: 1,
+    action: {
+      type: "modifyHeaders",
+      responseHeaders: [
+        {
+          header: "content-security-policy",
+          operation: "set",
+          value: "default-src 'self'; font-src 'self';"
+        },
+        { header: "x-frame-options", operation: "remove" }
+      ]
+    },
+    condition: {
+      regexFilter: "^https://suno\\.com/create/?(?:[?#].*)?$",
+      initiatorDomains: [
+        "abcdefghijklmnopabcdefghijklmnop",
+        "auth.suno.com",
+        "suno.com"
+      ],
+      resourceTypes: ["sub_frame"],
+      tabIds: [-1]
+    }
+  }, {
+    id: 29_765,
+    priority: 1,
+    action: {
+      type: "modifyHeaders",
+      responseHeaders: [
+        { header: "x-frame-options", operation: "remove" }
+      ]
+    },
+    condition: {
+      regexFilter:
+        "^https://auth\\.suno\\.com/v1/client/handshake(?:\\?.*)?$",
+      initiatorDomains: [
+        "abcdefghijklmnopabcdefghijklmnop",
+        "suno.com"
+      ],
+      resourceTypes: ["sub_frame"],
+      tabIds: [-1]
+    }
+  }];
+}
+
+test("bootstrap removes reusable frame rules when current CSP refresh fails", async () => {
+  const harness = popupServiceWorkerHarness({
+    existingSessionRules: reusableFrameRules(),
+    fetchImpl: async () => {
+      throw new Error("policy fetch failed");
+    }
+  });
+  await flushAsync();
+  await flushAsync();
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(harness.calls.sessionRules)),
+    [{ removeRuleIds: [29_764, 29_765] }]
+  );
+  assert.equal(harness.calls.createdOffscreen.length, 1);
+  assert.equal(harness.calls.offscreenCloses, 0);
+  assert.equal(harness.calls.offscreenStarts, 1);
+  assert.match(harness.calls.consoleErrors.flat().join(" "), /policy fetch failed/);
+
+  const preparation = await harness.dispatchFromOffscreen({
+    type: "sunox-frame-environment-prepare-v1"
+  });
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(preparation)),
+    {
+      accepted: false,
+      error: "challenge_environment_unavailable"
+    }
+  );
+});
+
+test("bootstrap fails closed when Suno CSP has no policy left to preserve", async () => {
+  const harness = popupServiceWorkerHarness({
+    fetchImpl: async () => ({
+      headers: new Headers({
+        "content-security-policy": "frame-ancestors 'none'"
+      }),
+      ok: true,
+      status: 200,
+      url: "https://suno.com/create"
+    })
+  });
+  await flushAsync();
+  await flushAsync();
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(harness.calls.sessionRules)),
+    [{ removeRuleIds: [29_764, 29_765] }]
+  );
+  assert.equal(harness.calls.createdOffscreen.length, 1);
+  assert.equal(harness.calls.offscreenCloses, 0);
+  assert.match(
+    harness.calls.consoleErrors.flat().join(" "),
+    /cannot be preserved safely/
+  );
+});
+
+test("bootstrap rejects a non-canonical CSP inspection redirect", async () => {
+  const harness = popupServiceWorkerHarness({
+    fetchImpl: async () => ({
+      headers: new Headers({
+        "content-security-policy": "default-src 'self'"
+      }),
+      ok: true,
+      status: 200,
+      url: "https://suno.com/create?redirected=1"
+    })
+  });
+  await flushAsync();
+  await flushAsync();
+
+  assert.equal(harness.calls.createdOffscreen.length, 1);
+  assert.equal(harness.calls.offscreenCloses, 0);
+  assert.match(
+    harness.calls.consoleErrors.flat().join(" "),
+    /clean canonical URL/
   );
 });
 
@@ -1961,14 +2102,14 @@ test("loopback transport acknowledges a signed probe without returning a challen
         });
       }
       if (path === "/v3/challenge/claim") {
-        assert.equal(body.runtime_build, "0.3.15");
+        assert.equal(body.runtime_build, runtimeBuild);
         assert.equal(
           body.proof,
           bridgeProof(secret, "sunox-bridge-client-v3", [
             29_764,
             body.client_nonce,
             body.server_nonce,
-            "0.3.15",
+            runtimeBuild,
             body.client_id,
             body.page_url
           ])
@@ -1984,7 +2125,7 @@ test("loopback transport acknowledges a signed probe without returning a challen
         });
       }
       if (path === "/v3/challenge/probe-ack") {
-        assert.equal(body.runtime_build, "0.3.15");
+        assert.equal(body.runtime_build, runtimeBuild);
         assert.equal(
           body.proof,
           bridgeProof(secret, "sunox-bridge-probe-ack-v3", [
@@ -2007,7 +2148,7 @@ test("loopback transport acknowledges a signed probe without returning a challen
         portCount: 1,
         portStart: 29_764,
         protocolVersion: 3,
-        runtimeBuild: "0.3.15",
+        runtimeBuild,
         sharedSecret: secret
       }
     },
@@ -2411,6 +2552,9 @@ test("offscreen solves a claimed challenge in an invisible iframe without reques
         },
         async sendMessage(message) {
           runtimeMessages.push(message);
+          if (message.type === "sunox-frame-environment-prepare-v1") {
+            return { accepted: true };
+          }
           if (message.type !== "sunox-managed-frame-execute-v2") return undefined;
           queueMicrotask(() => {
             dispatchRuntimeMessage({
@@ -2649,7 +2793,7 @@ test("managed page scripts survive the exact Clerk return until the URL is clean
 });
 
 test("manifest and scripts expose only the invisible offscreen-frame transport", () => {
-  assert.equal(manifest.version, "0.3.15");
+  assert.equal(manifest.version, "__SUNOX_BRIDGE_RUNTIME_BUILD__");
   assert.equal(manifest.version_name, "__SUNOX_VERSION__");
   assert.equal(manifest.permissions.includes("declarativeNetRequestFeedback"), false);
   assert.ok(manifest.permissions.includes("declarativeNetRequestWithHostAccess"));

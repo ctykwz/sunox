@@ -160,7 +160,7 @@ iframe。iframe 保留正常布局尺寸，供对可见性敏感的验证代码�
 且绝不降级到任何可见窗口。页面原始错误不会越过 Bridge 边界，也不会写入存储或日志。该流程
 同时支持 macOS 和 Windows。
 
-默认的 `auto` 模式只会在尚未配置 Bridge 配对信息时，才使用本机匹配的 Chromium 系浏览器
+默认的 `auto` 模式只会在尚未记录 Bridge 安装状态时，才使用本机匹配的 Chromium 系浏览器
 兜底。一旦安装并配对了 Bridge，`auto` 会在 Bridge 不可用时直接报错，不会悄悄启动独立浏览器。
 只有明确接受独立浏览器兜底时，才使用 `challenge_browser=isolated`。
 
@@ -181,7 +181,7 @@ sunox install-browser-extension
    完整路径；Windows 可以把完整路径粘贴到文件夹选择器的地址栏。
 4. 保持扩展启用。无需打开或保留 Suno 标签页。
 
-可使用下面的命令检查配对，不会创建歌曲、运行 Challenge 或消耗额度：
+可使用下面的命令检查 Bridge 通信，不会创建歌曲、运行 Challenge 或消耗额度：
 
 ```bash
 sunox doctor --browser-bridge
@@ -193,11 +193,12 @@ sunox doctor --browser-bridge
 sunox install-browser-extension --force
 ```
 
-命令会先比较生成的扩展包与已解压文件。只有命令报告 `updated` 或 `reload_required` 时，才在
-Sunox Browser Bridge 的扩展卡片上点击“重新加载”；如果报告 `already_current`，无需在 Chrome
-中重新加载。仅重启电脑或 Chrome 绝不需要重新安装或重新加载 Bridge，也无需刷新 Suno 页面。
-Sunox 会在 macOS 和 Windows 上自动选择当前用户的应用配置目录；Chrome 使用这个未打包扩展
-期间，不要移动或删除该目录。
+命令会先比较生成的扩展包与已解压文件，并以 `reload_required` 作为是否重新加载的唯一依据：
+只要它为 `true`，就在 Sunox Browser Bridge 的扩展卡片上点击“重新加载”；即使磁盘文件显示
+`already_current`，也可能表示 Chrome 尚未确认当前运行时。只有 `reload_required=false` 才无需
+在 Chrome 中重新加载。仅重启电脑或 Chrome 绝不需要重新安装或重新加载 Bridge，也无需刷新
+Suno 页面。Sunox 会在 macOS 和 Windows 上自动选择当前用户的应用配置目录；Chrome 使用这个
+未打包扩展期间，不要移动或删除该目录。
 
 相关覆盖参数如下：
 
@@ -212,9 +213,9 @@ Sunox 会在 macOS 和 Windows 上自动选择当前用户的应用配置目录�
 `existing` 这个名称是为了兼容原有配置，现在表示“使用现有 Chrome Profile 中已安装的 Bridge”。
 Bridge 会自动创建并删除绑定 nonce 的 offscreen iframe，不会创建用户标签页或浏览器窗口；
 它只接受当前支持的 Suno/Clerk 跳转格式，并且只会在返回 URL 已清理且稳定后执行。
-已经配置或配对的扩展缺失、版本过旧、协议漂移或无法连接时，命令会直接报错。`auto` 只有在尚未配置 Bridge 配对
-信息时才可能启动独立浏览器；已经安装的 Bridge 一旦被禁用、版本过旧或无法访问，`auto` 同样会
-直接停止。只有明确允许独立浏览器时才使用 `isolated`。
+已经安装或配对的扩展缺失、版本过旧、协议漂移或无法连接时，命令会直接报错。`auto` 只有在
+尚未记录 Bridge 安装信息时才可能启动独立浏览器；已经安装的 Bridge 一旦被禁用、版本过旧、
+无法访问或丢失配对密钥，`auto` 同样会直接停止。只有明确允许独立浏览器时才使用 `isolated`。
 
 无人值守且不能新增 Suno 标签页、也不能启动独立浏览器进程时，安装 Browser Bridge，并去掉
 `--no-captcha`。此时 `auto` 和 `challenge_browser=existing` 都会在 Bridge 不可用时直接停止；

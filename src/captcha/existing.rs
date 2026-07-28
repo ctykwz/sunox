@@ -235,7 +235,7 @@ pub(crate) async fn probe() -> Result<BridgeProbe, CliError> {
     let started = Instant::now();
     let Some(secret) = browser_extension::bridge_secret()? else {
         return Ok(BridgeProbe {
-            status: BridgeProbeStatus::NotConfigured,
+            status: missing_secret_probe_status(browser_extension::bridge_is_configured()?),
             port: None,
             occupied_ports: Vec::new(),
             bridge_occupied_ports: Vec::new(),
@@ -249,6 +249,14 @@ pub(crate) async fn probe() -> Result<BridgeProbe, CliError> {
         acknowledge_loaded_runtime(&acknowledgement_secret);
     }
     Ok(probe)
+}
+
+fn missing_secret_probe_status(installation_exists: bool) -> BridgeProbeStatus {
+    if installation_exists {
+        BridgeProbeStatus::Unavailable
+    } else {
+        BridgeProbeStatus::NotConfigured
+    }
 }
 
 async fn probe_with_secret(
@@ -324,7 +332,7 @@ async fn probe_with_secret_in_range(
 }
 
 pub(super) fn is_configured() -> Result<bool, CliError> {
-    Ok(browser_extension::bridge_secret()?.is_some())
+    browser_extension::bridge_is_configured()
 }
 
 fn acknowledge_loaded_runtime(authenticated_secret: &str) {
@@ -981,8 +989,9 @@ mod tests {
         BridgeOperation, BridgeResult, BridgeState, CLAIM_CLOSED, CLAIM_PENDING,
         COMPLETION_TIMEOUT_MS, HttpRequest, MAX_OCCUPIED_PORT_HELLO_RESPONSE_BYTES, PORT_COUNT,
         PROTOCOL_VERSION, acknowledge_probe, authentication_proof, constant_time_eq, is_suno_page,
-        occupied_port_is_current_bridge, occupied_port_probe_client, probe_with_secret_in_range,
-        route_request, serve, valid_extension_origin, wait_for_probe_ack_signal,
+        missing_secret_probe_status, occupied_port_is_current_bridge, occupied_port_probe_client,
+        probe_with_secret_in_range, route_request, serve, valid_extension_origin,
+        wait_for_probe_ack_signal,
     };
     use crate::api::challenge::ChallengeProvider;
     use crate::captcha::{
@@ -991,6 +1000,18 @@ mod tests {
     };
 
     static PROBE_PORT_TEST_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());
+
+    #[test]
+    fn missing_secret_probe_distinguishes_never_installed_from_broken_installation() {
+        assert_eq!(
+            missing_secret_probe_status(false),
+            BridgeProbeStatus::NotConfigured
+        );
+        assert_eq!(
+            missing_secret_probe_status(true),
+            BridgeProbeStatus::Unavailable
+        );
+    }
 
     fn javascript_number(source: &str, name: &str) -> u64 {
         let declaration = format!("const {name} = ");
@@ -1487,19 +1508,16 @@ mod tests {
         assert_eq!(lower_occupied.foreign_occupied_ports, vec![port_start]);
         assert_eq!(lower_occupied.port, Some(port_start + 1));
 
-        let mut all_listeners = vec![lowest_listener];
-        for port in port_start + 1..port_start + port_count {
-            all_listeners.push(
-                TcpListener::bind(("127.0.0.1", port))
-                    .await
-                    .unwrap_or_else(|error| panic!("reserve Browser Bridge port {port}: {error}")),
-            );
-        }
+        drop(lowest_listener);
+        // Use a fresh range for the fully occupied case. On Windows, the
+        // listener used by the first probe is not guaranteed to be
+        // immediately reusable after it closes.
+        let (all_port_start, _all_listeners) = reserve_contiguous_test_ports(port_count).await;
         let all_occupied = probe_with_secret_in_range(
             "secret-value".into(),
             Duration::from_millis(20),
             Instant::now(),
-            port_start,
+            all_port_start,
             port_count,
         )
         .await
@@ -1508,12 +1526,12 @@ mod tests {
         assert_eq!(all_occupied.port, None);
         assert_eq!(
             all_occupied.occupied_ports,
-            (port_start..port_start + port_count).collect::<Vec<_>>()
+            (all_port_start..all_port_start + port_count).collect::<Vec<_>>()
         );
         assert!(all_occupied.bridge_occupied_ports.is_empty());
         assert_eq!(
             all_occupied.foreign_occupied_ports,
-            (port_start..port_start + port_count).collect::<Vec<_>>()
+            (all_port_start..all_port_start + port_count).collect::<Vec<_>>()
         );
     }
 

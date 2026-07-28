@@ -1,6 +1,6 @@
 #[derive(clap::Args)]
 pub struct InstallBrowserExtensionArgs {
-    /// Custom directory for the unpacked extension
+    /// Legacy path override; custom destinations are unsupported, so omit this option
     #[arg(long)]
     pub path: Option<String>,
 

@@ -51,22 +51,27 @@ fn help_lists_codex_style_commands() {
 
 #[test]
 fn browser_extension_installer_extracts_a_paired_unpacked_extension() {
-    let test_home = isolated_test_home("sunox-extension-install");
-    // The default macOS and Windows configuration paths both commonly contain spaces.
-    let extension_path = test_home.join("Sunox Browser Bridge");
+    // Exercise a default managed path whose parent contains spaces.
+    let test_home = isolated_test_home("sunox extension install");
+    let extension_path = test_home
+        .join(".config")
+        .join("sunox")
+        .join("browser-extension");
     let mut cmd = Command::cargo_bin("sunox").expect("binary");
 
-    with_isolated_home(&mut cmd, &test_home)
-        .args([
-            "install-browser-extension",
-            "--path",
-            extension_path.to_str().expect("extension path"),
-            "--json",
-        ])
+    let assertion = with_isolated_home(&mut cmd, &test_home)
+        .args(["install-browser-extension", "--json"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("\"installed\": true"))
-        .stdout(predicate::str::contains("browser-extension-secret").not());
+        .success();
+    let stdout = &assertion.get_output().stdout;
+    let response: serde_json::Value =
+        serde_json::from_slice(stdout).expect("structured installer output");
+    assert_eq!(response["data"]["installed"], true);
+    assert_eq!(
+        response["data"]["path"],
+        extension_path.display().to_string()
+    );
+    assert!(!String::from_utf8_lossy(stdout).contains("browser-extension-secret"));
 
     assert!(extension_path.join("manifest.json").is_file());
     assert!(extension_path.join("transport-loopback.js").is_file());
@@ -1203,7 +1208,7 @@ fn agent_info_reports_automatic_versioned_challenge_verification() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "paired Sunox Browser Bridge to create one nonce-bound Suno iframe",
+            "installed Sunox Browser Bridge to create one nonce-bound Suno iframe",
         ))
         .stdout(predicate::str::contains(
             "inside Chrome's invisible offscreen document",
@@ -1220,7 +1225,7 @@ fn agent_info_reports_automatic_versioned_challenge_verification() {
         .stdout(predicate::str::contains("hCaptcha/provider 1"))
         .stdout(predicate::str::contains("Turnstile/provider 2"))
         .stdout(predicate::str::contains(
-            "only when no Bridge pairing exists",
+            "only when no Bridge installation has been recorded",
         ))
         .stdout(predicate::str::contains("challenge_browser=auto"))
         .stdout(predicate::str::contains(

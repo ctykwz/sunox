@@ -64,6 +64,17 @@
   });
 
   async function executeInManagedFrame(challenge) {
+    const environment = await chrome.runtime.sendMessage({
+      type: "sunox-frame-environment-prepare-v1"
+    }).catch(() => null);
+    if (environment?.accepted !== true) {
+      return {
+        token: null,
+        error:
+          "Managed Suno challenge environment is unavailable; the current embedding policy could not be verified"
+      };
+    }
+
     const nonce = crypto.randomUUID();
     if (!managedNoncePattern.test(nonce)) {
       return {

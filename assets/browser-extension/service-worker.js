@@ -51,6 +51,7 @@ const MANAGED_CHALLENGE_ERROR_MESSAGES = Object.freeze({
 });
 let creatingOffscreenDocument;
 let bootstrapPromise;
+let frameEnvironmentPromise;
 let embedRuleReady = false;
 let embedRuleCheckedAt = 0;
 let environmentReady = false;
@@ -195,14 +196,26 @@ async function currentEmbeddingCsp(signal) {
   if (
     finalUrl.origin !== MANAGED_PAGE_ORIGIN
     || !["/create", "/create/"].includes(finalUrl.pathname)
+    || finalUrl.username
+    || finalUrl.password
+    || finalUrl.search
+    || finalUrl.hash
   ) {
     throw new Error(
-      `Suno redirected the managed challenge page to ${finalUrl.origin}${finalUrl.pathname}`
+      "Suno redirected the managed challenge page away from the clean canonical URL"
     );
   }
-  return cspWithoutFrameAncestors(
-    response.headers.get("content-security-policy")
-  );
+  const currentCsp = response.headers.get("content-security-policy");
+  if (typeof currentCsp !== "string" || currentCsp.trim().length === 0) {
+    throw new Error("Suno returned no current content security policy");
+  }
+  const preservedCsp = cspWithoutFrameAncestors(currentCsp);
+  if (!preservedCsp) {
+    throw new Error(
+      "Suno's current content security policy cannot be preserved safely"
+    );
+  }
+  return preservedCsp;
 }
 
 async function embeddingCspWithTimeout(timeoutMs) {
@@ -216,20 +229,17 @@ async function embeddingCspWithTimeout(timeoutMs) {
 }
 
 function frameRules(preservedCsp) {
+  if (typeof preservedCsp !== "string" || preservedCsp.length === 0) {
+    throw new Error("A current non-empty Suno CSP is required");
+  }
   const sunoHeaders = [
+    {
+      header: "content-security-policy",
+      operation: "set",
+      value: preservedCsp
+    },
     { header: "x-frame-options", operation: "remove" }
   ];
-  if (preservedCsp !== null) {
-    sunoHeaders.unshift(
-      preservedCsp
-        ? {
-          header: "content-security-policy",
-          operation: "set",
-          value: preservedCsp
-        }
-        : { header: "content-security-policy", operation: "remove" }
-    );
-  }
   return [{
     id: SUNO_FRAME_RULE_ID,
     priority: 1,
@@ -271,6 +281,38 @@ async function installFrameRules(preservedCsp) {
   });
 }
 
+async function clearFrameRules() {
+  embedRuleReady = false;
+  embedRuleCheckedAt = 0;
+  const results = await Promise.allSettled([
+    chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: FRAME_RULE_IDS
+    }),
+    chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: FRAME_RULE_IDS
+    })
+  ]);
+  const failed = results.find((result) => result.status === "rejected");
+  if (failed) throw failed.reason;
+}
+
+function ensureFrameEnvironment() {
+  if (!frameEnvironmentPromise) {
+    frameEnvironmentPromise = ensureFrameRules()
+      .then(() => {
+        environmentReady = true;
+      })
+      .catch((error) => {
+        environmentReady = false;
+        throw error;
+      })
+      .finally(() => {
+        frameEnvironmentPromise = null;
+      });
+  }
+  return frameEnvironmentPromise;
+}
+
 async function ensureFrameRules() {
   if (
     embedRuleReady
@@ -279,24 +321,28 @@ async function ensureFrameRules() {
   const rules = await chrome.declarativeNetRequest
     .getSessionRules()
     .catch(() => []);
-  if (
-    rules.some(isReusableSunoRule)
-    && rules.some(isReusableClerkRule)
-  ) {
+  try {
     const preservedCsp = await embeddingCspWithTimeout(
-      REUSED_RULE_REFRESH_TIMEOUT_MS
-    ).catch(() => null);
-    if (preservedCsp !== null) await installFrameRules(preservedCsp);
+      rules.some(isReusableSunoRule)
+        && rules.some(isReusableClerkRule)
+        ? REUSED_RULE_REFRESH_TIMEOUT_MS
+        : INITIAL_RULE_FETCH_TIMEOUT_MS
+    );
+    await installFrameRules(preservedCsp);
     embedRuleReady = true;
     embedRuleCheckedAt = Date.now();
     return;
+  } catch (error) {
+    try {
+      await clearFrameRules();
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        "Suno frame policy refresh and fail-closed cleanup both failed"
+      );
+    }
+    throw error;
   }
-  const preservedCsp = await embeddingCspWithTimeout(
-    INITIAL_RULE_FETCH_TIMEOUT_MS
-  );
-  await installFrameRules(preservedCsp);
-  embedRuleReady = true;
-  embedRuleCheckedAt = Date.now();
 }
 
 function isOffscreenSender(sender) {
@@ -491,7 +537,6 @@ async function ensurePollAlarm() {
 async function bootstrap() {
   environmentReady = false;
   await ensurePollAlarm();
-  await ensureFrameRules();
   await ensureOffscreenDocument();
   const response = await chrome.runtime.sendMessage({
     type: "sunox-offscreen-start-v1"
@@ -499,7 +544,7 @@ async function bootstrap() {
   if (response?.accepted !== true) {
     throw new Error("Offscreen Browser Bridge did not acknowledge polling startup");
   }
-  environmentReady = true;
+  await ensureFrameEnvironment();
 }
 
 function ensureBootstrapped() {
@@ -526,6 +571,18 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (
+    message?.type === "sunox-frame-environment-prepare-v1"
+    && isOffscreenSender(sender)
+  ) {
+    ensureFrameEnvironment()
+      .then(() => sendResponse({ accepted: true }))
+      .catch(() => sendResponse({
+        accepted: false,
+        error: "challenge_environment_unavailable"
+      }));
+    return true;
+  }
   if (
     message?.type !== "sunox-managed-frame-execute-v2"
     || !isOffscreenSender(sender)

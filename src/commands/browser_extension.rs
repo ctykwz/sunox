@@ -15,6 +15,8 @@ use crate::cli::InstallBrowserExtensionArgs;
 use crate::core::CliError;
 use crate::output::{self, OutputFormat};
 
+mod permissions;
+
 const MANIFEST: &str = include_str!("../../assets/browser-extension/manifest.json");
 const SERVICE_WORKER: &str = include_str!("../../assets/browser-extension/service-worker.js");
 const LOOPBACK_TRANSPORT: &str =
@@ -33,6 +35,8 @@ const ICON_128: &[u8] = include_bytes!("../../assets/browser-extension/icons/ico
 const MANAGED_SENTINEL: &str = ".sunox-browser-bridge-managed";
 const MANAGED_SENTINEL_CONTENT: &str = "sunox-browser-bridge\nschema=1\n";
 const INSTALL_LOCK_FILE: &str = "browser-extension-install.lock";
+const INSTALLATION_MARKER_FILE: &str = "browser-extension-installed";
+const INSTALLATION_MARKER_CONTENT: &str = "sunox-browser-bridge-installed\nschema=1\n";
 const RELOAD_PENDING_FILE: &str = "browser-extension-reload-pending";
 const BRIDGE_SECRET_FILE: &str = "browser-extension-secret";
 const DEFAULT_EXTENSION_DIRECTORY: &str = "browser-extension";
@@ -266,15 +270,29 @@ impl InstallOutcome {
 
 struct BrowserExtensionInstallLock {
     file: File,
+    #[cfg(windows)]
+    _config_dir: File,
+    #[cfg(windows)]
+    config_dir_identity: DirectoryIdentity,
 }
 
 impl BrowserExtensionInstallLock {
     fn acquire(config_dir: &Path) -> Result<Self, CliError> {
         std::fs::create_dir_all(config_dir)?;
+        #[cfg(windows)]
+        let config_dir_handle = permissions::open_and_harden_locked_directory(config_dir)?;
+        #[cfg(windows)]
+        let config_dir_identity =
+            windows_directory_identity_from_handle(&config_dir_handle, config_dir)?;
         let path = config_dir.join(INSTALL_LOCK_FILE);
         reject_symlink(&path, "Browser Bridge install lock")?;
         let mut options = OpenOptions::new();
         options.create(true).truncate(false).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
         configure_no_follow(&mut options);
         let file = options.open(&path).map_err(|error| {
             CliError::Config(format!(
@@ -282,8 +300,26 @@ impl BrowserExtensionInstallLock {
                 path.display()
             ))
         })?;
+        permissions::harden_private_file_handle(&file, &path)?;
         file.lock_exclusive()?;
-        Ok(Self { file })
+        Ok(Self {
+            file,
+            #[cfg(windows)]
+            _config_dir: config_dir_handle,
+            #[cfg(windows)]
+            config_dir_identity,
+        })
+    }
+
+    #[cfg(windows)]
+    fn verify_config_directory(&self, config_dir: &Path) -> Result<(), CliError> {
+        if directory_identity(config_dir)? == self.config_dir_identity {
+            return Ok(());
+        }
+        Err(CliError::Config(format!(
+            "the Sunox configuration directory was replaced while acquiring the Browser Bridge install lock at {}",
+            config_dir.display()
+        )))
     }
 }
 
@@ -296,10 +332,7 @@ impl Drop for BrowserExtensionInstallLock {
 pub async fn install(args: InstallBrowserExtensionArgs, ctx: &AppContext) -> Result<(), CliError> {
     let config_dir = crate::core::project_config_dir()
         .ok_or_else(|| CliError::Config("could not resolve config directory".into()))?;
-    let destination = args
-        .path
-        .map(PathBuf::from)
-        .unwrap_or_else(|| config_dir.join(DEFAULT_EXTENSION_DIRECTORY));
+    let destination = resolve_install_destination(args.path, &config_dir)?;
     let outcome = install_bundle(&destination, &config_dir, args.force)?;
     let reload_required = outcome.reload_required(reload_pending()?);
     let next_steps = install_next_steps(outcome, reload_required);
@@ -364,6 +397,23 @@ pub async fn install(args: InstallBrowserExtensionArgs, ctx: &AppContext) -> Res
     Ok(())
 }
 
+fn resolve_install_destination(
+    explicit_destination: Option<String>,
+    config_dir: &Path,
+) -> Result<PathBuf, CliError> {
+    let Some(destination) = explicit_destination.map(PathBuf::from) else {
+        return Ok(config_dir.join(DEFAULT_EXTENSION_DIRECTORY));
+    };
+    let (resolved_destination, resolved_config_dir) =
+        resolve_and_validate_install_paths(&destination, config_dir)?;
+    if resolved_destination == resolved_config_dir.join(DEFAULT_EXTENSION_DIRECTORY) {
+        return Ok(destination);
+    }
+    Err(CliError::Config(
+        "custom Browser Bridge destinations are no longer supported because Sunox cannot guarantee that an arbitrary parent directory is protected against local replacement; omit --path to use the protected default location".into(),
+    ))
+}
+
 fn install_next_steps(outcome: InstallOutcome, reload_required: bool) -> Vec<&'static str> {
     match (outcome, reload_required) {
         (InstallOutcome::Installed, _) => vec![
@@ -411,6 +461,8 @@ fn install_bundle(
             resolved_config_dir.display()
         )));
     }
+    #[cfg(windows)]
+    _lock.verify_config_directory(&resolved_config_dir)?;
     let destination = resolved_destination.as_path();
 
     let existed = destination.exists();
@@ -454,7 +506,7 @@ fn install_bundle(
     let staging = tempfile::Builder::new()
         .prefix("sunox-browser-extension-")
         .tempdir_in(parent)?;
-    harden_extension_root_permissions(staging.path())?;
+    permissions::harden_private_directory(staging.path())?;
     write_bundle(staging.path(), &loaded_secret.value)?;
 
     if existed && bundles_equal(staging.path(), destination)? {
@@ -468,17 +520,21 @@ fn install_bundle(
         }
         harden_bundle_permissions(destination)?;
         let current_secret_fingerprint = secret_fingerprint(&loaded_secret.value);
-        if let Some(pending) = reload_pending_at(&resolved_config_dir)?
-            && (pending.runtime_build != BROWSER_BRIDGE_RUNTIME_BUILD
+        if let Some(pending) = reload_pending_at(&resolved_config_dir)? {
+            #[cfg(windows)]
+            permissions::harden_private_file(&resolved_config_dir.join(RELOAD_PENDING_FILE))?;
+            if pending.runtime_build != BROWSER_BRIDGE_RUNTIME_BUILD
                 || pending.secret_fingerprint.as_deref()
-                    != Some(current_secret_fingerprint.as_str()))
-        {
-            mark_reload_pending_locked(
-                &resolved_config_dir,
-                BROWSER_BRIDGE_RUNTIME_BUILD,
-                &loaded_secret.value,
-            )?;
+                    != Some(current_secret_fingerprint.as_str())
+            {
+                mark_reload_pending_locked(
+                    &resolved_config_dir,
+                    BROWSER_BRIDGE_RUNTIME_BUILD,
+                    &loaded_secret.value,
+                )?;
+            }
         }
+        record_installation_locked(&resolved_config_dir)?;
         return Ok(InstallOutcome::AlreadyCurrent);
     }
 
@@ -506,6 +562,8 @@ fn install_bundle(
     } else {
         replace_directory(staging, destination, existing_snapshot.as_ref(), || Ok(()))?;
     }
+    harden_bundle_permissions(destination)?;
+    record_installation_locked(&resolved_config_dir)?;
     Ok(if had_existing_bundle {
         InstallOutcome::Updated
     } else {
@@ -611,25 +669,11 @@ fn write_bundle(directory: &Path, secret: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-fn harden_extension_root_permissions(directory: &Path) -> Result<(), CliError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
-}
-
 fn harden_bundle_permissions(directory: &Path) -> Result<(), CliError> {
-    harden_extension_root_permissions(directory)?;
+    permissions::harden_private_directory(directory)?;
     let config = directory.join("config.js");
     reject_symlink(&config, "Browser Bridge rendered configuration")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(config, std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
+    permissions::harden_private_file(&config)
 }
 
 fn directory_is_empty(directory: &Path) -> Result<bool, CliError> {
@@ -968,10 +1012,9 @@ fn directory_identity(directory: &Path) -> Result<DirectoryIdentity, CliError> {
 
         use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
         use windows_sys::Win32::Storage::FileSystem::{
-            BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_DIRECTORY,
-            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
             FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-            GetFileInformationByHandle, OPEN_EXISTING,
+            OPEN_EXISTING,
         };
 
         let mut wide_path = directory.as_os_str().encode_wide().collect::<Vec<_>>();
@@ -993,30 +1036,53 @@ fn directory_identity(directory: &Path) -> Result<DirectoryIdentity, CliError> {
         if handle == INVALID_HANDLE_VALUE {
             return Err(CliError::Io(std::io::Error::last_os_error()));
         }
-        let mut information = BY_HANDLE_FILE_INFORMATION::default();
-        let succeeded = unsafe { GetFileInformationByHandle(handle, &mut information) };
-        let information_error = (succeeded == 0).then(std::io::Error::last_os_error);
+        let identity = windows_directory_identity_from_raw_handle(handle, directory);
         unsafe {
             CloseHandle(handle);
         }
-        if let Some(error) = information_error {
-            return Err(CliError::Io(error));
-        }
-        if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
-            || information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
-        {
-            return Err(CliError::Config(format!(
-                "{} is not a regular directory",
-                directory.display()
-            )));
-        }
-        let file_index =
-            (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
-        Ok(DirectoryIdentity {
-            volume_serial_number: information.dwVolumeSerialNumber,
-            file_index,
-        })
+        identity
     }
+}
+
+#[cfg(windows)]
+fn windows_directory_identity_from_handle(
+    directory: &File,
+    path: &Path,
+) -> Result<DirectoryIdentity, CliError> {
+    use std::os::windows::io::AsRawHandle;
+
+    windows_directory_identity_from_raw_handle(directory.as_raw_handle(), path)
+}
+
+#[cfg(windows)]
+fn windows_directory_identity_from_raw_handle(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    path: &Path,
+) -> Result<DirectoryIdentity, CliError> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        GetFileInformationByHandle,
+    };
+
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    let succeeded = unsafe { GetFileInformationByHandle(handle, &mut information) };
+    if succeeded == 0 {
+        return Err(CliError::Io(std::io::Error::last_os_error()));
+    }
+    if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+        || information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err(CliError::Config(format!(
+            "{} is not a regular directory",
+            path.display()
+        )));
+    }
+    let file_index =
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+    Ok(DirectoryIdentity {
+        volume_serial_number: information.dwVolumeSerialNumber,
+        file_index,
+    })
 }
 
 fn bundles_equal(expected: &Path, actual: &Path) -> Result<bool, CliError> {
@@ -1058,15 +1124,23 @@ fn render_config(secret: &str) -> String {
 }
 
 fn render_manifest() -> String {
-    MANIFEST.replace("__SUNOX_VERSION__", env!("CARGO_PKG_VERSION"))
+    MANIFEST
+        .replace(
+            "__SUNOX_BRIDGE_RUNTIME_BUILD__",
+            BROWSER_BRIDGE_RUNTIME_BUILD,
+        )
+        .replace("__SUNOX_VERSION__", env!("CARGO_PKG_VERSION"))
 }
 
 fn load_or_create_secret(config_dir: &Path) -> Result<LoadedBridgeSecret, CliError> {
+    std::fs::create_dir_all(config_dir)?;
+    #[cfg(windows)]
+    permissions::harden_private_directory(config_dir)?;
     let path = config_dir.join(BRIDGE_SECRET_FILE);
     if let Some(secret) = read_file_without_following_symlink(&path, "browser extension secret")? {
         let secret = secret.trim();
         if valid_secret(secret) {
-            harden_private_file_permissions(&path)?;
+            permissions::harden_private_file(&path)?;
             return Ok(LoadedBridgeSecret {
                 value: secret.to_string(),
                 created: false,
@@ -1074,7 +1148,6 @@ fn load_or_create_secret(config_dir: &Path) -> Result<LoadedBridgeSecret, CliErr
         }
     }
 
-    std::fs::create_dir_all(config_dir)?;
     let secret = new_bridge_secret();
     atomic_write_private_file(&path, secret.as_bytes(), "browser extension secret")?;
     Ok(LoadedBridgeSecret {
@@ -1095,15 +1168,6 @@ fn secret_fingerprint(secret: &str) -> String {
     encode_digest(Sha256::digest(secret.as_bytes()))
 }
 
-fn harden_private_file_permissions(path: &Path) -> Result<(), CliError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
-}
-
 fn atomic_write_private_file(
     path: &Path,
     contents: &[u8],
@@ -1113,18 +1177,14 @@ fn atomic_write_private_file(
         .parent()
         .ok_or_else(|| CliError::Config(format!("{description} has no parent directory")))?;
     std::fs::create_dir_all(parent)?;
+    #[cfg(windows)]
+    permissions::harden_private_directory(parent)?;
     reject_symlink(path, description)?;
 
     let mut temporary = tempfile::Builder::new()
         .prefix(".sunox-private-")
         .tempfile_in(parent)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        temporary
-            .as_file()
-            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    }
+    permissions::harden_private_file_handle(temporary.as_file(), temporary.path())?;
     temporary.write_all(contents)?;
     temporary.as_file().sync_all()?;
 
@@ -1132,9 +1192,10 @@ fn atomic_write_private_file(
     // explicitly reject a symlink so a corrupt or hostile config is visible
     // instead of silently repaired.
     reject_symlink(path, description)?;
-    temporary
+    let persisted = temporary
         .persist(path)
         .map_err(|error| CliError::Io(error.error))?;
+    permissions::harden_private_file_handle(&persisted, path)?;
 
     #[cfg(unix)]
     File::open(parent)?.sync_all()?;
@@ -1237,12 +1298,72 @@ fn configure_no_follow(options: &mut OpenOptions) {
     }
 }
 
+fn record_installation_locked(config_dir: &Path) -> Result<(), CliError> {
+    atomic_write_private_file(
+        &config_dir.join(INSTALLATION_MARKER_FILE),
+        INSTALLATION_MARKER_CONTENT.as_bytes(),
+        "Browser Bridge installation marker",
+    )
+}
+
+fn installation_evidence_at(config_dir: &Path) -> Result<bool, CliError> {
+    let marker = config_dir.join(INSTALLATION_MARKER_FILE);
+    match read_file_without_following_symlink(&marker, "Browser Bridge installation marker")? {
+        Some(contents) if contents == INSTALLATION_MARKER_CONTENT => return Ok(true),
+        Some(_) => {
+            return Err(CliError::Config(format!(
+                "Browser Bridge installation marker at {} is corrupt; run `sunox install-browser-extension --force`",
+                marker.display()
+            )));
+        }
+        None => {}
+    }
+
+    // v0.1.x did not persist the installation marker. Safely recognize its
+    // default managed bundle so an upgraded installation still fails closed
+    // if the pairing secret is later lost.
+    let default_bundle = config_dir.join(DEFAULT_EXTENSION_DIRECTORY);
+    match std::fs::symlink_metadata(&default_bundle) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(CliError::Config(format!(
+                "reserved Browser Bridge path {} exists but is not a regular managed directory",
+                default_bundle.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(CliError::Config(format!(
+                "could not inspect Browser Bridge installation evidence at {}: {error}",
+                default_bundle.display()
+            )));
+        }
+    }
+    if is_managed_bundle(&default_bundle)? {
+        return Ok(true);
+    }
+    Err(CliError::Config(format!(
+        "reserved Browser Bridge path {} exists but its managed installation evidence is invalid; run `sunox install-browser-extension --force`",
+        default_bundle.display()
+    )))
+}
+
 pub(crate) fn bridge_secret() -> Result<Option<String>, CliError> {
     let Some(config_dir) = crate::core::project_config_dir() else {
         return Ok(None);
     };
     let path = config_dir.join(BRIDGE_SECRET_FILE);
     read_bridge_secret(&path)
+}
+
+pub(crate) fn bridge_is_configured() -> Result<bool, CliError> {
+    let Some(config_dir) = crate::core::project_config_dir() else {
+        return Ok(false);
+    };
+    if read_bridge_secret(&config_dir.join(BRIDGE_SECRET_FILE))?.is_some() {
+        return Ok(true);
+    }
+    installation_evidence_at(&config_dir)
 }
 
 fn reload_pending_at(config_dir: &Path) -> Result<Option<ReloadPendingMarker>, CliError> {
@@ -1346,6 +1467,8 @@ fn acknowledge_runtime_build_at(
     }
     let resolved_config_dir = resolve_path_with_missing_tail(config_dir)?;
     let _lock = BrowserExtensionInstallLock::acquire(&resolved_config_dir)?;
+    #[cfg(windows)]
+    _lock.verify_config_directory(&resolved_config_dir)?;
     let Some(expected) = reload_pending_at(&resolved_config_dir)? else {
         return Ok(false);
     };
@@ -1388,8 +1511,7 @@ fn write_private_asset(directory: &Path, name: &str, contents: &[u8]) -> Result<
         options.mode(0o600);
     }
     let mut file = options.open(&path)?;
-    #[cfg(unix)]
-    harden_private_file_permissions(&path)?;
+    permissions::harden_private_file_handle(&file, &path)?;
     file.write_all(contents)?;
     file.sync_all()?;
     Ok(())
@@ -1607,7 +1729,7 @@ where
     let cleanup = tempfile::Builder::new()
         .prefix(".sunox-browser-extension-cleanup-")
         .tempdir_in(parent)?;
-    harden_extension_root_permissions(cleanup.path())?;
+    permissions::harden_private_directory(cleanup.path())?;
     let cleanup_root = cleanup.keep();
     let isolated_tree = cleanup_root.join("tree");
     let isolated_entries = cleanup_root.join("entries");
@@ -1749,16 +1871,16 @@ mod tests {
         InstallOutcome, LOOPBACK_TRANSPORT, MANAGED_SENTINEL, MANIFEST, OFFSCREEN, OFFSCREEN_HTML,
         PAGE, POLL_WORKER, SERVICE_WORKER, SHARED, acknowledge_runtime_build_at,
         capture_stable_directory_snapshot, current_bundle_file_set, install_bundle,
-        install_next_steps, mark_reload_pending_locked, read_bridge_secret, reload_pending_at,
-        remove_snapshot_tree, remove_snapshot_tree_paths, render_config, render_manifest,
-        replace_directory_paths, secret_fingerprint,
+        install_next_steps, installation_evidence_at, mark_reload_pending_locked,
+        read_bridge_secret, reload_pending_at, remove_snapshot_tree, remove_snapshot_tree_paths,
+        render_config, render_manifest, replace_directory_paths, secret_fingerprint,
     };
 
     #[test]
     fn extension_assets_share_the_bridge_contract() {
         assert!(MANIFEST.contains("https://suno.com/*"));
         assert!(MANIFEST.contains("http://127.0.0.1/*"));
-        assert!(MANIFEST.contains("\"version\": \"0.3.15\""));
+        assert!(MANIFEST.contains("\"version\": \"__SUNOX_BRIDGE_RUNTIME_BUILD__\""));
         assert!(MANIFEST.contains("\"version_name\": \"__SUNOX_VERSION__\""));
         assert!(MANIFEST.contains("\"alarms\""));
         assert!(!MANIFEST.contains("\"declarativeNetRequestFeedback\""));
@@ -1834,7 +1956,10 @@ mod tests {
         let config = render_config("secret-value");
 
         assert!(config.contains("protocolVersion: 3"));
-        assert!(config.contains("runtimeBuild: \"0.3.15\""));
+        assert!(config.contains(&format!(
+            "runtimeBuild: \"{}\"",
+            super::BROWSER_BRIDGE_RUNTIME_BUILD
+        )));
         assert!(config.contains("portStart: 29764"));
         assert!(config.contains("portCount: 8"));
         assert!(config.contains("sharedSecret: \"secret-value\""));
@@ -1846,9 +1971,10 @@ mod tests {
         let manifest: serde_json::Value =
             serde_json::from_str(&render_manifest()).expect("rendered extension manifest");
 
-        assert_eq!(manifest["version"], "0.3.15");
+        assert_eq!(manifest["version"], super::BROWSER_BRIDGE_RUNTIME_BUILD);
         assert_eq!(manifest["version_name"], env!("CARGO_PKG_VERSION"));
         assert!(!render_manifest().contains("__SUNOX_VERSION__"));
+        assert!(!render_manifest().contains("__SUNOX_BRIDGE_RUNTIME_BUILD__"));
     }
 
     #[test]
@@ -2217,6 +2343,14 @@ mod tests {
         let config_dir = temp.path().join("config");
 
         install_bundle(&destination, &config_dir, false).expect("initial install");
+        let secret =
+            fs::read_to_string(config_dir.join(super::BRIDGE_SECRET_FILE)).expect("pairing secret");
+        mark_reload_pending_locked(
+            &config_dir,
+            super::BROWSER_BRIDGE_RUNTIME_BUILD,
+            secret.trim(),
+        )
+        .expect("reload-pending marker");
 
         assert_eq!(
             fs::metadata(&destination)
@@ -2242,6 +2376,156 @@ mod tests {
                 & 0o777,
             0o600
         );
+        assert_eq!(
+            fs::metadata(config_dir.join(super::INSTALL_LOCK_FILE))
+                .expect("install lock metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        for marker in [super::INSTALLATION_MARKER_FILE, super::RELOAD_PENDING_FILE] {
+            assert_eq!(
+                fs::metadata(config_dir.join(marker))
+                    .expect("private marker metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn installed_bundle_and_all_pairing_material_have_protected_windows_dacls() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let destination = temp.path().join("browser-extension");
+        let config_dir = temp.path().join("config");
+
+        install_bundle(&destination, &config_dir, false).expect("initial install");
+        let secret =
+            fs::read_to_string(config_dir.join(super::BRIDGE_SECRET_FILE)).expect("pairing secret");
+        mark_reload_pending_locked(
+            &config_dir,
+            super::BROWSER_BRIDGE_RUNTIME_BUILD,
+            secret.trim(),
+        )
+        .expect("reload-pending marker");
+
+        for directory in [&config_dir, &destination] {
+            super::permissions::assert_private_acl(directory, true);
+        }
+        for file in [
+            destination.join("config.js"),
+            config_dir.join(super::BRIDGE_SECRET_FILE),
+            config_dir.join(super::INSTALLATION_MARKER_FILE),
+            config_dir.join(super::RELOAD_PENDING_FILE),
+            config_dir.join(super::INSTALL_LOCK_FILE),
+        ] {
+            super::permissions::assert_private_acl(&file, false);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ordinary_temp_and_open_options_handles_can_be_reopened_for_acl_hardening() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let temporary = tempfile::Builder::new()
+            .prefix(".ordinary-handle-")
+            .tempfile_in(temp.path())
+            .expect("ordinary temporary file");
+        super::permissions::harden_private_file_handle(temporary.as_file(), temporary.path())
+            .expect("harden ordinary file handle");
+        super::permissions::assert_private_acl(temporary.path(), false);
+
+        let opened_path = temp.path().join("open-options-handle");
+        let opened = fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&opened_path)
+            .expect("ordinary OpenOptions file");
+        super::permissions::harden_private_file_handle(&opened, &opened_path)
+            .expect("harden OpenOptions file handle");
+        super::permissions::assert_private_acl(&opened_path, false);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn already_current_install_removes_an_explicit_everyone_ace_from_reload_marker() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let destination = temp.path().join("browser-extension");
+        let config_dir = temp.path().join("config");
+
+        install_bundle(&destination, &config_dir, false).expect("initial install");
+        let secret =
+            fs::read_to_string(config_dir.join(super::BRIDGE_SECRET_FILE)).expect("pairing secret");
+        mark_reload_pending_locked(
+            &config_dir,
+            super::BROWSER_BRIDGE_RUNTIME_BUILD,
+            secret.trim(),
+        )
+        .expect("reload-pending marker");
+        let marker = config_dir.join(super::RELOAD_PENDING_FILE);
+        super::permissions::make_world_readable_for_test(&marker, false);
+
+        assert_eq!(
+            install_bundle(&destination, &config_dir, true).expect("repair current install"),
+            InstallOutcome::AlreadyCurrent
+        );
+        super::permissions::assert_private_acl(&marker, false);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn install_lock_holds_the_same_config_directory_against_replacement() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        let replacement = temp.path().join("replacement");
+        let install_lock = BrowserExtensionInstallLock::acquire(&config_dir).expect("install lock");
+
+        assert_eq!(
+            super::windows_directory_identity_from_handle(&install_lock._config_dir, &config_dir)
+                .expect("held directory identity"),
+            install_lock.config_dir_identity
+        );
+        assert!(
+            fs::rename(&config_dir, &replacement).is_err(),
+            "the config directory was replaceable while its install lock was held"
+        );
+
+        drop(install_lock);
+        fs::rename(&config_dir, &replacement).expect("rename after releasing directory handle");
+    }
+
+    #[test]
+    fn explicit_destination_allows_only_the_managed_default_without_creating_state() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        let default_destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
+        let custom_destination = temp.path().join("custom-extension");
+
+        assert_eq!(
+            super::resolve_install_destination(
+                Some(default_destination.display().to_string()),
+                &config_dir,
+            )
+            .expect("explicit default destination"),
+            default_destination
+        );
+        let error = super::resolve_install_destination(
+            Some(custom_destination.display().to_string()),
+            &config_dir,
+        )
+        .expect_err("unsafe custom destination must fail closed");
+        assert!(error.to_string().contains("no longer supported"));
+        assert!(!custom_destination.exists());
+        assert!(!config_dir.exists());
+        assert!(!config_dir.join(super::BRIDGE_SECRET_FILE).exists());
+        assert!(!config_dir.join(super::INSTALLATION_MARKER_FILE).exists());
+        assert!(!config_dir.join(super::RELOAD_PENDING_FILE).exists());
+        assert!(!config_dir.join(super::INSTALL_LOCK_FILE).exists());
     }
 
     #[cfg(unix)]
@@ -2267,6 +2551,11 @@ mod tests {
             fs::Permissions::from_mode(0o644),
         )
         .expect("legacy secret permissions");
+        fs::set_permissions(
+            config_dir.join(super::INSTALL_LOCK_FILE),
+            fs::Permissions::from_mode(0o644),
+        )
+        .expect("legacy install lock permissions");
         fs::write(
             destination.join("service-worker.js"),
             format!("{SERVICE_WORKER}\n// trigger secure update"),
@@ -2297,6 +2586,14 @@ mod tests {
         assert_eq!(
             fs::metadata(config_dir.join("browser-extension-secret"))
                 .expect("pairing secret metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(config_dir.join(super::INSTALL_LOCK_FILE))
+                .expect("install lock metadata")
                 .permissions()
                 .mode()
                 & 0o777,
@@ -2560,6 +2857,65 @@ mod tests {
         assert!(read_bridge_secret(&not_a_file).is_err());
     }
 
+    #[test]
+    fn installation_evidence_distinguishes_new_custom_and_legacy_default_installs() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let clean_config = temp.path().join("clean-config");
+        assert!(!installation_evidence_at(&clean_config).expect("new install state"));
+
+        let custom_config = temp.path().join("custom-config");
+        let custom_destination = temp.path().join("custom-extension");
+        install_bundle(&custom_destination, &custom_config, false).expect("custom install");
+        fs::remove_file(custom_config.join(super::BRIDGE_SECRET_FILE)).expect("remove secret");
+        assert!(
+            installation_evidence_at(&custom_config)
+                .expect("custom install marker survives a missing secret")
+        );
+
+        let legacy_config = temp.path().join("legacy-config");
+        let default_destination = legacy_config.join(super::DEFAULT_EXTENSION_DIRECTORY);
+        install_bundle(&default_destination, &legacy_config, false).expect("default install");
+        fs::remove_file(legacy_config.join(super::BRIDGE_SECRET_FILE)).expect("remove secret");
+        fs::remove_file(legacy_config.join(super::INSTALLATION_MARKER_FILE))
+            .expect("remove modern marker");
+        assert!(
+            installation_evidence_at(&legacy_config)
+                .expect("managed default bundle is legacy installation evidence")
+        );
+    }
+
+    #[test]
+    fn corrupt_installation_evidence_fails_closed() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        fs::create_dir(&config_dir).expect("config dir");
+        fs::write(config_dir.join(super::INSTALLATION_MARKER_FILE), "corrupt")
+            .expect("corrupt marker");
+
+        let error =
+            installation_evidence_at(&config_dir).expect_err("corrupt marker must fail closed");
+
+        assert!(error.to_string().contains("installation marker"));
+        assert!(error.to_string().contains("corrupt"));
+    }
+
+    #[test]
+    fn invalid_reserved_default_bundle_path_fails_closed() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        fs::create_dir(&config_dir).expect("config dir");
+        fs::write(
+            config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY),
+            "not a managed extension",
+        )
+        .expect("invalid reserved path");
+
+        let error = installation_evidence_at(&config_dir)
+            .expect_err("invalid reserved path must fail closed");
+
+        assert!(error.to_string().contains("reserved Browser Bridge path"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn install_refuses_to_follow_a_secret_symlink() {
@@ -2582,6 +2938,24 @@ mod tests {
             "a".repeat(64)
         );
         assert!(!destination.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installation_marker_symlink_fails_closed() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        let target = temp.path().join("target");
+        fs::create_dir(&config_dir).expect("config dir");
+        fs::write(&target, super::INSTALLATION_MARKER_CONTENT).expect("marker target");
+        symlink(&target, config_dir.join(super::INSTALLATION_MARKER_FILE)).expect("marker symlink");
+
+        let error =
+            installation_evidence_at(&config_dir).expect_err("marker symlink must fail closed");
+
+        assert!(error.to_string().contains("symbolic link"));
     }
 
     #[cfg(unix)]
