@@ -14,6 +14,34 @@ fn private_owner_is_allowed(actual_owner: &str, current_user: &str) -> bool {
         || actual_owner == current_user
 }
 
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy)]
+enum OwnerValidationPhase {
+    BeforeDaclUpdate,
+    AfterDaclUpdate,
+}
+
+#[cfg(any(windows, test))]
+fn ensure_private_owner_allowed(
+    actual_owner: &str,
+    current_user: &str,
+    phase: OwnerValidationPhase,
+) -> std::io::Result<()> {
+    if private_owner_is_allowed(actual_owner, current_user) {
+        return Ok(());
+    }
+    let phase = match phase {
+        OwnerValidationPhase::BeforeDaclUpdate => "before updating its DACL",
+        OwnerValidationPhase::AfterDaclUpdate => "after updating its DACL",
+    };
+    Err(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        format!(
+            "refusing to trust a private object because its owner {actual_owner} is not the current user, LocalSystem, or Builtin Administrators {phase}"
+        ),
+    ))
+}
+
 pub(super) fn harden_private_directory(path: &Path) -> Result<(), CliError> {
     #[cfg(unix)]
     {
@@ -118,7 +146,12 @@ pub(super) fn make_world_readable_for_test(path: &Path, directory: bool) {
 
 #[cfg(windows)]
 mod windows {
-    use super::{BUILTIN_ADMINISTRATORS_SID, LOCAL_SYSTEM_SID, private_owner_is_allowed};
+    #[cfg(test)]
+    use super::private_owner_is_allowed;
+    use super::{
+        BUILTIN_ADMINISTRATORS_SID, LOCAL_SYSTEM_SID, OwnerValidationPhase,
+        ensure_private_owner_allowed,
+    };
     use std::ffi::c_void;
     use std::fs::{File, OpenOptions};
     use std::io;
@@ -221,7 +254,7 @@ mod windows {
 
     fn apply_dacl(file: &File, directory: bool, world_readable: bool) -> io::Result<()> {
         let user_sid = current_user_sid_string()?;
-        verify_allowed_owner(file, &user_sid)?;
+        verify_allowed_owner(file, &user_sid, OwnerValidationPhase::BeforeDaclUpdate)?;
         let inheritance = if directory { "OICI" } else { "" };
         let world_ace = if world_readable {
             format!("(A;{inheritance};GR;;;WD)")
@@ -287,10 +320,14 @@ mod windows {
         if status != ERROR_SUCCESS {
             return Err(io::Error::from_raw_os_error(status as i32));
         }
-        Ok(())
+        verify_allowed_owner(file, &user_sid, OwnerValidationPhase::AfterDaclUpdate)
     }
 
-    fn verify_allowed_owner(file: &File, current_user: &str) -> io::Result<()> {
+    fn verify_allowed_owner(
+        file: &File,
+        current_user: &str,
+        phase: OwnerValidationPhase,
+    ) -> io::Result<()> {
         let mut owner = null_mut();
         let mut security_descriptor = null_mut();
         let status = unsafe {
@@ -316,15 +353,7 @@ mod windows {
             ));
         }
         let actual_owner = sid_to_string(owner)?;
-        if !private_owner_is_allowed(&actual_owner, current_user) {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!(
-                    "refusing to change a private object's DACL because its owner {actual_owner} is not the current user, LocalSystem, or Builtin Administrators"
-                ),
-            ));
-        }
-        Ok(())
+        ensure_private_owner_allowed(&actual_owner, current_user, phase)
     }
 
     fn current_user_sid_string() -> io::Result<String> {
@@ -583,7 +612,10 @@ mod windows {
 
 #[cfg(test)]
 mod tests {
-    use super::{BUILTIN_ADMINISTRATORS_SID, LOCAL_SYSTEM_SID, private_owner_is_allowed};
+    use super::{
+        BUILTIN_ADMINISTRATORS_SID, LOCAL_SYSTEM_SID, OwnerValidationPhase,
+        ensure_private_owner_allowed, private_owner_is_allowed,
+    };
 
     const CURRENT_USER_SID: &str = "S-1-5-21-1000-1000-1000-1001";
 
@@ -604,5 +636,30 @@ mod tests {
             CURRENT_USER_SID
         ));
         assert!(!private_owner_is_allowed("S-1-1-0", CURRENT_USER_SID));
+    }
+
+    #[test]
+    fn pre_and_post_update_owner_validation_reject_an_unrelated_owner() {
+        let before_error = ensure_private_owner_allowed(
+            "S-1-5-21-2000-2000-2000-2002",
+            CURRENT_USER_SID,
+            OwnerValidationPhase::BeforeDaclUpdate,
+        )
+        .expect_err("unrelated pre-update owner must fail closed");
+        assert_eq!(before_error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            before_error
+                .to_string()
+                .contains("before updating its DACL")
+        );
+
+        let after_error = ensure_private_owner_allowed(
+            "S-1-5-21-2000-2000-2000-2002",
+            CURRENT_USER_SID,
+            OwnerValidationPhase::AfterDaclUpdate,
+        )
+        .expect_err("unrelated post-update owner must fail closed");
+        assert_eq!(after_error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(after_error.to_string().contains("after updating its DACL"));
     }
 }
