@@ -1,8 +1,9 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use futures_util::{StreamExt, future::join_all};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2_10::Sha256;
@@ -14,16 +15,21 @@ use tokio_util::sync::CancellationToken;
 
 use crate::api::challenge::ChallengeProvider;
 use crate::captcha::bridge_contract::{
-    LOOPBACK_PORT_COUNT as PORT_COUNT, LOOPBACK_PORT_START as PORT_START, PROTOCOL_VERSION,
+    BROWSER_BRIDGE_RUNTIME_BUILD, LOOPBACK_PORT_COUNT as PORT_COUNT,
+    LOOPBACK_PORT_START as PORT_START, PROTOCOL_VERSION,
 };
+use crate::captcha::{BridgeProbe, BridgeProbeStatus};
 use crate::commands::browser_extension;
 use crate::core::CliError;
 
 const ACTIVE_TAB_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
 const BACKGROUND_TAB_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(27);
-const COMPLETION_TIMEOUT_MS: u64 = 360_000;
+const BRIDGE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const COMPLETION_TIMEOUT_MS: u64 = 130_000;
 const COMPLETION_TIMEOUT: Duration = Duration::from_millis(COMPLETION_TIMEOUT_MS);
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
+const OCCUPIED_PORT_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+const MAX_OCCUPIED_PORT_HELLO_RESPONSE_BYTES: usize = 4 * 1024;
 const MAX_REQUEST_BYTES: usize = 24 * 1024;
 const CLAIM_PENDING: u8 = 0;
 const CLAIMED: u8 = 1;
@@ -35,14 +41,33 @@ enum BridgeResult {
     Error(String),
 }
 
+#[derive(Clone, Copy)]
+enum BridgeOperation {
+    Challenge(ChallengeProvider),
+    Probe,
+}
+
+enum BridgeListenerBinding {
+    Bound {
+        listener: TcpListener,
+        port: u16,
+        occupied_ports: Vec<u16>,
+    },
+    Exhausted {
+        occupied_ports: Vec<u16>,
+    },
+}
+
 struct BridgeState {
     port: u16,
     request_id: String,
     server_nonce: String,
-    provider: ChallengeProvider,
+    operation: BridgeOperation,
     secret: String,
     claim_state: AtomicU8,
     claimed_notify: Notify,
+    probe_acknowledged: AtomicBool,
+    probe_acknowledged_notify: Notify,
     result_sender: Mutex<Option<oneshot::Sender<BridgeResult>>>,
     claim_session: Mutex<Option<ClaimSession>>,
 }
@@ -66,8 +91,16 @@ struct HelloResponse<'a> {
 }
 
 #[derive(Deserialize)]
+struct OwnedHelloResponse {
+    version: u8,
+    server_nonce: String,
+    proof: String,
+}
+
+#[derive(Deserialize)]
 struct ClaimRequest {
     version: u8,
+    runtime_build: String,
     client_id: String,
     page_url: String,
     client_nonce: String,
@@ -80,6 +113,23 @@ struct ClaimResponse<'a> {
     version: u8,
     request_id: &'a str,
     provider: &'static str,
+}
+
+#[derive(Serialize)]
+struct ProbeClaimResponse<'a> {
+    version: u8,
+    request_id: &'a str,
+    probe: bool,
+}
+
+#[derive(Deserialize)]
+struct ProbeAckRequest {
+    version: u8,
+    runtime_build: String,
+    request_id: String,
+    client_nonce: String,
+    server_nonce: String,
+    proof: String,
 }
 
 #[derive(Deserialize)]
@@ -139,10 +189,12 @@ pub(super) async fn try_solve(provider: ChallengeProvider) -> Result<Option<Stri
         port,
         request_id,
         server_nonce: uuid::Uuid::new_v4().to_string(),
-        provider,
+        operation: BridgeOperation::Challenge(provider),
         secret,
         claim_state: AtomicU8::new(CLAIM_PENDING),
         claimed_notify: Notify::new(),
+        probe_acknowledged: AtomicBool::new(false),
+        probe_acknowledged_notify: Notify::new(),
         result_sender: Mutex::new(Some(result_sender)),
         claim_session: Mutex::new(None),
     });
@@ -155,6 +207,7 @@ pub(super) async fn try_solve(provider: ChallengeProvider) -> Result<Option<Stri
         let _ = server.await;
         return Ok(None);
     }
+    acknowledge_loaded_runtime(&state.secret);
 
     eprintln!(
         "Using the Browser Bridge managed Chrome context for silent challenge verification (bridge port {port})..."
@@ -178,25 +231,284 @@ pub(super) async fn try_solve(provider: ChallengeProvider) -> Result<Option<Stri
     }
 }
 
+pub(crate) async fn probe() -> Result<BridgeProbe, CliError> {
+    let started = Instant::now();
+    let Some(secret) = browser_extension::bridge_secret()? else {
+        return Ok(BridgeProbe {
+            status: BridgeProbeStatus::NotConfigured,
+            port: None,
+            occupied_ports: Vec::new(),
+            bridge_occupied_ports: Vec::new(),
+            foreign_occupied_ports: Vec::new(),
+            latency: started.elapsed(),
+        });
+    };
+    let acknowledgement_secret = secret.clone();
+    let probe = probe_with_secret(secret, BRIDGE_PROBE_TIMEOUT, started).await?;
+    if probe.status == BridgeProbeStatus::Responsive {
+        acknowledge_loaded_runtime(&acknowledgement_secret);
+    }
+    Ok(probe)
+}
+
+async fn probe_with_secret(
+    secret: String,
+    discovery_timeout: Duration,
+    started: Instant,
+) -> Result<BridgeProbe, CliError> {
+    probe_with_secret_in_range(secret, discovery_timeout, started, PORT_START, PORT_COUNT).await
+}
+
+async fn probe_with_secret_in_range(
+    secret: String,
+    discovery_timeout: Duration,
+    started: Instant,
+    port_start: u16,
+    port_count: u16,
+) -> Result<BridgeProbe, CliError> {
+    let binding = discover_bridge_listener_in_range(port_start, port_count).await?;
+    let occupied_ports = match &binding {
+        BridgeListenerBinding::Bound { occupied_ports, .. }
+        | BridgeListenerBinding::Exhausted { occupied_ports } => occupied_ports.clone(),
+    };
+    let (bridge_occupied_ports, foreign_occupied_ports) =
+        classify_occupied_ports(&occupied_ports, &secret).await?;
+    let (listener, port) = match binding {
+        BridgeListenerBinding::Bound { listener, port, .. } => (listener, port),
+        BridgeListenerBinding::Exhausted { .. } => {
+            return Ok(BridgeProbe {
+                status: occupied_probe_status(&bridge_occupied_ports, &foreign_occupied_ports),
+                port: None,
+                occupied_ports,
+                bridge_occupied_ports,
+                foreign_occupied_ports,
+                latency: started.elapsed(),
+            });
+        }
+    };
+    let state = Arc::new(BridgeState {
+        port,
+        request_id: uuid::Uuid::new_v4().to_string(),
+        server_nonce: uuid::Uuid::new_v4().to_string(),
+        operation: BridgeOperation::Probe,
+        secret,
+        claim_state: AtomicU8::new(CLAIM_PENDING),
+        claimed_notify: Notify::new(),
+        probe_acknowledged: AtomicBool::new(false),
+        probe_acknowledged_notify: Notify::new(),
+        result_sender: Mutex::new(None),
+        claim_session: Mutex::new(None),
+    });
+    let cancellation = CancellationToken::new();
+    let server = tokio::spawn(serve(listener, Arc::clone(&state), cancellation.clone()));
+
+    let responsive = wait_for_probe_ack_signal(&state, discovery_timeout).await;
+    if !responsive {
+        let _ = close_discovery(&state);
+    }
+    cancellation.cancel();
+    let _ = server.await;
+
+    Ok(BridgeProbe {
+        status: if responsive {
+            BridgeProbeStatus::Responsive
+        } else {
+            occupied_probe_status(&bridge_occupied_ports, &foreign_occupied_ports)
+        },
+        port: Some(port),
+        occupied_ports,
+        bridge_occupied_ports,
+        foreign_occupied_ports,
+        latency: started.elapsed(),
+    })
+}
+
 pub(super) fn is_configured() -> Result<bool, CliError> {
     Ok(browser_extension::bridge_secret()?.is_some())
 }
 
+fn acknowledge_loaded_runtime(authenticated_secret: &str) {
+    if let Err(error) = browser_extension::acknowledge_runtime_build(
+        BROWSER_BRIDGE_RUNTIME_BUILD,
+        authenticated_secret,
+    ) {
+        eprintln!(
+            "Warning: authenticated Browser Bridge runtime {} could not clear its reload-pending marker: {error}",
+            BROWSER_BRIDGE_RUNTIME_BUILD
+        );
+    }
+}
+
 async fn bind_bridge_listener() -> Result<(TcpListener, u16), CliError> {
+    match discover_bridge_listener().await? {
+        BridgeListenerBinding::Bound { listener, port, .. } => Ok((listener, port)),
+        BridgeListenerBinding::Exhausted { occupied_ports } => Err(CliError::Config(format!(
+            "could not bind the browser bridge because all ports {}-{} are occupied ({})",
+            PORT_START,
+            PORT_START + PORT_COUNT - 1,
+            occupied_ports
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
+async fn discover_bridge_listener() -> Result<BridgeListenerBinding, CliError> {
+    discover_bridge_listener_in_range(PORT_START, PORT_COUNT).await
+}
+
+async fn discover_bridge_listener_in_range(
+    port_start: u16,
+    port_count: u16,
+) -> Result<BridgeListenerBinding, CliError> {
+    let port_end = port_start.checked_add(port_count).ok_or_else(|| {
+        CliError::Config(format!(
+            "invalid browser bridge port range: start {port_start}, count {port_count}"
+        ))
+    })?;
     let mut last_error = None;
-    for port in PORT_START..PORT_START + PORT_COUNT {
+    let mut occupied_ports = Vec::new();
+    for port in port_start..port_end {
         match TcpListener::bind(("127.0.0.1", port)).await {
-            Ok(listener) => return Ok((listener, port)),
+            Ok(listener) => {
+                return Ok(BridgeListenerBinding::Bound {
+                    listener,
+                    port,
+                    occupied_ports,
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                occupied_ports.push(port);
+                last_error = Some(error);
+            }
             Err(error) => last_error = Some(error),
         }
     }
+    if occupied_ports.len() == usize::from(port_count) {
+        return Ok(BridgeListenerBinding::Exhausted { occupied_ports });
+    }
     Err(CliError::Config(format!(
-        "could not bind the browser bridge on ports {PORT_START}-{}: {}",
-        PORT_START + PORT_COUNT - 1,
+        "could not bind the browser bridge on ports {port_start}-{}: {}",
+        port_end.saturating_sub(1),
         last_error
             .map(|error| error.to_string())
             .unwrap_or_else(|| "no port available".into())
     )))
+}
+
+fn occupied_probe_status(
+    bridge_occupied_ports: &[u16],
+    foreign_occupied_ports: &[u16],
+) -> BridgeProbeStatus {
+    if !bridge_occupied_ports.is_empty() {
+        BridgeProbeStatus::Busy
+    } else if !foreign_occupied_ports.is_empty() {
+        BridgeProbeStatus::PortConflict
+    } else {
+        BridgeProbeStatus::Unavailable
+    }
+}
+
+async fn classify_occupied_ports(
+    occupied_ports: &[u16],
+    secret: &str,
+) -> Result<(Vec<u16>, Vec<u16>), CliError> {
+    if occupied_ports.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let client = occupied_port_probe_client()?;
+    let checks = occupied_ports
+        .iter()
+        .copied()
+        .map(|port| occupied_port_is_current_bridge(&client, port, secret));
+    let mut bridge = Vec::new();
+    let mut foreign = Vec::new();
+    for (port, authenticated) in occupied_ports.iter().copied().zip(join_all(checks).await) {
+        if authenticated {
+            bridge.push(port);
+        } else {
+            foreign.push(port);
+        }
+    }
+    Ok((bridge, foreign))
+}
+
+fn occupied_port_probe_client() -> Result<reqwest::Client, CliError> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(OCCUPIED_PORT_PROBE_TIMEOUT)
+        .timeout(OCCUPIED_PORT_PROBE_TIMEOUT)
+        .build()
+        .map_err(|error| {
+            CliError::Config(format!(
+                "could not build Browser Bridge conflict probe: {error}"
+            ))
+        })
+}
+
+async fn occupied_port_is_current_bridge(
+    client: &reqwest::Client,
+    port: u16,
+    secret: &str,
+) -> bool {
+    let client_nonce = uuid::Uuid::new_v4().to_string();
+    let response = match client
+        .post(format!("http://127.0.0.1:{port}/v3/challenge/hello"))
+        .header(
+            "Origin",
+            "chrome-extension://abcdefghijklmnopabcdefghijklmnop",
+        )
+        .header("X-Sunox-Extension", "1")
+        .json(&serde_json::json!({
+            "version": PROTOCOL_VERSION,
+            "client_nonce": &client_nonce,
+        }))
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => response,
+        _ => return false,
+    };
+    let content_type_is_json = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"));
+    if !content_type_is_json
+        || response
+            .content_length()
+            .is_some_and(|length| length > MAX_OCCUPIED_PORT_HELLO_RESPONSE_BYTES as u64)
+    {
+        return false;
+    }
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let Ok(chunk) = chunk else {
+            return false;
+        };
+        if body.len().saturating_add(chunk.len()) > MAX_OCCUPIED_PORT_HELLO_RESPONSE_BYTES {
+            return false;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let hello: OwnedHelloResponse = match serde_json::from_slice(&body) {
+        Ok(hello) => hello,
+        Err(_) => return false,
+    };
+    if hello.version != PROTOCOL_VERSION || !valid_nonce(&hello.server_nonce) {
+        return false;
+    }
+    let expected = authentication_proof(
+        secret,
+        "sunox-bridge-server-v3",
+        &[&port.to_string(), &client_nonce, &hello.server_nonce],
+    );
+    constant_time_eq(hello.proof.as_bytes(), expected.as_bytes())
 }
 
 async fn wait_for_claim(state: &BridgeState) -> bool {
@@ -213,8 +525,17 @@ async fn wait_for_claim_signal(state: &BridgeState, duration: Duration) -> bool 
     if state.claim_state.load(Ordering::Acquire) == CLAIMED {
         return true;
     }
-    timeout(duration, notified).await.is_ok()
-        && state.claim_state.load(Ordering::Acquire) == CLAIMED
+    let _ = timeout(duration, notified).await;
+    state.claim_state.load(Ordering::Acquire) == CLAIMED
+}
+
+async fn wait_for_probe_ack_signal(state: &BridgeState, duration: Duration) -> bool {
+    let notified = state.probe_acknowledged_notify.notified();
+    if state.probe_acknowledged.load(Ordering::Acquire) {
+        return true;
+    }
+    let _ = timeout(duration, notified).await;
+    state.probe_acknowledged.load(Ordering::Acquire)
 }
 
 fn close_discovery(state: &BridgeState) -> bool {
@@ -279,9 +600,10 @@ fn route_request(request: &HttpRequest, state: &BridgeState) -> Result<HttpRespo
     }
 
     match request.path.as_str() {
-        "/v2/challenge/hello" => hello(request, state),
-        "/v2/challenge/claim" => claim(request, state),
-        "/v2/challenge/result" => receive_result(request, state),
+        "/v3/challenge/hello" => hello(request, state),
+        "/v3/challenge/claim" => claim(request, state),
+        "/v3/challenge/probe-ack" => acknowledge_probe(request, state),
+        "/v3/challenge/result" => receive_result(request, state),
         _ => Ok(HttpResponse::empty(404, "Not Found")),
     }
 }
@@ -303,7 +625,7 @@ fn hello(request: &HttpRequest, state: &BridgeState) -> Result<HttpResponse, Cli
             server_nonce: &state.server_nonce,
             proof: authentication_proof(
                 &state.secret,
-                "sunox-bridge-server-v2",
+                "sunox-bridge-server-v3",
                 &[&port, &hello.client_nonce, &state.server_nonce],
             ),
         },
@@ -316,6 +638,7 @@ fn claim(request: &HttpRequest, state: &BridgeState) -> Result<HttpResponse, Cli
         Err(_) => return Ok(HttpResponse::empty(400, "Bad Request")),
     };
     if claim.version != PROTOCOL_VERSION
+        || claim.runtime_build != BROWSER_BRIDGE_RUNTIME_BUILD
         || claim.client_id.is_empty()
         || claim.client_id.len() > 128
         || !is_suno_page(&claim.page_url)
@@ -327,11 +650,12 @@ fn claim(request: &HttpRequest, state: &BridgeState) -> Result<HttpResponse, Cli
     let port = state.port.to_string();
     let expected_proof = authentication_proof(
         &state.secret,
-        "sunox-bridge-client-v2",
+        "sunox-bridge-client-v3",
         &[
             &port,
             &claim.client_nonce,
             &claim.server_nonce,
+            &claim.runtime_build,
             &claim.client_id,
             &claim.page_url,
         ],
@@ -354,15 +678,75 @@ fn claim(request: &HttpRequest, state: &BridgeState) -> Result<HttpResponse, Cli
         server_nonce: claim.server_nonce,
     });
     state.claimed_notify.notify_waiters();
-    HttpResponse::json(
-        200,
-        "OK",
-        ClaimResponse {
-            version: PROTOCOL_VERSION,
-            request_id: &state.request_id,
-            provider: state.provider.bridge_name(),
-        },
-    )
+    match state.operation {
+        BridgeOperation::Challenge(provider) => HttpResponse::json(
+            200,
+            "OK",
+            ClaimResponse {
+                version: PROTOCOL_VERSION,
+                request_id: &state.request_id,
+                provider: provider.bridge_name(),
+            },
+        ),
+        // A probe returns a distinct instruction that the transport must
+        // acknowledge. It contains no provider, so the offscreen controller
+        // cannot create a Suno iframe or execute a challenge.
+        BridgeOperation::Probe => HttpResponse::json(
+            200,
+            "OK",
+            ProbeClaimResponse {
+                version: PROTOCOL_VERSION,
+                request_id: &state.request_id,
+                probe: true,
+            },
+        ),
+    }
+}
+
+fn acknowledge_probe(request: &HttpRequest, state: &BridgeState) -> Result<HttpResponse, CliError> {
+    if !matches!(state.operation, BridgeOperation::Probe) {
+        return Ok(HttpResponse::empty(409, "Conflict"));
+    }
+    let ack: ProbeAckRequest = match serde_json::from_slice(&request.body) {
+        Ok(ack) => ack,
+        Err(_) => return Ok(HttpResponse::empty(400, "Bad Request")),
+    };
+    if ack.version != PROTOCOL_VERSION
+        || ack.runtime_build != BROWSER_BRIDGE_RUNTIME_BUILD
+        || ack.request_id != state.request_id
+    {
+        return Ok(HttpResponse::empty(409, "Conflict"));
+    }
+    {
+        let session = state
+            .claim_session
+            .lock()
+            .expect("bridge claim session mutex poisoned");
+        let Some(session) = session.as_ref() else {
+            return Ok(HttpResponse::empty(409, "Conflict"));
+        };
+        if ack.client_nonce != session.client_nonce || ack.server_nonce != session.server_nonce {
+            return Ok(HttpResponse::empty(403, "Forbidden"));
+        }
+    }
+    let port = state.port.to_string();
+    let expected_proof = authentication_proof(
+        &state.secret,
+        "sunox-bridge-probe-ack-v3",
+        &[
+            &port,
+            &ack.client_nonce,
+            &ack.server_nonce,
+            &ack.request_id,
+            &ack.runtime_build,
+        ],
+    );
+    if !constant_time_eq(ack.proof.as_bytes(), expected_proof.as_bytes()) {
+        return Ok(HttpResponse::empty(403, "Forbidden"));
+    }
+    state.probe_acknowledged.store(true, Ordering::Release);
+    state.probe_acknowledged_notify.notify_waiters();
+    Ok(HttpResponse::empty(204, "No Content"))
 }
 
 fn receive_result(request: &HttpRequest, state: &BridgeState) -> Result<HttpResponse, CliError> {
@@ -399,7 +783,7 @@ fn receive_result(request: &HttpRequest, state: &BridgeState) -> Result<HttpResp
     let port = state.port.to_string();
     let expected_proof = authentication_proof(
         &state.secret,
-        "sunox-bridge-result-v2",
+        "sunox-bridge-result-v3",
         &[
             &port,
             &result.client_nonce,
@@ -585,23 +969,28 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex, atomic::Ordering};
+    use std::time::{Duration, Instant};
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
-    use tokio::sync::{Notify, oneshot};
+    use tokio::sync::{Mutex as AsyncMutex, Notify, oneshot};
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        BridgeResult, BridgeState, CLAIM_CLOSED, CLAIM_PENDING, COMPLETION_TIMEOUT_MS, HttpRequest,
-        PROTOCOL_VERSION, authentication_proof, constant_time_eq, is_suno_page, route_request,
-        serve, valid_extension_origin,
+        BridgeOperation, BridgeResult, BridgeState, CLAIM_CLOSED, CLAIM_PENDING,
+        COMPLETION_TIMEOUT_MS, HttpRequest, MAX_OCCUPIED_PORT_HELLO_RESPONSE_BYTES, PORT_COUNT,
+        PROTOCOL_VERSION, acknowledge_probe, authentication_proof, constant_time_eq, is_suno_page,
+        occupied_port_is_current_bridge, occupied_port_probe_client, probe_with_secret_in_range,
+        route_request, serve, valid_extension_origin, wait_for_probe_ack_signal,
     };
     use crate::api::challenge::ChallengeProvider;
     use crate::captcha::{
-        SUNO_CHALLENGE_SDK_READY_TIMEOUT_MS, SUNO_TURNSTILE_IDLE_TIMEOUT_MS,
-        SUNO_TURNSTILE_INTERACTIVE_TIMEOUT_MS,
+        BridgeProbeStatus, SUNO_CHALLENGE_SDK_READY_TIMEOUT_MS, SUNO_HCAPTCHA_SILENT_TIMEOUT_MS,
+        SUNO_TURNSTILE_IDLE_TIMEOUT_MS, bridge_contract::BROWSER_BRIDGE_RUNTIME_BUILD,
     };
+
+    static PROBE_PORT_TEST_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());
 
     fn javascript_number(source: &str, name: &str) -> u64 {
         let declaration = format!("const {name} = ");
@@ -620,25 +1009,48 @@ mod tests {
     }
 
     #[test]
-    fn bridge_timeout_layers_cover_cold_start_and_interactive_challenge() {
+    fn bridge_timeout_layers_cover_cold_start_and_silent_challenge() {
         let page = include_str!("../../assets/browser-extension/page.js");
         let bridge = include_str!("../../assets/browser-extension/bridge.js");
         let offscreen = include_str!("../../assets/browser-extension/offscreen.js");
+        let service_worker = include_str!("../../assets/browser-extension/service-worker.js");
+        let transport = include_str!("../../assets/browser-extension/transport-loopback.js");
 
         let sdk_ready_timeout = javascript_number(page, "CHALLENGE_SDK_READY_TIMEOUT_MS");
-        let interactive_timeout = javascript_number(page, "TURNSTILE_INTERACTIVE_TIMEOUT_MS");
+        let hcaptcha_silent_timeout = javascript_number(page, "HCAPTCHA_SILENT_TIMEOUT_MS");
         let page_timeout = javascript_number(bridge, "challengePageTimeoutMs");
-        let frame_ready_timeout = javascript_number(offscreen, "frameReadyTimeoutMs");
-        let frame_result_timeout = javascript_number(offscreen, "challengeTimeoutMs");
+        let managed_frame_ready_timeout =
+            javascript_number(offscreen, "managedFrameReadyTimeoutMs");
+        let managed_frame_result_timeout =
+            javascript_number(offscreen, "managedFrameResultTimeoutMs");
+        let offscreen_busy_max_age = javascript_number(service_worker, "OFFSCREEN_BUSY_MAX_AGE_MS");
+        let transport_request_timeout = javascript_number(transport, "requestTimeoutMs");
+        let worst_case_transport_budget = transport_request_timeout * (u64::from(PORT_COUNT) + 3);
 
         assert_eq!(sdk_ready_timeout, SUNO_CHALLENGE_SDK_READY_TIMEOUT_MS);
-        assert_eq!(interactive_timeout, SUNO_TURNSTILE_INTERACTIVE_TIMEOUT_MS);
+        assert_eq!(hcaptcha_silent_timeout, SUNO_HCAPTCHA_SILENT_TIMEOUT_MS);
+        assert_eq!(page_timeout, 50_000);
+        assert_eq!(managed_frame_ready_timeout, 45_000);
+        assert_eq!(managed_frame_result_timeout, 65_000);
+        assert_eq!(offscreen_busy_max_age, 125_000);
+        assert_eq!(COMPLETION_TIMEOUT_MS, 130_000);
         assert!(
             page_timeout
-                > sdk_ready_timeout + 3 * SUNO_TURNSTILE_IDLE_TIMEOUT_MS + 2 * interactive_timeout
+                > sdk_ready_timeout + SUNO_TURNSTILE_IDLE_TIMEOUT_MS + hcaptcha_silent_timeout
         );
-        assert!(frame_result_timeout > page_timeout);
-        assert!(COMPLETION_TIMEOUT_MS > frame_ready_timeout + frame_result_timeout);
+        assert!(managed_frame_result_timeout > page_timeout);
+        assert!(
+            offscreen_busy_max_age
+                > managed_frame_ready_timeout
+                    + managed_frame_result_timeout
+                    + worst_case_transport_budget,
+            "busy recovery must preserve the full claim, hidden frame, and result transport budget"
+        );
+        assert!(
+            COMPLETION_TIMEOUT_MS > offscreen_busy_max_age,
+            "the CLI must outlive Browser Bridge stale-busy recovery"
+        );
+        assert!(COMPLETION_TIMEOUT_MS > managed_frame_result_timeout);
     }
 
     fn state_with_provider(
@@ -651,10 +1063,12 @@ mod tests {
                 port: 29_764,
                 request_id: "request-a".into(),
                 server_nonce: "server-nonce-00000001".into(),
-                provider,
+                operation: BridgeOperation::Challenge(provider),
                 secret: secret.into(),
                 claim_state: CLAIM_PENDING.into(),
                 claimed_notify: Notify::new(),
+                probe_acknowledged: false.into(),
+                probe_acknowledged_notify: Notify::new(),
                 result_sender: Mutex::new(Some(sender)),
                 claim_session: Mutex::new(None),
             },
@@ -664,6 +1078,29 @@ mod tests {
 
     fn state(secret: &str) -> (BridgeState, oneshot::Receiver<BridgeResult>) {
         state_with_provider(secret, ChallengeProvider::HCaptcha)
+    }
+
+    fn probe_state(secret: &str) -> BridgeState {
+        let (mut state, _receiver) = state(secret);
+        state.operation = BridgeOperation::Probe;
+        state.result_sender = Mutex::new(None);
+        state
+    }
+
+    async fn reserve_contiguous_test_ports(port_count: u16) -> (u16, Vec<TcpListener>) {
+        for port_start in 40_000..60_000 - port_count {
+            let mut listeners = Vec::with_capacity(usize::from(port_count));
+            for port in port_start..port_start + port_count {
+                match TcpListener::bind(("127.0.0.1", port)).await {
+                    Ok(listener) => listeners.push(listener),
+                    Err(_) => break,
+                }
+            }
+            if listeners.len() == usize::from(port_count) {
+                return (port_start, listeners);
+            }
+        }
+        panic!("could not reserve {port_count} contiguous loopback ports for Browser Bridge test");
     }
 
     fn request(path: &str, body: serde_json::Value) -> HttpRequest {
@@ -686,18 +1123,45 @@ mod tests {
             "29764",
             "client-nonce-00000001",
             "server-nonce-00000001",
+            BROWSER_BRIDGE_RUNTIME_BUILD,
             "client-a",
             page_url,
         ];
         request(
-            "/v2/challenge/claim",
+            "/v3/challenge/claim",
             serde_json::json!({
                 "version": PROTOCOL_VERSION,
+                "runtime_build": BROWSER_BRIDGE_RUNTIME_BUILD,
                 "client_id": "client-a",
                 "page_url": page_url,
                 "client_nonce": "client-nonce-00000001",
                 "server_nonce": "server-nonce-00000001",
-                "proof": authentication_proof(secret, "sunox-bridge-client-v2", &fields)
+                "proof": authentication_proof(secret, "sunox-bridge-client-v3", &fields)
+            }),
+        )
+    }
+
+    fn probe_ack_request(secret: &str) -> HttpRequest {
+        let fields = [
+            "29764",
+            "client-nonce-00000001",
+            "server-nonce-00000001",
+            "request-a",
+            BROWSER_BRIDGE_RUNTIME_BUILD,
+        ];
+        request(
+            "/v3/challenge/probe-ack",
+            serde_json::json!({
+                "version": PROTOCOL_VERSION,
+                "runtime_build": BROWSER_BRIDGE_RUNTIME_BUILD,
+                "request_id": "request-a",
+                "client_nonce": "client-nonce-00000001",
+                "server_nonce": "server-nonce-00000001",
+                "proof": authentication_proof(
+                    secret,
+                    "sunox-bridge-probe-ack-v3",
+                    &fields
+                )
             }),
         )
     }
@@ -712,7 +1176,7 @@ mod tests {
             token,
         ];
         request(
-            "/v2/challenge/result",
+            "/v3/challenge/result",
             serde_json::json!({
                 "version": PROTOCOL_VERSION,
                 "request_id": "request-a",
@@ -720,7 +1184,7 @@ mod tests {
                 "server_nonce": "server-nonce-00000001",
                 "token": token,
                 "error": null,
-                "proof": authentication_proof(secret, "sunox-bridge-result-v2", &fields)
+                "proof": authentication_proof(secret, "sunox-bridge-result-v3", &fields)
             }),
         )
     }
@@ -756,25 +1220,25 @@ mod tests {
     }
 
     #[test]
-    fn obsolete_v1_bridge_cannot_complete_the_v2_handshake() {
-        assert_eq!(PROTOCOL_VERSION, 2);
+    fn obsolete_v2_bridge_cannot_complete_the_v3_handshake() {
+        assert_eq!(PROTOCOL_VERSION, 3);
         let (state, _receiver) = state("secret-value");
         let old_route = request(
-            "/v1/challenge/hello",
+            "/v2/challenge/hello",
             serde_json::json!({
-                "version": 1,
+                "version": 2,
                 "client_nonce": "client-nonce-00000001"
             }),
         );
         let old_version = request(
-            "/v2/challenge/hello",
+            "/v3/challenge/hello",
             serde_json::json!({
-                "version": 1,
+                "version": 2,
                 "client_nonce": "client-nonce-00000001"
             }),
         );
         let current = request(
-            "/v2/challenge/hello",
+            "/v3/challenge/hello",
             serde_json::json!({
                 "version": PROTOCOL_VERSION,
                 "client_nonce": "client-nonce-00000001"
@@ -826,6 +1290,35 @@ mod tests {
             assert_eq!(response.status, 200);
             assert_eq!(body["provider"], expected);
         }
+    }
+
+    #[test]
+    fn probe_claim_requires_a_signed_runtime_ack_without_a_provider() {
+        let state = probe_state("secret-value");
+        let claim = claim_request("secret-value", "https://suno.com/create");
+
+        let response = route_request(&claim, &state).expect("probe response");
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.body).expect("probe response json");
+
+        assert_eq!(response.status, 200);
+        assert_eq!(body["probe"], true);
+        assert_eq!(body["request_id"], "request-a");
+        assert!(body.get("provider").is_none());
+        assert_eq!(
+            state.claim_state.load(std::sync::atomic::Ordering::Acquire),
+            super::CLAIMED
+        );
+        assert!(!state.probe_acknowledged.load(Ordering::Acquire));
+
+        let ack = probe_ack_request("secret-value");
+        assert_eq!(
+            acknowledge_probe(&ack, &state)
+                .expect("probe acknowledgement")
+                .status,
+            204
+        );
+        assert!(state.probe_acknowledged.load(Ordering::Acquire));
     }
 
     #[test]
@@ -896,13 +1389,13 @@ mod tests {
             "client_nonce": "client-nonce-00000001"
         })
         .to_string();
-        let hello_response = raw_request(address, "/v2/challenge/hello", &hello_body).await;
+        let hello_response = raw_request(address, "/v3/challenge/hello", &hello_body).await;
         assert!(hello_response.starts_with("HTTP/1.1 200 OK"));
         assert!(!hello_response.contains("secret-value"));
 
         let claim = claim_request("secret-value", "https://suno.com/create");
         let claim_body = String::from_utf8(claim.body).expect("claim body");
-        let claim_response = raw_request(address, "/v2/challenge/claim", &claim_body).await;
+        let claim_response = raw_request(address, "/v3/challenge/claim", &claim_body).await;
         assert!(claim_response.starts_with("HTTP/1.1 200 OK"));
         assert!(claim_response.contains(
             "Access-Control-Allow-Origin: chrome-extension://abcdefghijklmnopabcdefghijklmnop"
@@ -911,7 +1404,7 @@ mod tests {
 
         let result = result_request("secret-value", "abcdefghijklmnopqrstuvwxyz");
         let result_body = String::from_utf8(result.body).expect("result body");
-        let result_response = raw_request(address, "/v2/challenge/result", &result_body).await;
+        let result_response = raw_request(address, "/v3/challenge/result", &result_body).await;
         assert!(result_response.starts_with("HTTP/1.1 204 No Content"));
         let BridgeResult::Token(token) = receiver.await.expect("bridge result") else {
             panic!("expected token");
@@ -922,11 +1415,210 @@ mod tests {
         server.await.expect("server task");
     }
 
+    #[tokio::test]
+    async fn loopback_probe_accepts_a_healthy_extension_without_a_challenge() {
+        let state = std::sync::Arc::new(probe_state("secret-value"));
+        let listener = match TcpListener::bind(("127.0.0.1", 0)).await {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("listener: {error}"),
+        };
+        let address = listener.local_addr().expect("listener address");
+        let cancellation = CancellationToken::new();
+        let server = tokio::spawn(serve(
+            listener,
+            std::sync::Arc::clone(&state),
+            cancellation.clone(),
+        ));
+
+        let hello_body = serde_json::json!({
+            "version": PROTOCOL_VERSION,
+            "client_nonce": "client-nonce-00000001"
+        })
+        .to_string();
+        let hello_response = raw_request(address, "/v3/challenge/hello", &hello_body).await;
+        assert!(hello_response.starts_with("HTTP/1.1 200 OK"));
+
+        let claim = claim_request("secret-value", "https://suno.com/create");
+        let claim_body = String::from_utf8(claim.body).expect("claim body");
+        let claim_response = raw_request(address, "/v3/challenge/claim", &claim_body).await;
+
+        assert!(claim_response.starts_with("HTTP/1.1 200 OK"));
+        assert!(!claim_response.contains("provider"));
+        assert!(claim_response.contains("request-a"));
+        assert!(
+            !wait_for_probe_ack_signal(&state, std::time::Duration::from_millis(1)).await,
+            "claim alone must not satisfy the probe"
+        );
+
+        let ack = probe_ack_request("secret-value");
+        let ack_body = String::from_utf8(ack.body).expect("probe ack body");
+        let ack_response = raw_request(address, "/v3/challenge/probe-ack", &ack_body).await;
+        assert!(ack_response.starts_with("HTTP/1.1 204 No Content"));
+        assert!(
+            wait_for_probe_ack_signal(&state, std::time::Duration::from_millis(1)).await,
+            "signed runtime acknowledgement should satisfy the probe"
+        );
+
+        cancellation.cancel();
+        server.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn probe_reports_port_conflict_for_foreign_port_occupancy() {
+        let _port_lock = PROBE_PORT_TEST_LOCK.lock().await;
+        let port_count = 2;
+        let (port_start, mut reserved) = reserve_contiguous_test_ports(port_count).await;
+
+        let lowest_listener = reserved.remove(0);
+        drop(reserved);
+        let lower_occupied = probe_with_secret_in_range(
+            "secret-value".into(),
+            Duration::from_millis(20),
+            Instant::now(),
+            port_start,
+            port_count,
+        )
+        .await
+        .expect("probe behind lower occupied port");
+        assert_eq!(lower_occupied.status, BridgeProbeStatus::PortConflict);
+        assert_eq!(lower_occupied.occupied_ports, vec![port_start]);
+        assert!(lower_occupied.bridge_occupied_ports.is_empty());
+        assert_eq!(lower_occupied.foreign_occupied_ports, vec![port_start]);
+        assert_eq!(lower_occupied.port, Some(port_start + 1));
+
+        let mut all_listeners = vec![lowest_listener];
+        for port in port_start + 1..port_start + port_count {
+            all_listeners.push(
+                TcpListener::bind(("127.0.0.1", port))
+                    .await
+                    .unwrap_or_else(|error| panic!("reserve Browser Bridge port {port}: {error}")),
+            );
+        }
+        let all_occupied = probe_with_secret_in_range(
+            "secret-value".into(),
+            Duration::from_millis(20),
+            Instant::now(),
+            port_start,
+            port_count,
+        )
+        .await
+        .expect("probe with all ports occupied");
+        assert_eq!(all_occupied.status, BridgeProbeStatus::PortConflict);
+        assert_eq!(all_occupied.port, None);
+        assert_eq!(
+            all_occupied.occupied_ports,
+            (port_start..port_start + port_count).collect::<Vec<_>>()
+        );
+        assert!(all_occupied.bridge_occupied_ports.is_empty());
+        assert_eq!(
+            all_occupied.foreign_occupied_ports,
+            (port_start..port_start + port_count).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_reports_busy_only_for_an_authenticated_sunox_listener() {
+        let _port_lock = PROBE_PORT_TEST_LOCK.lock().await;
+        let port_count = 2;
+        let (port_start, mut reserved) = reserve_contiguous_test_ports(port_count).await;
+        let (mut bridge_state, _receiver) = state("secret-value");
+        bridge_state.port = port_start;
+        let bridge_state = Arc::new(bridge_state);
+        let listener = reserved.remove(0);
+        drop(reserved);
+        let cancellation = CancellationToken::new();
+        let server = tokio::spawn(serve(
+            listener,
+            Arc::clone(&bridge_state),
+            cancellation.clone(),
+        ));
+
+        let report = probe_with_secret_in_range(
+            "secret-value".into(),
+            Duration::from_millis(20),
+            Instant::now(),
+            port_start,
+            port_count,
+        )
+        .await
+        .expect("probe around authenticated Browser Bridge listener");
+
+        assert_eq!(report.status, BridgeProbeStatus::Busy);
+        assert_eq!(report.bridge_occupied_ports, vec![port_start]);
+        assert!(report.foreign_occupied_ports.is_empty());
+        assert_eq!(report.port, Some(port_start + 1));
+
+        cancellation.cancel();
+        server.await.expect("current Browser Bridge server");
+    }
+
+    #[tokio::test]
+    async fn occupied_port_probe_does_not_follow_redirects() {
+        let target_listener = match TcpListener::bind(("127.0.0.1", 0)).await {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("redirect target listener: {error}"),
+        };
+        let target_address = target_listener
+            .local_addr()
+            .expect("redirect target address");
+        let target = tokio::spawn(async move {
+            let _ = target_listener.accept().await;
+        });
+        let redirect = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://{target_address}/v3/challenge/hello\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        let Some((redirect_port, redirect_server)) = raw_response_server(redirect).await else {
+            return;
+        };
+        let client = occupied_port_probe_client().expect("occupied-port probe client");
+
+        assert!(
+            !occupied_port_is_current_bridge(&client, redirect_port, "secret-value").await,
+            "a redirecting foreign listener must not be treated as the current bridge"
+        );
+        redirect_server.await.expect("redirect server");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !target.is_finished(),
+            "the occupied-port probe must not follow a redirect, even to loopback"
+        );
+        target.abort();
+    }
+
+    #[tokio::test]
+    async fn occupied_port_probe_rejects_non_json_and_oversized_responses() {
+        let Some((non_json_port, non_json_server)) = raw_response_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+                .into(),
+        )
+        .await
+        else {
+            return;
+        };
+        let oversized_length = MAX_OCCUPIED_PORT_HELLO_RESPONSE_BYTES + 1;
+        let Some((oversized_port, oversized_server)) = raw_response_server(format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {oversized_length}\r\nConnection: close\r\n\r\n"
+        ))
+        .await
+        else {
+            return;
+        };
+        let client = occupied_port_probe_client().expect("occupied-port probe client");
+
+        assert!(!occupied_port_is_current_bridge(&client, non_json_port, "secret-value").await);
+        assert!(!occupied_port_is_current_bridge(&client, oversized_port, "secret-value").await);
+
+        non_json_server.await.expect("non-JSON server");
+        oversized_server.await.expect("oversized server");
+    }
+
     #[test]
     fn hello_response_proves_server_identity_without_receiving_the_secret() {
         let (state, _receiver) = state("secret-value");
         let hello = request(
-            "/v2/challenge/hello",
+            "/v3/challenge/hello",
             serde_json::json!({
                 "version": PROTOCOL_VERSION,
                 "client_nonce": "client-nonce-00000001"
@@ -937,7 +1629,7 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&response.body).expect("hello JSON");
         let expected = authentication_proof(
             "secret-value",
-            "sunox-bridge-server-v2",
+            "sunox-bridge-server-v3",
             &["29764", "client-nonce-00000001", "server-nonce-00000001"],
         );
 
@@ -945,7 +1637,7 @@ mod tests {
         assert_eq!(body["proof"], expected);
         assert_eq!(
             expected,
-            "f629f0215a73c7579aedb03d45d2c5689909ad34ada012da1a2a2d6bc467460f"
+            "5d354925cf93fe3cabceca0bdb4c7103e1e1bd000a225003b3ab4785fa976ba9"
         );
         assert!(
             !String::from_utf8(response.body)
@@ -965,5 +1657,28 @@ mod tests {
         let mut response = Vec::new();
         stream.read_to_end(&mut response).await.expect("read");
         String::from_utf8(response).expect("UTF-8 response")
+    }
+
+    async fn raw_response_server(response: String) -> Option<(u16, tokio::task::JoinHandle<()>)> {
+        let listener = match TcpListener::bind(("127.0.0.1", 0)).await {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return None,
+            Err(error) => panic!("raw response listener: {error}"),
+        };
+        let port = listener.local_addr().expect("raw response address").port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("raw response connection");
+            let mut request = vec![0; 4096];
+            let _ = stream
+                .read(&mut request)
+                .await
+                .expect("raw response request");
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("raw response write");
+            stream.shutdown().await.expect("raw response shutdown");
+        });
+        Some((port, server))
     }
 }

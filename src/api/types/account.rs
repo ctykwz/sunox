@@ -45,11 +45,15 @@ pub struct Model {
     pub external_key: String,
     pub can_use: bool,
     pub is_default_model: bool,
+    #[serde(default)]
+    pub is_default_free_model: bool,
     pub description: String,
     #[serde(default)]
     pub capabilities: Vec<String>,
     #[serde(default)]
     pub features: Vec<String>,
+    #[serde(default)]
+    pub badges: Vec<String>,
     #[serde(default)]
     pub max_lengths: MaxLengths,
     #[serde(default, flatten)]
@@ -57,14 +61,15 @@ pub struct Model {
 }
 
 impl Model {
-    pub fn supports_capability(&self, capability: &str) -> bool {
-        self.capabilities
-            .iter()
-            .any(|candidate| candidate == "all" || candidate == capability)
+    /// Match Suno Web's `modelSupportsFeature`: the `custom` badge enables
+    /// Create-form features generally; otherwise the feature must be listed.
+    pub fn supports_web_feature(&self, feature: &str) -> bool {
+        self.badges.iter().any(|badge| badge == "custom")
+            || self.features.iter().any(|candidate| candidate == feature)
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct MaxLengths {
     #[serde(default)]
     pub title: u32,
@@ -118,6 +123,7 @@ mod tests {
                 "is_default_model": true,
                 "description": "Current model",
                 "features": ["reuse_styles_lyrics"],
+                "badges": ["custom"],
                 "max_lengths": {"prompt": 5000, "duration": 480},
                 "capabilities": ["audio_upload"],
                 "major_version": 5
@@ -129,8 +135,7 @@ mod tests {
         }))
         .expect("deserialize current billing response");
 
-        assert!(billing.models[0].supports_capability("audio_upload"));
-        assert!(!billing.models[0].supports_capability("sound"));
+        assert!(billing.models[0].supports_web_feature("sound"));
 
         let output = serde_json::to_value(billing).expect("serialize billing response");
         assert_eq!(output["accessible_features"]["personas"], true);
@@ -138,24 +143,38 @@ mod tests {
         assert_eq!(output["plan"]["currency"], "USD");
         assert_eq!(output["models"][0]["capabilities"][0], "audio_upload");
         assert_eq!(output["models"][0]["features"][0], "reuse_styles_lyrics");
+        assert_eq!(output["models"][0]["badges"][0], "custom");
         assert_eq!(output["models"][0]["major_version"], 5);
         assert_eq!(output["models"][0]["max_lengths"]["duration"], 480);
         assert!(output.get("extra").is_none());
     }
 
     #[test]
-    fn all_model_capability_matches_web_capability_checks() {
+    fn model_feature_support_matches_the_current_web_helper() {
         let model: Model = serde_json::from_value(serde_json::json!({
             "name": "custom",
             "external_key": "custom-model",
             "can_use": true,
             "is_default_model": false,
             "description": "fixture",
-            "capabilities": ["all"]
+            "badges": ["custom"]
         }))
         .expect("deserialize model");
 
-        assert!(model.supports_capability("create_control_sliders"));
-        assert!(model.supports_capability("sound"));
+        assert!(model.supports_web_feature("create_control_sliders"));
+        assert!(model.supports_web_feature("sound"));
+
+        let feature_model: Model = serde_json::from_value(serde_json::json!({
+            "name": "feature",
+            "external_key": "feature-model",
+            "can_use": true,
+            "is_default_model": false,
+            "description": "fixture",
+            "features": ["create_control_sliders"]
+        }))
+        .expect("deserialize feature model");
+
+        assert!(feature_model.supports_web_feature("create_control_sliders"));
+        assert!(!feature_model.supports_web_feature("sound"));
     }
 }

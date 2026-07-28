@@ -151,14 +151,19 @@ Consulta `sunox --help` o `sunox <comando> --help` para ver todas las opciones.
 Antes de enviar una solicitud de generación, Sunox ejecuta la misma comprobación que la aplicación
 web de Suno. Si no hace falta verificar, envía la solicitud directamente y no abre ningún
 navegador. Si Suno exige un challenge, primero pide a la extensión opcional Browser Bridge que
-ejecute el widget invisible dentro del perfil habitual de Chrome. La extensión mantiene un listener
-invisible e inserta un marco de challenge de `suno.com` fuera de pantalla solo cuando hace falta;
-reutiliza ese contexto privado durante 20 minutos y después lo elimina. No es necesario abrir ni
-mantener una pestaña de Suno, y el Bridge no crea ninguna ventana. Si el Bridge no responde, el
-modo predeterminado `auto` solo recurre a un navegador de la familia Chromium instalado cuando no
-hay un emparejamiento del Bridge configurado. Una vez instalado el Bridge, `auto` falla de forma
-segura en vez de iniciar un proceso de navegador separado. Usa `challenge_browser=isolated`
-explícitamente cuando aceptes esa alternativa independiente.
+ejecute el widget invisible dentro del perfil habitual de Chrome. Mientras está inactiva, la
+extensión solo mantiene su listener local. Cuando hace falta verificar, usa el documento offscreen
+invisible de Chrome y coloca dentro un único iframe de `suno.com` ligado a un nonce. El iframe
+conserva un viewport normal para el proveedor, pero Chrome no crea pestañas, ventanas emergentes,
+ventanas minimizadas ni otro proceso de navegador. Solo el iframe de primer nivel propiedad de la
+extensión puede conectarse; una navegación, recarga, desconexión o identidad inesperada elimina el
+iframe y falla de forma segura. El iframe también se elimina tras el token o el error final, sin
+ninguna alternativa visible. Este comportamiento es compatible tanto con macOS como con Windows.
+
+Si el Bridge no responde, el modo predeterminado `auto` solo recurre a un navegador de la familia
+Chromium instalado cuando no hay un emparejamiento del Bridge configurado. Una vez instalado el
+Bridge, `auto` falla de forma segura en vez de iniciar un proceso de navegador separado. Usa
+`challenge_browser=isolated` explícitamente cuando aceptes esa alternativa independiente.
 
 ### Instalar Browser Bridge en macOS o Windows
 
@@ -178,6 +183,12 @@ Web Store. La configuración es la misma en macOS y Windows:
    indicada en la barra de direcciones del selector.
 4. Mantén activada la extensión. No es necesario conservar ninguna pestaña de Suno abierta.
 
+Comprueba el emparejamiento sin crear una canción, ejecutar un challenge ni consumir créditos:
+
+```bash
+sunox doctor --browser-bridge
+```
+
 La extensión permanece instalada tras reiniciar el navegador. Después de una actualización de
 Sunox que cambie el Bridge, actualiza sus archivos y recárgala en Chrome:
 
@@ -185,10 +196,12 @@ Sunox que cambie el Bridge, actualiza sus archivos y recárgala en Chrome:
 sunox install-browser-extension --force
 ```
 
-Después pulsa **Recargar** en la tarjeta Sunox Browser Bridge. No es necesario recargar ninguna
-página de Suno. El comando elige el directorio de aplicación correcto de cada usuario tanto en
-macOS como en Windows; no muevas ni borres ese directorio mientras Chrome use la extensión sin
-empaquetar.
+El comando compara primero el paquete generado con los archivos extraídos. Pulsa **Recargar** en la
+tarjeta Sunox Browser Bridge solo cuando informe `updated` o `reload_required`; si informa
+`already_current`, no hace falta recargarla en Chrome. Reiniciar el ordenador o Chrome por sí solo
+nunca exige reinstalar ni recargar el Bridge. Tampoco es necesario recargar ninguna página de
+Suno. El comando elige el directorio de aplicación correcto de cada usuario tanto en macOS como en
+Windows; no muevas ni borres ese directorio mientras Chrome use la extensión sin empaquetar.
 
 ```text
 --captcha          Verificar aunque la comprobación inicial no lo solicite
@@ -200,12 +213,12 @@ Configura `challenge_browser` como `auto` (predeterminado), `existing` (exige el
 inicia un proceso de navegador separado) o `isolated` (siempre usa el navegador temporal). Puedes
 anularlo en un único comando con `-c challenge_browser=existing`. El nombre `existing` se conserva
 por compatibilidad de configuración: ahora significa «usar el Bridge instalado en el perfil de
-Chrome existente». El Bridge gestiona su propio marco de Suno fuera de pantalla, así que no hace
-falta ninguna pestaña ni ventana. Un Bridge ausente u obsoleto se comunica como error en vez de
-abrir otro navegador. En modo `auto`, Sunox puede abrir el respaldo aislado solo si no hay un
-emparejamiento del Bridge configurado. Si el Bridge instalado está desactivado, obsoleto o no es
-accesible, falla de forma segura; usa `isolated` explícitamente para permitir un proceso de
-navegador separado.
+Chrome existente». El Bridge crea y elimina automáticamente un iframe offscreen vinculado a un
+nonce; no abre ninguna pestaña ni ventana. Un Bridge ya configurado que esté ausente u obsoleto se comunica como error en
+vez de abrir otro navegador o recurrir a un contexto visible.
+En modo `auto`, Sunox puede abrir el respaldo aislado solo si no hay un emparejamiento del Bridge
+configurado. Si el Bridge instalado está desactivado, obsoleto o no es accesible, falla de forma
+segura; usa `isolated` explícitamente para permitir un proceso de navegador separado.
 
 Para ejecuciones desatendidas que no deban añadir una pestaña de Suno a la ventana activa ni abrir
 otro proceso de navegador, instala Browser Bridge y omite `--no-captcha`. Tanto `auto` como
@@ -215,13 +228,13 @@ instalado o no conoces su estado, conserva `--no-captcha`: un challenge necesari
 del envío. Sin un Bridge configurado, omitir `--no-captcha` en el modo predeterminado `auto` todavía
 permite el respaldo mediante navegador aislado.
 
-Instalar el Bridge autoriza permanentemente a Sunox a ejecutar challenges invisibles en el contexto
-oculto que administra; no hace falta pedir permiso aparte en cada generación. Solicitudes como «sin
-ventana emergente», «sin navegador nuevo» o «sin captcha visible» permiten el Bridge instalado y no
-significan `--no-captcha`; `challenge_browser=existing` sigue siendo la anulación explícita que usa
-solo el Bridge. Conserva `--no-captcha` pese a tener el Bridge instalado únicamente si se prohíben
-explícitamente todos los mecanismos de challenge, incluido el Bridge invisible, o si se solicita
-esa opción exacta.
+Instalar el Bridge autoriza permanentemente a Sunox a ejecutar challenges en el contexto efímero que
+administra automáticamente; no hace falta pedir permiso aparte en cada generación. Solicitudes como
+«no dejar una pestaña de Suno abierta», «sin navegador nuevo» o «sin captcha visible» permiten el
+Bridge instalado y no significan `--no-captcha`; `challenge_browser=existing` sigue siendo la
+anulación explícita que usa solo el Bridge. Conserva `--no-captcha` pese a tener el Bridge instalado
+únicamente si se prohíben explícitamente todos los mecanismos de challenge, incluido el Bridge, o
+si se solicita esa opción exacta.
 
 ## JSON y automatización
 

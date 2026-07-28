@@ -16,125 +16,161 @@
   }
 
   const clientId = `offscreen-${crypto.randomUUID()}`;
-  const pageUrl = "https://suno.com/create#sunox-browser-bridge";
-  const frameReadyTimeoutMs = 20_000;
-  const challengeTimeoutMs = 320_000;
-  const frameIdleMs = 20 * 60 * 1000;
+  const pageUrl = "https://suno.com/create";
+  const managedFrameReadyTimeoutMs = 45_000;
+  const managedFrameResultTimeoutMs = 65_000;
+  const managedPageHashPrefix = "#sunox-browser-bridge=";
+  const managedNoncePattern =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  const pollWorkerStaleMs = 5_000;
   const maxTokenLength = 16_384;
   let busy = false;
-  let frame;
-  let frameReady;
-  let idleTimer;
+  let busySince = 0;
+  let pollingReady = false;
+  let lastPollWorkerTickAt = 0;
   let nextScanAt = 0;
+  let pollWorker;
+  let pollWorkerGeneration = 0;
+  let pollWorkerRestartDelayMs = 250;
+  let pollWorkerRestartTimer;
   let scanDelayMs = 500;
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (
-      message?.type !== "sunox-offscreen-ping-v1"
+      !["sunox-offscreen-start-v1", "sunox-offscreen-ping-v1"].includes(
+        message?.type
+      )
       || sender.id !== chrome.runtime.id
       || sender.tab
     ) return false;
-    sendResponse({ type: "sunox-offscreen-pong-v1" });
+    if (message.type === "sunox-offscreen-start-v1") {
+      pollingReady = true;
+      sendResponse({ accepted: true });
+      poll();
+      return false;
+    }
+    const pollWorkerAgeMs = lastPollWorkerTickAt > 0
+      ? Math.max(0, Date.now() - lastPollWorkerTickAt)
+      : null;
+    sendResponse({
+      busy: busySince > 0,
+      busySince: busySince > 0 ? busySince : null,
+      type: "sunox-offscreen-pong-v1",
+      pollWorkerAgeMs,
+      pollWorkerHealthy: pollWorkerAgeMs !== null
+        && pollWorkerAgeMs <= pollWorkerStaleMs
+    });
     return false;
   });
 
-  function destroyFrame() {
-    clearTimeout(idleTimer);
-    idleTimer = null;
-    frame?.remove();
-    frame = null;
-    frameReady = null;
-  }
+  async function executeInManagedFrame(challenge) {
+    const nonce = crypto.randomUUID();
+    if (!managedNoncePattern.test(nonce)) {
+      return {
+        token: null,
+        error: "Managed Suno frame could not create a valid request nonce"
+      };
+    }
 
-  function scheduleFrameIdleCleanup() {
-    clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => {
-      if (busy) {
-        scheduleFrameIdleCleanup();
-      } else {
-        destroyFrame();
-      }
-    }, frameIdleMs);
-  }
-
-  function createFrame() {
     const managedFrame = document.createElement("iframe");
+    let frameErrorEvents = 0;
+    let frameLoadEvents = 0;
+    managedFrame.addEventListener("error", () => {
+      frameErrorEvents += 1;
+    });
+    managedFrame.addEventListener("load", () => {
+      frameLoadEvents += 1;
+    });
     managedFrame.title = "Sunox managed challenge context";
-    managedFrame.src = pageUrl;
+    managedFrame.src = `${pageUrl}${managedPageHashPrefix}${nonce}`;
     managedFrame.sandbox.add("allow-forms", "allow-same-origin", "allow-scripts");
+    // The offscreen document itself has no browser surface. Keep a normal
+    // layout viewport so visibility-sensitive provider code can measure the
+    // widget without creating a tab or top-level window.
     managedFrame.style.cssText = "width:1280px;height:900px;border:0";
 
-    const ready = new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        chrome.runtime.onMessage.removeListener(onReady);
-        reject(new Error("Managed Suno iframe did not become ready within 20 seconds"));
-      }, frameReadyTimeoutMs);
-
-      function onReady(message, sender) {
-        if (
-          message?.type !== "sunox-managed-frame-ready-v1"
-          || sender.id !== chrome.runtime.id
-          || sender.tab
-        ) return false;
-        clearTimeout(timeout);
-        chrome.runtime.onMessage.removeListener(onReady);
-        resolve(managedFrame);
-        return false;
-      }
-
-      chrome.runtime.onMessage.addListener(onReady);
-      document.body.appendChild(managedFrame);
-    }).catch((error) => {
-      managedFrame.remove();
-      if (frame === managedFrame) {
-        frame = null;
-        frameReady = null;
-      }
-      throw error;
-    });
-
-    frame = managedFrame;
-    frameReady = ready;
-    return ready;
-  }
-
-  async function managedFrame() {
-    const current = frameReady || createFrame();
-    const ready = await current;
-    scheduleFrameIdleCleanup();
-    return ready;
-  }
-
-  async function executeInFrame(challenge) {
-    await managedFrame();
     return await new Promise((resolve) => {
+      let executeRequested = false;
       let settled = false;
-      const timeout = setTimeout(() => {
+      let timeout = setTimeout(() => {
         finish({
           token: null,
-          error: "Managed Suno iframe did not return a challenge result within 320 seconds"
+          error:
+            `Managed Suno frame did not become ready within 45 seconds (load_events=${frameLoadEvents}, error_events=${frameErrorEvents})`
         });
-      }, challengeTimeoutMs);
+      }, managedFrameReadyTimeoutMs);
 
       function finish(result) {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
-        chrome.runtime.onMessage.removeListener(onResult);
+        chrome.runtime.onMessage.removeListener(onFrameMessage);
+        managedFrame.remove();
         resolve(result);
       }
 
-      function onResult(message, sender) {
+      function onFrameMessage(message, sender) {
         if (sender.id !== chrome.runtime.id || sender.tab) return false;
-        if (message?.type === "sunox-managed-frame-disconnected-v1") {
+        if (
+          message?.type === "sunox-managed-frame-diagnostic-v1"
+          && message.nonce === nonce
+          && typeof message.reason === "string"
+          && /^[a-z_]{1,64}$/.test(message.reason)
+        ) {
           finish({
             token: null,
-            error: "Managed Suno iframe messaging port disconnected"
+            error: `Managed Suno frame port was rejected (${message.reason})`
           });
           return false;
         }
         if (
-          message?.type !== "sunox-managed-frame-result-v1"
+          message?.type === "sunox-managed-frame-ready-v2"
+          && message.nonce === nonce
+          && !executeRequested
+        ) {
+          executeRequested = true;
+          clearTimeout(timeout);
+          timeout = setTimeout(() => {
+            finish({
+              token: null,
+              error: "Managed Suno frame did not return a challenge result within 65 seconds"
+            });
+          }, managedFrameResultTimeoutMs);
+          chrome.runtime.sendMessage({
+            type: "sunox-managed-frame-execute-v2",
+            requestId: challenge.requestId,
+            provider: challenge.provider,
+            nonce
+          }).then((response) => {
+            if (response?.accepted) return;
+            finish({
+              token: null,
+              error: typeof response?.error === "string" && response.error
+                ? response.error.slice(0, 900)
+                : "Managed Suno frame messaging port is unavailable"
+            });
+          }).catch((error) => {
+            finish({
+              token: null,
+              error: errorMessage(error)
+            });
+          });
+          return false;
+        }
+        if (
+          message?.type === "sunox-managed-frame-disconnected-v2"
+          && message.nonce === nonce
+          && executeRequested
+        ) {
+          finish({
+            token: null,
+            error: "Managed Suno frame disconnected after challenge execution began"
+          });
+          return false;
+        }
+        if (
+          message?.type !== "sunox-managed-frame-result-v2"
+          || message.nonce !== nonce
           || message.requestId !== challenge.requestId
         ) return false;
         const token = typeof message.token === "string"
@@ -148,28 +184,13 @@
             ? null
             : typeof message.error === "string" && message.error
               ? message.error.slice(0, 900)
-              : "Managed Suno iframe returned an invalid challenge token"
+              : "Managed Suno frame returned an invalid challenge token"
         });
         return false;
       }
 
-      chrome.runtime.onMessage.addListener(onResult);
-      chrome.runtime.sendMessage({
-        type: "sunox-managed-frame-execute-v1",
-        requestId: challenge.requestId,
-        provider: challenge.provider
-      }).then((response) => {
-        if (response?.accepted) return;
-        finish({
-          token: null,
-          error: "Managed Suno iframe messaging port is unavailable"
-        });
-      }).catch((error) => {
-        finish({
-          token: null,
-          error: errorMessage(error)
-        });
-      });
+      chrome.runtime.onMessage.addListener(onFrameMessage);
+      document.body.appendChild(managedFrame);
     });
   }
 
@@ -183,8 +204,11 @@
   }
 
   async function poll() {
-    if (busy || Date.now() < nextScanAt) return;
+    if (!pollingReady || busy || Date.now() < nextScanAt) return;
     busy = true;
+    // The CLI marks a request claimed before this promise resolves. Preserve
+    // the complete claim/window/result operation across service-worker wakes.
+    busySince = Date.now();
     let challenge;
     try {
       challenge = await transport.claimChallenge({ clientId, pageUrl });
@@ -192,16 +216,8 @@
       nextScanAt = Date.now() + scanDelayMs;
       if (!challenge) return;
 
-      const result = await executeInFrame(challenge);
+      const result = await executeInManagedFrame(challenge);
       const token = result.token;
-      if (token) {
-        scheduleFrameIdleCleanup();
-      } else {
-        // Provider SDKs can retain a wedged widget after a timeout or error.
-        // Never reuse that page for the next challenge.
-        destroyFrame();
-      }
-
       const submitted = await transport.submitResult({
         transportReceipt: challenge.transportReceipt,
         requestId: challenge.requestId,
@@ -217,12 +233,54 @@
       if (challenge) await submitFailure(challenge, error).catch(() => {});
     } finally {
       busy = false;
+      busySince = 0;
     }
   }
 
-  const pollWorker = new Worker("poll-worker.js");
-  pollWorker.addEventListener("message", (event) => {
-    if (event.data?.type === "sunox-poll") poll();
-  });
-  poll();
+  function schedulePollWorkerRestart() {
+    if (pollWorkerRestartTimer) return;
+    lastPollWorkerTickAt = 0;
+    const delayMs = pollWorkerRestartDelayMs;
+    pollWorkerRestartDelayMs = Math.min(
+      pollWorkerRestartDelayMs * 2,
+      pollWorkerStaleMs
+    );
+    pollWorkerRestartTimer = setTimeout(() => {
+      pollWorkerRestartTimer = null;
+      startPollWorker();
+    }, delayMs);
+  }
+
+  function startPollWorker() {
+    const generation = ++pollWorkerGeneration;
+    let worker;
+    try {
+      worker = new Worker("poll-worker.js");
+    } catch {
+      schedulePollWorkerRestart();
+      return;
+    }
+    pollWorker = worker;
+
+    const recover = () => {
+      if (pollWorker !== worker || generation !== pollWorkerGeneration) return;
+      pollWorker = null;
+      worker.terminate?.();
+      schedulePollWorkerRestart();
+    };
+    worker.addEventListener("message", (event) => {
+      if (
+        pollWorker !== worker
+        || generation !== pollWorkerGeneration
+        || event.data?.type !== "sunox-poll"
+      ) return;
+      lastPollWorkerTickAt = Date.now();
+      pollWorkerRestartDelayMs = 250;
+      poll();
+    });
+    worker.addEventListener("error", recover);
+    worker.addEventListener("messageerror", recover);
+  }
+
+  startPollWorker();
 })();

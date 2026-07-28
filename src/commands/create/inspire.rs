@@ -3,7 +3,7 @@ use crate::app::AppContext;
 use crate::cli::InspireArgs;
 use crate::core::{CliError, ensure_percentage};
 
-use super::support::{ChallengeMode, execute_generation_submission, output_clips};
+use super::support::{ChallengeMode, execute_generation_submission, output_generation};
 
 pub async fn inspire(args: InspireArgs, ctx: &AppContext) -> Result<(), CliError> {
     ensure_percentage("--weirdness", args.weirdness)?;
@@ -25,7 +25,7 @@ pub async fn inspire(args: InspireArgs, ctx: &AppContext) -> Result<(), CliError
     }
     let clips = execute_generation_submission(token, challenge_mode, ctx, move || async move {
         let client = ctx.client().await?;
-        let mut req = client
+        let req = client
             .prepare_inspiration_request(InspirationOptions {
                 clip_id: &args.clip_id,
                 title: &args.title,
@@ -36,10 +36,9 @@ pub async fn inspire(args: InspireArgs, ctx: &AppContext) -> Result<(), CliError
                 challenge_token: None,
             })
             .await?;
-        client.prepare_generation_request(&mut req).await?;
         Ok((client, req))
     })
     .await?;
-    output_clips(&clips, ctx);
+    output_generation(&clips, ctx);
     Ok(())
 }

@@ -1,12 +1,13 @@
 use crate::api::SunoClient;
 use crate::api::extend::ExtendClipOptions;
+use crate::api::generate::{TAG_UPSAMPLE_FEATURE, validate_generation_lengths_with_limits};
 use crate::api::types::{GenerateRequest, LastTagsGeneration};
 use crate::app::AppContext;
 use crate::cli::{CreateArgs, DescribeArgs, ExtendArgs, GenerateArgs, ModelVersion};
 use crate::core::{AppConfig, CliError};
 use crate::workflow::generation::{build_control_sliders, build_tags};
 
-use super::support::{ChallengeMode, execute_generation_submission, output_clips};
+use super::support::{ChallengeMode, execute_generation_submission, output_generation};
 
 pub async fn create(args: CreateArgs, ctx: &AppContext) -> Result<(), CliError> {
     if args.instrumental || args.lyrics.is_some() || args.lyrics_file.is_some() {
@@ -98,7 +99,7 @@ async fn generate(args: GenerateArgs, ctx: &AppContext) -> Result<(), CliError> 
     let mut req = build_generate_request(&args, &ctx.config)?;
     let challenge_mode = ChallengeMode::from_flags(args.captcha, args.no_captcha);
     let token = args.token.clone();
-    let enhance_tags = args.enhance_tags;
+    let should_enhance_tags = args.enhance_tags;
     let instrumental = args.instrumental;
 
     if !ctx.quiet {
@@ -114,12 +115,19 @@ async fn generate(args: GenerateArgs, ctx: &AppContext) -> Result<(), CliError> 
     }
     let clips = execute_generation_submission(token, challenge_mode, ctx, move || async move {
         let client = ctx.client().await?;
-        maybe_enhance_tags(&mut req, enhance_tags, instrumental, &client).await?;
-        client.prepare_generation_request(&mut req).await?;
+        if should_enhance_tags {
+            let limits = client
+                .prepare_generation_request_with_features(&mut req, &[TAG_UPSAMPLE_FEATURE])
+                .await?;
+            enhance_tags(&mut req, instrumental, &client).await?;
+            validate_generation_lengths_with_limits(&req, &limits)?;
+        } else {
+            client.prepare_generation_request(&mut req).await?;
+        }
         Ok((client, req))
     })
     .await?;
-    output_clips(&clips, ctx);
+    output_generation(&clips, ctx);
     Ok(())
 }
 
@@ -171,7 +179,7 @@ async fn describe(args: DescribeArgs, ctx: &AppContext) -> Result<(), CliError> 
     let mut req = build_describe_request(&args, &ctx.config)?;
     let challenge_mode = ChallengeMode::from_flags(args.captcha, args.no_captcha);
     let token = args.token.clone();
-    let enhance_tags = args.enhance_tags;
+    let should_enhance_tags = args.enhance_tags;
     let instrumental = args.instrumental;
 
     if !ctx.quiet {
@@ -182,12 +190,19 @@ async fn describe(args: DescribeArgs, ctx: &AppContext) -> Result<(), CliError> 
     }
     let clips = execute_generation_submission(token, challenge_mode, ctx, move || async move {
         let client = ctx.client().await?;
-        maybe_enhance_tags(&mut req, enhance_tags, instrumental, &client).await?;
-        client.prepare_generation_request(&mut req).await?;
+        if should_enhance_tags {
+            let limits = client
+                .prepare_generation_request_with_features(&mut req, &[TAG_UPSAMPLE_FEATURE])
+                .await?;
+            enhance_tags(&mut req, instrumental, &client).await?;
+            validate_generation_lengths_with_limits(&req, &limits)?;
+        } else {
+            client.prepare_generation_request(&mut req).await?;
+        }
         Ok((client, req))
     })
     .await?;
-    output_clips(&clips, ctx);
+    output_generation(&clips, ctx);
     Ok(())
 }
 
@@ -216,16 +231,11 @@ fn build_describe_request(
     Ok(req)
 }
 
-async fn maybe_enhance_tags(
+async fn enhance_tags(
     req: &mut GenerateRequest,
-    enabled: bool,
     is_instrumental: bool,
     client: &SunoClient,
 ) -> Result<(), CliError> {
-    if !enabled {
-        return Ok(());
-    }
-
     let original_tags = req.tags.clone().unwrap_or_default();
     let lyrics = (!is_instrumental)
         .then_some(req.prompt.trim())
@@ -294,7 +304,7 @@ pub async fn extend(args: ExtendArgs, ctx: &AppContext) -> Result<(), CliError> 
         Ok((client, req))
     })
     .await?;
-    output_clips(&clips, ctx);
+    output_generation(&clips, ctx);
     Ok(())
 }
 
@@ -492,12 +502,8 @@ mod tests {
                 .expect("metadata object")
                 .contains_key("lyrics_model")
         );
-        assert!(
-            !body
-                .as_object()
-                .expect("object")
-                .contains_key("token_provider")
-        );
+        assert!(body["token"].is_null());
+        assert!(body["token_provider"].is_null());
     }
 
     #[test]

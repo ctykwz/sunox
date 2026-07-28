@@ -121,14 +121,14 @@ fn create_help_exposes_the_current_free_model() {
 }
 
 #[test]
-fn cover_help_does_not_advertise_the_unverified_free_model() {
+fn cover_help_exposes_the_current_free_model_override() {
     let mut cmd = Command::cargo_bin("sunox").expect("binary");
 
     cmd.args(["clip", "cover", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("v5.5"))
-        .stdout(predicate::str::contains("v4.5-all").not());
+        .stdout(predicate::str::contains("v4.5-all"));
 }
 
 #[test]
@@ -224,6 +224,36 @@ fn doctor_help_exposes_network_diagnostics() {
         .stdout(predicate::str::contains("DNS"))
         .stdout(predicate::str::contains("direct TCP"))
         .stdout(predicate::str::contains("HTTPS"));
+}
+
+#[test]
+fn doctor_help_exposes_safe_browser_bridge_probe() {
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    cmd.args(["doctor", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--browser-bridge"))
+        .stdout(predicate::str::contains("authenticated loopback probe"));
+}
+
+#[test]
+fn browser_bridge_probe_fails_before_listening_when_not_configured() {
+    let test_home = isolated_test_home("sunox-cli-doctor-bridge-test");
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    with_isolated_home(&mut cmd, &test_home)
+        .args(["doctor", "--browser-bridge", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "\"code\": \"browser_bridge_not_configured\"",
+        ))
+        .stderr(predicate::str::contains("\"status\": \"not_configured\""))
+        .stderr(predicate::str::contains("\"configured\": false"))
+        .stderr(predicate::str::contains("\"challenge_executed\": false"))
+        .stderr(predicate::str::contains("\"generation_submitted\": false"))
+        .stderr(predicate::str::contains("\"credits_consumed\": false"));
 }
 
 #[test]
@@ -599,7 +629,7 @@ fn install_skill_prints_current_generation_guidance() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "`token` and `token_provider` are omitted",
+            "`token` and `token_provider` are serialized as `null`",
         ))
         .stdout(predicate::str::contains("--captcha"))
         .stdout(predicate::str::contains(
@@ -617,11 +647,13 @@ fn install_skill_prints_current_generation_guidance() {
         .stdout(predicate::str::contains("success=true"))
         .stdout(predicate::str::contains("challenge_browser=existing"))
         .stdout(predicate::str::contains(
-            "Confirmed installation is standing permission to run invisible challenges",
+            "nonce-bound Suno iframe inside Chrome's invisible offscreen document",
         ))
         .stdout(predicate::str::contains(
-            "allowing the installed Bridge, not as `--no-captcha`",
+            "no user tab, popup, minimized browser window, or separate browser process",
         ))
+        .stdout(predicate::str::contains("as allowing the installed Bridge"))
+        .stdout(predicate::str::contains("`--no-captcha`"))
         .stdout(predicate::str::contains("simple audio analysis"))
         .stdout(predicate::str::contains("--format mp3|m4a|wav|opus"))
         .stdout(predicate::str::contains("do not publish"))
@@ -1024,6 +1056,37 @@ fn config_set_persists_in_isolated_home() {
 }
 
 #[test]
+fn removed_v2_config_recovers_and_can_be_replaced_through_the_cli() {
+    let test_home = isolated_test_home("sunox-cli-removed-model-recovery");
+    let config_dir = test_home.join(".config").join("sunox");
+    std::fs::create_dir_all(&config_dir).expect("config directory");
+    let config_path = config_dir.join("config.toml");
+    std::fs::write(&config_path, "default_model = \"chirp-v2-xxl-alpha\"\n")
+        .expect("legacy config");
+
+    let mut show = Command::cargo_bin("sunox").expect("binary");
+    with_isolated_home(&mut show, &test_home)
+        .args(["config", "show", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"default_model\": \"auto\""))
+        .stderr(predicate::str::contains("was removed"));
+
+    let mut set = Command::cargo_bin("sunox").expect("binary");
+    with_isolated_home(&mut set, &test_home)
+        .args(["config", "set", "default_model", "v5.5", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "\"default_model\": \"chirp-fenix\"",
+        ));
+
+    let persisted = std::fs::read_to_string(config_path).expect("updated config");
+    assert!(persisted.contains("default_model = \"chirp-fenix\""));
+    assert!(!persisted.contains("v2"));
+}
+
+#[test]
 fn config_show_json_uses_success_envelope() {
     let mut cmd = Command::cargo_bin("sunox").expect("binary");
 
@@ -1104,6 +1167,35 @@ fn agent_info_exposes_inspiration_as_supported() {
 }
 
 #[test]
+fn agent_info_distinguishes_clips_envelopes_from_the_concat_bare_clip() {
+    let output = Command::cargo_bin("sunox")
+        .expect("binary")
+        .args(["agent-info", "--json"])
+        .output()
+        .expect("agent info output");
+    assert!(output.status.success());
+    let info: serde_json::Value = serde_json::from_slice(&output.stdout).expect("agent info json");
+    let contract = &info["generation_json_contract"];
+
+    assert_eq!(
+        contract["clips_envelope"]["submitted_clip_id_path"],
+        ".data.clips[].id"
+    );
+    assert_eq!(contract["bare_clip"]["submitted_clip_id_path"], ".data.id");
+    assert!(
+        contract["clips_envelope"]["commands"]
+            .as_array()
+            .expect("clips envelope commands")
+            .iter()
+            .any(|command| command == "clip remaster")
+    );
+    assert_eq!(
+        contract["bare_clip"]["commands"],
+        serde_json::json!(["clip concat"])
+    );
+}
+
+#[test]
 fn agent_info_reports_automatic_versioned_challenge_verification() {
     let mut cmd = Command::cargo_bin("sunox").expect("binary");
 
@@ -1111,7 +1203,19 @@ fn agent_info_reports_automatic_versioned_challenge_verification() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "paired Sunox Browser Bridge to perform silent verification",
+            "paired Sunox Browser Bridge to create one nonce-bound Suno iframe",
+        ))
+        .stdout(predicate::str::contains(
+            "inside Chrome's invisible offscreen document",
+        ))
+        .stdout(predicate::str::contains(
+            "allowlisted error codes mapped to fixed sanitized messages",
+        ))
+        .stdout(predicate::str::contains(
+            "raw provider values are never forwarded",
+        ))
+        .stdout(predicate::str::contains(
+            "no tab, popup, minimized window, or separate browser process",
         ))
         .stdout(predicate::str::contains("hCaptcha/provider 1"))
         .stdout(predicate::str::contains("Turnstile/provider 2"))
@@ -1129,17 +1233,78 @@ fn agent_info_reports_automatic_versioned_challenge_verification() {
             "use confirmed Browser Bridge installation as the command-selection boundary",
         ))
         .stdout(predicate::str::contains(
-            "Confirmed installation is standing permission for invisible challenges",
+            "Confirmed installation is standing permission for challenges",
         ))
         .stdout(predicate::str::contains(
-            "Interpret no popup, no new browser, or no visible captcha as allowing the invisible Bridge, not as --no-captcha",
+            "Interpret no retained Suno tab, no new browser process, or no visible captcha as allowing the Bridge, not as --no-captcha",
         ))
         .stdout(predicate::str::contains(
             "any successful non-empty aligned word rejects",
         ))
+        .stdout(predicate::str::contains(".data.clips[].id"))
+        .stdout(predicate::str::contains(".data.id"))
         .stdout(predicate::str::contains(
             "disable automatic browser verification",
         ));
+}
+
+#[test]
+fn agent_info_uses_the_offscreen_browser_bridge_contract_everywhere() {
+    let output = Command::cargo_bin("sunox")
+        .expect("binary")
+        .args(["agent-info", "--json"])
+        .output()
+        .expect("agent info output");
+    assert!(output.status.success());
+    let info: serde_json::Value = serde_json::from_slice(&output.stdout).expect("agent info json");
+    let descriptions = [
+        ("agent_safety.captcha", &info["agent_safety"]["captcha"]),
+        (
+            "command_notes.create.default_challenge",
+            &info["command_notes"]["create"]["default_challenge"],
+        ),
+        (
+            "config.challenge_browser",
+            &info["config"]["challenge_browser"],
+        ),
+        (
+            "auth.generation_challenge",
+            &info["auth"]["generation_challenge"],
+        ),
+    ];
+
+    for (path, value) in descriptions {
+        let description = value
+            .as_str()
+            .unwrap_or_else(|| panic!("{path} must be a string"));
+        for required in [
+            "nonce-bound Suno iframe",
+            "invisible offscreen document",
+            "allowlisted error codes",
+            "fail",
+            "closed",
+            "separate browser",
+        ] {
+            assert!(
+                description.contains(required),
+                "{path} must contain {required:?}: {description}"
+            );
+        }
+        for obsolete in [
+            "created already minimized",
+            "popup already minimized",
+            "display bounds",
+            "actual popup rectangle",
+            "system.display",
+            "windows.create",
+            "windows.update",
+        ] {
+            assert!(
+                !description.contains(obsolete),
+                "{path} still contains obsolete contract text {obsolete:?}: {description}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -1276,7 +1441,7 @@ fn agent_info_reports_submit_wait_download_workflow() {
         .stdout(predicate::str::contains("\"download_formats\""))
         .stdout(predicate::str::contains("\"persona_list\""))
         .stdout(predicate::str::contains(
-            "token and token_provider are omitted",
+            "token and token_provider are serialized as null",
         ))
         .stdout(predicate::str::contains("--captcha"))
         .stdout(predicate::str::contains("\"audio_upload\""))

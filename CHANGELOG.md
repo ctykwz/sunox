@@ -11,6 +11,54 @@ backward-compatible features, upstream protocol adaptations, and fixes.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-28
+
+### Changed
+
+- Reworked Browser Bridge challenge execution into a nonce-bound Suno iframe inside Chrome's
+  invisible offscreen document. It creates no tab, popup, minimized window, or separate browser
+  process; the frame is removed on every terminal path and never falls back to a visible context.
+  The narrowly scoped response-header rules preserve Suno's CSP directives except
+  `frame-ancestors` and remove only the framing headers required by the extension-owned subframe.
+- Matched the current generation Web contract by serializing absent challenge fields as `null`,
+  sending `metadata.is_max_mode=false`, preserving exact upstream clips envelopes for v2-web and
+  remaster responses plus the bare Clip returned by concat, selecting the usable
+  account/free/first-available model in Web order, and updating Cover request fields and legacy
+  reference-model mappings.
+
+### Fixed
+
+- Made the Browser Bridge survive Chrome restarts by starting its offscreen loopback listener
+  independently of Suno network probes and recovering a stalled polling worker without requiring
+  an open Suno tab.
+- Kept the Manifest V3 service worker alive during long challenges with authenticated Port
+  heartbeats and bounded offscreen-worker recovery across extension restarts.
+- Restricted challenge scripts to the extension-owned first-level frame and an exact nonce-bound,
+  clean canonical URL. Protocol drift, unexpected reloads, navigation, identity mismatch, or
+  disconnects fail closed, while raw page errors never reach storage or logs.
+- Bounded silent challenge failures through explicit nested timeouts instead of retaining the
+  previous six-minute fallback.
+- Extended the hidden frame's cold-start allowance after real Chrome acceptance showed that the
+  Clerk/Suno bootstrap can exceed 20 seconds. The 45/65/125/130-second frame, result, watchdog, and
+  CLI budgets now preserve the complete invisible flow, and timeout errors report only safe
+  load/error event counts.
+- Added a side-effect-free `sunox doctor --browser-bridge` transport probe and distinguished a busy
+  Bridge from an unavailable one so diagnostics do not interrupt an in-flight challenge.
+- Made Browser Bridge updates idempotent and prevented `--path --force` from replacing directories
+  that Sunox does not own.
+- Kept configured Bridge failures fail-closed when the pairing secret cannot be read instead of
+  silently launching an isolated browser.
+- Accepted Chrome offscreen-frame connections when the optional runtime `documentId` is absent,
+  while retaining extension identity, no-tab, frame, origin, URL, and one-time nonce validation.
+
+### Removed
+
+- Removed the deprecated `v2` generation and Cover model choices. Timed-lyrics v2 remains only as a
+  compatibility fallback for clips that cannot use the current v3 alignment contract.
+- Removed the Browser Bridge's DNR feedback permission and the matching-rule inspection that caused
+  `REAL_MATCH_ERROR`; the extension retains only the host-scoped permission needed to install its
+  two exact subframe response-header rules.
+
 ## [0.1.1] - 2026-07-26
 
 ### Fixed

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::api::challenge::ChallengeProvider;
 
@@ -35,7 +36,6 @@ pub struct GenerateRequest {
     /// Optional anti-bot challenge token. Suno accepts many authenticated
     /// generation requests without one; callers can still force or supply a
     /// solved token when an account/session is challenged.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
@@ -77,7 +77,6 @@ pub struct GenerateRequest {
     pub stem_task: Option<String>,
     /// Random UUID generated per request.
     pub transaction_uuid: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub token_provider: Option<u8>,
 }
 
@@ -165,7 +164,7 @@ impl GenerateMetadata {
     fn new_with_context(create_mode: &str, context: &GenerationWebContext) -> Self {
         Self {
             web_client_pathname: WEB_CLIENT_PATHNAME.to_string(),
-            is_max_mode: None,
+            is_max_mode: Some(false),
             is_mumble: None,
             create_mode: create_mode.to_string(),
             user_tier: context.user_tier_value(),
@@ -178,11 +177,6 @@ impl GenerateMetadata {
             lyrics_updated: None,
             last_tags_generation: None,
         }
-    }
-
-    pub fn omit_create_form_flags(&mut self) {
-        self.is_max_mode = None;
-        self.is_mumble = None;
     }
 }
 
@@ -223,10 +217,34 @@ pub struct GenerateResponse {
     pub clips: Option<Vec<Clip>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct GenerationResult {
+    pub clips: Vec<Clip>,
+    raw: Value,
+}
+
+impl Serialize for GenerationResult {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.raw.serialize(serializer)
+    }
+}
+
+impl GenerationResult {
+    pub(crate) fn from_clip(clip: Clip, raw: Value) -> Self {
+        Self {
+            clips: vec![clip],
+            raw,
+        }
+    }
+}
+
 impl GenerateResponse {
-    pub fn into_clips(self) -> Result<Vec<Clip>, crate::core::CliError> {
+    pub fn into_result(self, raw: Value) -> Result<GenerationResult, crate::core::CliError> {
         match self.clips {
-            Some(clips) if !clips.is_empty() => Ok(clips),
+            Some(clips) if !clips.is_empty() => Ok(GenerationResult { clips, raw }),
             clips => Err(crate::core::CliError::SunoApi {
                 code: "schema_drift",
                 status: 200,
@@ -260,7 +278,10 @@ mod tests {
         assert_eq!(body["metadata"]["user_tier"], "tier-pro");
         assert!(body["metadata"]["create_session_token"].as_str().is_some());
         assert!(body["transaction_uuid"].as_str().is_some());
-        for omitted in ["token", "token_provider", "title", "tags"] {
+        assert!(body["token"].is_null());
+        assert!(body["token_provider"].is_null());
+        assert_eq!(body["metadata"]["is_max_mode"], false);
+        for omitted in ["title", "tags"] {
             assert!(
                 !body
                     .as_object()
@@ -269,15 +290,13 @@ mod tests {
                 "{omitted} should follow the Web client's undefined-field semantics"
             );
         }
-        for omitted in ["is_max_mode", "is_mumble"] {
-            assert!(
-                !body["metadata"]
-                    .as_object()
-                    .expect("metadata object")
-                    .contains_key(omitted),
-                "{omitted} should be absent when the mode is disabled"
-            );
-        }
+        assert!(
+            !body["metadata"]
+                .as_object()
+                .expect("metadata object")
+                .contains_key("is_mumble"),
+            "is_mumble should be absent when the mode is disabled"
+        );
     }
 
     #[test]
@@ -340,11 +359,44 @@ mod tests {
     #[test]
     fn generation_response_rejects_missing_or_empty_clips() {
         for body in [r#"{}"#, r#"{"clips":[]}"#] {
-            let response: GenerateResponse = serde_json::from_str(body).expect("response json");
-            let error = response.into_clips().expect_err("clips must be non-empty");
+            let raw: Value = serde_json::from_str(body).expect("raw response json");
+            let response: GenerateResponse =
+                serde_json::from_value(raw.clone()).expect("response json");
+            let error = response
+                .into_result(raw)
+                .expect_err("clips must be non-empty");
 
             assert_eq!(error.error_code(), "schema_drift");
             assert_eq!(error.details().expect("details")["http_status"], 200);
         }
+    }
+
+    #[test]
+    fn generation_response_json_preserves_the_exact_upstream_envelope() {
+        let raw = serde_json::json!({
+            "id": null,
+            "clip_review_prompt_id": "review-1",
+            "server_trace": {"region": "iad"},
+            "clips": [{
+                "id": "clip-1",
+                "title": "Demo",
+                "status": "submitted",
+                "model_name": "chirp-fenix",
+                "created_at": "2026-07-27T00:00:00Z"
+            }]
+        });
+        let response: GenerateResponse =
+            serde_json::from_value(raw.clone()).expect("response json");
+
+        let result = response
+            .into_result(raw.clone())
+            .expect("generation result");
+        let output = serde_json::to_value(result).expect("result json");
+
+        assert_eq!(output, raw);
+        assert!(output["id"].is_null());
+        assert!(output["clips"][0].get("audio_url").is_none());
+        assert!(output["clips"][0].get("play_count").is_none());
+        assert!(output["clips"][0].get("metadata").is_none());
     }
 }

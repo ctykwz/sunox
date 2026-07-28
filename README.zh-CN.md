@@ -151,9 +151,14 @@ sunox update                       更新到最新 GitHub Release
 
 每次调用生成类接口前，Sunox 都会先执行 Suno 网页端同款验证检查。不需要验证时，请求会直接
 提交，不会启动浏览器。Suno 要求 Challenge 时，Sunox 会优先请求可选的 Browser Bridge 扩展，
-在用户日常使用的 Chrome Profile 中执行不可见的验证组件。扩展平时只保留一个不可见的监听器，
-需要验证时才创建离屏的 `suno.com` Challenge Frame；该上下文会复用 20 分钟，之后自动移除。
-用户不需要打开或保留 Suno 标签页，Bridge 也不会创建浏览器窗口。
+在用户日常使用的 Chrome Profile 中执行不可见的验证组件。扩展空闲时只保留本地监听器；需要
+验证时，它会在 Chrome 不可见的 offscreen document 中创建一个绑定随机 nonce 的 `suno.com`
+iframe。iframe 保留正常布局尺寸，供对可见性敏感的验证代码计算，但 Chrome 不会创建标签页、
+弹窗、最小化窗口或独立浏览器进程。只有扩展拥有的一级 iframe 且 nonce 完全匹配时才能连接；
+标准页面必须加载完成并保持稳定，Bridge 才执行一次静默 Challenge。异常跳转、重载、断连、
+协议漂移或身份不匹配都会删除 iframe 并失败退出；得到 Token 或终态错误后也会立即删除 iframe，
+且绝不降级到任何可见窗口。页面原始错误不会越过 Bridge 边界，也不会写入存储或日志。该流程
+同时支持 macOS 和 Windows。
 
 默认的 `auto` 模式只会在尚未配置 Bridge 配对信息时，才使用本机匹配的 Chromium 系浏览器
 兜底。一旦安装并配对了 Bridge，`auto` 会在 Bridge 不可用时直接报错，不会悄悄启动独立浏览器。
@@ -176,15 +181,23 @@ sunox install-browser-extension
    完整路径；Windows 可以把完整路径粘贴到文件夹选择器的地址栏。
 4. 保持扩展启用。无需打开或保留 Suno 标签页。
 
+可使用下面的命令检查配对，不会创建歌曲、运行 Challenge 或消耗额度：
+
+```bash
+sunox doctor --browser-bridge
+```
+
 扩展安装后，重启 Chrome 仍会保留。Sunox 升级并包含新版 Bridge 时，先刷新本地扩展文件：
 
 ```bash
 sunox install-browser-extension --force
 ```
 
-然后在 Sunox Browser Bridge 的扩展卡片上点击“重新加载”。无需刷新 Suno 页面。Sunox 会在
-macOS 和 Windows 上自动选择当前用户的应用配置目录；Chrome 使用这个未打包扩展期间，不要
-移动或删除该目录。
+命令会先比较生成的扩展包与已解压文件。只有命令报告 `updated` 或 `reload_required` 时，才在
+Sunox Browser Bridge 的扩展卡片上点击“重新加载”；如果报告 `already_current`，无需在 Chrome
+中重新加载。仅重启电脑或 Chrome 绝不需要重新安装或重新加载 Bridge，也无需刷新 Suno 页面。
+Sunox 会在 macOS 和 Windows 上自动选择当前用户的应用配置目录；Chrome 使用这个未打包扩展
+期间，不要移动或删除该目录。
 
 相关覆盖参数如下：
 
@@ -197,10 +210,11 @@ macOS 和 Windows 上自动选择当前用户的应用配置目录；Chrome 使�
 `challenge_browser` 支持 `auto`（默认）、`existing`（必须使用 Bridge，绝不启动独立浏览器）
 和 `isolated`（始终使用临时浏览器）。单次命令可使用 `-c challenge_browser=existing`。
 `existing` 这个名称是为了兼容原有配置，现在表示“使用现有 Chrome Profile 中已安装的 Bridge”。
-Bridge 会自行管理离屏的 Suno Frame，不需要浏览器标签页或窗口；扩展缺失、版本过旧或无法连接时，
-命令会直接报错。`auto` 只有在尚未配置 Bridge 配对信息时才可能启动独立浏览器；已经安装的 Bridge
-一旦被禁用、版本过旧或无法访问，`auto` 同样会直接停止。只有明确允许独立浏览器时才使用
-`isolated`。
+Bridge 会自动创建并删除绑定 nonce 的 offscreen iframe，不会创建用户标签页或浏览器窗口；
+它只接受当前支持的 Suno/Clerk 跳转格式，并且只会在返回 URL 已清理且稳定后执行。
+已经配置或配对的扩展缺失、版本过旧、协议漂移或无法连接时，命令会直接报错。`auto` 只有在尚未配置 Bridge 配对
+信息时才可能启动独立浏览器；已经安装的 Bridge 一旦被禁用、版本过旧或无法访问，`auto` 同样会
+直接停止。只有明确允许独立浏览器时才使用 `isolated`。
 
 无人值守且不能新增 Suno 标签页、也不能启动独立浏览器进程时，安装 Browser Bridge，并去掉
 `--no-captcha`。此时 `auto` 和 `challenge_browser=existing` 都会在 Bridge 不可用时直接停止；
@@ -208,11 +222,11 @@ Bridge 会自行管理离屏的 Suno Frame，不需要浏览器标签页或窗�
 应保留 `--no-captcha`，遇到 Challenge 就会在提交前停止。未配置 Bridge 时，仅在默认 `auto`
 模式下去掉 `--no-captcha`，仍然允许 Sunox 启动独立浏览器兜底。
 
-安装 Browser Bridge 本身就表示持续允许 Sunox 在其托管的隐藏上下文中执行不可见 Challenge，
-每次生成不需要再次确认。“不要弹窗”“不要新开浏览器”“不要显示验证码”等要求允许使用已安装的
-Bridge，并不等于 `--no-captcha`；`challenge_browser=existing` 仍是明确限定只使用 Bridge 的配置。
-只有用户明确禁止包括不可见 Bridge 在内的一切 Challenge，或者明确要求传 `--no-captcha` 时，
-已经安装 Bridge 的机器才保留该参数。
+安装 Browser Bridge 本身就表示持续允许 Sunox 在其自动管理的短生命周期上下文中执行 Challenge，
+每次生成不需要再次确认。“不要留下 Suno 标签页”“不要启动新浏览器进程”“不要显示验证码”等
+要求允许使用已安装的 Bridge，并不等于 `--no-captcha`；`challenge_browser=existing` 仍是明确
+限定只使用 Bridge 的配置。只有用户明确禁止包括 Bridge 在内的一切 Challenge，或者明确要求传
+`--no-captcha` 时，已经安装 Bridge 的机器才保留该参数。
 
 ## JSON 与自动化
 

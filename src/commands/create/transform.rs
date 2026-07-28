@@ -5,12 +5,14 @@ use crate::cli::{
 };
 use crate::core::{AppConfig, CliError};
 
-use super::support::{ChallengeMode, execute_generation_submission, output_clips};
+use super::support::{
+    ChallengeMode, execute_generation_submission, output_clips, output_generation,
+};
 
 pub async fn concat(args: ConcatArgs, ctx: &AppContext) -> Result<(), CliError> {
     let (client, _mutation_guard) = ctx.mutation_client().await?;
-    let clip = client.concat(&args.clip_id).await?;
-    output_clips(&[clip], ctx);
+    let result = client.concat(&args.clip_id).await?;
+    output_generation(&result, ctx);
     Ok(())
 }
 
@@ -34,7 +36,7 @@ pub async fn cover(args: CoverArgs, ctx: &AppContext) -> Result<(), CliError> {
         Ok((client, req))
     })
     .await?;
-    output_clips(&clips, ctx);
+    output_generation(&clips, ctx);
     Ok(())
 }
 
@@ -45,13 +47,7 @@ fn cover_model_api_key<'a>(
     if let Some(model) = model {
         return Ok(model.to_api_key());
     }
-    match config.default_model.as_str() {
-        "auto" => Ok("auto"),
-        "chirp-auk-turbo" => Err(CliError::Config(
-            "default_model v4.5-all is not verified for cover generation; pass an explicitly supported `sunox clip cover --model` value".into(),
-        )),
-        model => Ok(model),
-    }
+    Ok(config.default_model.as_str())
 }
 
 fn cover_model_label<'a>(model: Option<&'a CoverModel>, config: &'a AppConfig) -> &'a str {
@@ -66,24 +62,29 @@ fn cover_model_label<'a>(model: Option<&'a CoverModel>, config: &'a AppConfig) -
 
 pub async fn remaster(args: RemasterArgs, ctx: &AppContext) -> Result<(), CliError> {
     let client = ctx.client().await?;
-    let model = match client.billing_info().await {
-        Ok(info) => select_remaster_model(&info.remaster_model_types, args.model.as_ref())?,
-        Err(error) if error.is_auth_or_rate_limit() => return Err(error),
-        Err(_) => args
-            .model
-            .as_ref()
-            .map(|model| model.to_api_key().to_string())
-            .unwrap_or_else(|| "chirp-flounder".into()),
-    };
+    let model = resolve_remaster_model(client.billing_info().await, args.model.as_ref())?;
     if !ctx.quiet {
         eprintln!("Remastering with {model}...");
     }
     let _mutation_guard = ctx.acquire_mutation_lock_for(&client.auth_state_snapshot())?;
-    let clips = client
+    let result = client
         .remaster(&args.clip_id, &model, args.variation)
         .await?;
-    output_clips(&clips, ctx);
+    output_generation(&result, ctx);
     Ok(())
+}
+
+fn resolve_remaster_model(
+    billing: Result<crate::api::types::BillingInfo, CliError>,
+    requested: Option<&crate::cli::RemasterModel>,
+) -> Result<String, CliError> {
+    match billing {
+        Ok(info) => select_remaster_model(&info.remaster_model_types, requested),
+        Err(error) if crate::api::generate::is_transient_billing_transport(&error) => Ok(requested
+            .map(|model| model.to_api_key().to_string())
+            .unwrap_or_else(|| "chirp-flounder".into())),
+        Err(error) => Err(error),
+    }
 }
 
 fn select_remaster_model(
@@ -276,7 +277,7 @@ pub async fn stems(args: StemsArgs, ctx: &AppContext) -> Result<(), CliError> {
         Ok((client, req))
     })
     .await?;
-    output_clips(&clips, ctx);
+    output_generation(&clips, ctx);
     Ok(())
 }
 
@@ -284,8 +285,9 @@ pub async fn stems(args: StemsArgs, ctx: &AppContext) -> Result<(), CliError> {
 mod tests {
     use crate::api::types::RemasterModelInfo;
     use crate::cli::RemasterModel;
+    use crate::core::CliError;
 
-    use super::select_remaster_model;
+    use super::{resolve_remaster_model, select_remaster_model};
 
     #[test]
     fn remaster_auto_uses_account_default_without_treating_unknown_as_unavailable() {
@@ -314,5 +316,27 @@ mod tests {
         }];
 
         assert!(select_remaster_model(&models, Some(&RemasterModel::V55)).is_err());
+    }
+
+    #[test]
+    fn remaster_propagates_billing_http_and_schema_errors_instead_of_guessing() {
+        let http_error = CliError::SunoApi {
+            code: "server_error",
+            status: 500,
+            message: "billing unavailable".into(),
+            retryable: Some(true),
+            details: None,
+        };
+        assert!(matches!(
+            resolve_remaster_model(Err(http_error), None),
+            Err(CliError::SunoApi { status: 500, .. })
+        ));
+
+        let schema_error =
+            CliError::Json(serde_json::from_str::<serde_json::Value>("{").unwrap_err());
+        assert!(matches!(
+            resolve_remaster_model(Err(schema_error), Some(&RemasterModel::V55)),
+            Err(CliError::Json(_))
+        ));
     }
 }

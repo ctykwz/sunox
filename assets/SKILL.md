@@ -86,13 +86,20 @@ Risk control defaults for agents:
   window or launch a separate browser process, use the Browser Bridge installation
   as the command-selection boundary. When installation has been confirmed on the
   current machine, omit `--no-captcha`; both `challenge_browser=auto` and
-  `challenge_browser=existing` then use the installed extension's managed hidden
-  Suno context and fail closed when the Bridge is unavailable.
-  Confirmed installation is standing permission to run invisible challenges
-  through that managed context; do not ask for per-run captcha permission. Interpret
-  "no popup", "no new browser", "no visible captcha", and equivalent requests as
-  allowing the installed Bridge, not as `--no-captcha`; `challenge_browser=existing`
-  remains the explicit Bridge-only override. Use `--no-captcha`
+  `challenge_browser=existing` then create one nonce-bound Suno iframe inside the
+  extension's invisible offscreen document and fail closed when the Bridge is
+  unavailable. The frame is removed on every terminal path; no user-opened or
+  retained Suno tab, popup, minimized browser window, or separate browser process is
+  created. Only the first-level extension-owned frame with the exact nonce can
+  connect. The frame must reach the complete, clean canonical page and remain stable
+  before execution. Unexpected navigation, reload, disconnect, protocol drift, or
+  any failed identity check removes the frame and fails closed; there is no visible
+  fallback. The same flow is supported on macOS and Windows. Confirmed installation is standing permission to run
+  challenges through that managed context; do not ask for per-run captcha permission.
+  Interpret "no retained Suno tab", "no new browser process", "no
+  visible captcha", and equivalent requests as allowing the installed Bridge, not
+  as `--no-captcha`; `challenge_browser=existing` remains the explicit Bridge-only
+  override. Use `--no-captcha`
   despite an installed bridge only when the user explicitly forbids every
   challenge mechanism, including the invisible Browser Bridge, or explicitly
   requests that flag.
@@ -331,28 +338,33 @@ sunox config set output_dir ./songs
 | Version | Codename | Notes |
 |---|---|---|
 | auto | account response | CLI default; resolves the current usable account default |
-| v5.5 | chirp-fenix | Latest generation; fallback only when billing info is unavailable |
+| v5.5 | chirp-fenix | Latest generation when available to the account |
 | v5 | chirp-crow | Previous gen |
 | v4.5+ | chirp-bluejay | Extended capabilities |
-| v4.5-all | chirp-auk-turbo | Free-tier option when available to the account |
+| v4.5-all | chirp-auk-turbo | Free-tier option; final Web fallback when billing info is unavailable |
 | v4.5 | chirp-auk | Stable |
 | v4 | chirp-v4 | Legacy |
 | v3.5 | chirp-v3-5 | Legacy |
 | v3 | chirp-v3-0 | Legacy |
-| v2 | chirp-v2-xxl-alpha | Legacy |
 
 Remaster models: v5.5 = chirp-flounder, v5 = chirp-carp, v4.5+ = chirp-bass.
 
 Model availability, the account default, and length limits are account-specific. The default
-`default_model=auto` resolves the account's usable default directly from `/api/billing/info/`.
+`default_model=auto` resolves a usable account default, then a usable free default, then the first
+model whose `can_use` field is true directly from `/api/billing/info/`.
 `sunox models --json` exposes separate `generation` and `remaster` arrays from the same account data. Explicit models are validated
-against `can_use` and `max_lengths` when billing info is available; v5.5 is used only when that
-read is unavailable.
+against `can_use` and `max_lengths` when billing info is available. If that read is unavailable,
+`auto` falls back to the Web constant `chirp-auk-turbo`; a successful empty model response remains
+an error.
 
 ## Agent-friendly output
 
 - Every command supports `--json`. JSON is **auto-detected** when stdout is piped.
 - Progress messages and errors go to **stderr** so they don't pollute JSON pipelines.
+- Commands submitted through `/api/generate/v2-web/`, plus `clip remaster`, preserve the upstream
+  clips envelope exactly in `.data`; read submitted clip IDs from `.data.clips[].id`. `clip concat`
+  preserves its upstream bare Clip object, whose ID is `.data.id`. Table output uses the parsed
+  clip view.
 - Suno write commands are account-scoped serial by default; do not pass --parallel or disable `serial_mutations` unless the user explicitly allows same-account concurrent writes.
 - For simple audio analysis, prefer clip `audio_url` CDN media from `sunox clip info <clip_id> --json` or use the default CDN `sunox clip download`; `clip info` also includes `attribution`, `comments`, `remix_count`, `similar_clips`, and non-fatal `supplemental_errors`. Reserve explicit `--format`, generation-backed stems, or Pro video for requests that name that format or need deep/lossless analysis. Studio functionality is outside this CLI's scope.
 - Download output directories are created automatically. Do not pass `--force` unless the user explicitly requests replacing an existing local download; ordinary downloads refuse to overwrite a matching file.
@@ -437,9 +449,9 @@ sunox clip download $ids --output ./archive/
   response; `personalization_enabled` follows the captured submit shape. The
   submit also marks `override_fields=["tags"]`. Vocal requests pass current
   custom lyrics as upsample context; instrumental requests omit lyrics.
-- Commands that submit through `/api/generate/v2-web/` preflight `POST /api/c/check` with `ctype=generation`; if Suno reports a challenge and stored Clerk refresh material exists, Sunox refreshes the JWT once and repeats the preflight. When a challenge remains, `challenge_browser=auto` first uses the paired Browser Bridge, which manages a hidden Suno context in the user's Chrome profile without requiring a visible tab. If a Bridge pairing is configured but unavailable, `auto` fails closed; it falls back to the matching isolated browser only when no Bridge pairing exists. hCaptcha uses provider 1 and Cloudflare Turnstile uses provider 2 according to `captcha_version`. Install or update the optional bridge with `sunox install-browser-extension --force`; never install or reload a browser extension without the user's authorization. When no challenge is required, `token` and `token_provider` are omitted to match the Web client.
+- Commands that submit through `/api/generate/v2-web/` preflight `POST /api/c/check` with `ctype=generation`; if Suno reports a challenge and stored Clerk refresh material exists, Sunox refreshes the JWT once and repeats the preflight. When a challenge remains, `challenge_browser=auto` first uses the paired Browser Bridge. The extension creates one nonce-bound Suno iframe inside Chrome's invisible offscreen document, waits for the clean canonical page to stabilize, executes one silent challenge, and removes the frame on every terminal path. It creates no user tab, popup, minimized browser window, or separate browser process, and it never falls back to a visible context. This flow is supported on both macOS and Windows. If a Bridge pairing is configured but unavailable, `auto` fails closed; it falls back to the matching isolated browser only when no Bridge pairing exists. hCaptcha uses provider 1 and Cloudflare Turnstile uses provider 2 according to `captcha_version`. Install or update the optional bridge with `sunox install-browser-extension --force`; never install or reload a browser extension without the user's authorization. When no challenge is required, `token` and `token_provider` are serialized as `null` to match the current Web client.
 - Prefer `--token <solved>` when an external token is already available. Use `--captcha` only to force verification even when preflight says it is unnecessary, or `--no-captcha` to disable automatic browser verification.
-- Generation paths (normal, describe, voice persona, inspiration, cover, extend, generation-backed stems) use `/api/generate/v2-web/`; create, inspire, cover, extend, and stems expose `--token`, `--captcha`, and `--no-captcha`. `sunox lyrics` uses the current synchronous `POST /api/generate/cowrite-lyrics/` fresh-generation contract; it does not use the removed legacy submit/status polling flow. Source-dependent commands read clips through the current `GET /api/clip/{id}` route; multi-clip polling uses feed/v3 exact-ID filters. Cover uses `task=cover`, `metadata.create_mode=custom`, and the source title. Inspiration uses one source clip and the live-captured playlist-conditioned request; do not invent uncaptured instrumental or multi-source inputs. Extend sets `metadata.lyrics_updated` only when replacement lyrics were supplied and uses feed/v3 exact-id metadata enrichment only when the current single-clip response lacks source style metadata. It defaults `title`, `tags`, `negative_tags`, and `make_instrumental` from the source when available; use `--title`, `--tags`, `--exclude`, `--instrumental`, or `--no-instrumental` to override. Timed lyrics use the current v3 start/poll contract; v2 is compatibility fallback only. Remaster and speed use their current web edit/generation routes. `sunox clip list` supports query-only filters such as `--liked`, `--public`, `--upload`, `--cover`, `--extend`, and `--sort popular`; this is not a library sync workflow. The current `/api/clips/get_similar/` route remains a supplemental song-page read. `sunox clip stems` is not the same as Suno Web Pro Get Stems export. You usually only need the subcommands.
+- Generation paths (normal, describe, voice persona, inspiration, cover, extend, generation-backed stems) use `/api/generate/v2-web/`; create, inspire, cover, extend, and stems expose `--token`, `--captcha`, and `--no-captcha`. `sunox lyrics` uses the current synchronous `POST /api/generate/cowrite-lyrics/` fresh-generation contract; it does not use the removed legacy submit/status polling flow. Source-dependent commands read clips through the current `GET /api/clip/{id}` route; multi-clip polling uses feed/v3 exact-ID filters. Cover uses `task=cover`, `generation_type=SIMPLE_REMIX`, `metadata.create_mode=simple`, `metadata.is_remix=true`, and the source title. It validates account availability on the base model before mapping v3/v3.5 to `chirp-v3-5-tau` and v4 to `chirp-v4-tau`; v4.5-all keeps the explicit `chirp-auk-turbo` Web override. Inspiration uses one source clip and the live-captured playlist-conditioned request; do not invent uncaptured instrumental or multi-source inputs. Extend sets `metadata.lyrics_updated` only when replacement lyrics were supplied and uses feed/v3 exact-id metadata enrichment only when the current single-clip response lacks source style metadata. It defaults `title`, `tags`, `negative_tags`, and `make_instrumental` from the source when available; use `--title`, `--tags`, `--exclude`, `--instrumental`, or `--no-instrumental` to override. Timed lyrics use the current v3 start/poll contract; v2 is compatibility fallback only. Remaster and speed use their current web edit/generation routes. `sunox clip list` supports query-only filters such as `--liked`, `--public`, `--upload`, `--cover`, `--extend`, and `--sort popular`; this is not a library sync workflow. The current `/api/clips/get_similar/` route remains a supplemental song-page read. `sunox clip stems` is not the same as Suno Web Pro Get Stems export. You usually only need the subcommands.
 - Persona list/detail/clips/create/set/publish/unpublish/love/unlove/toggle-love/delete/restore/purge are available through `sunox persona ...`. The removed processed-clip status route has no current Web equivalent; use `persona info` for current vocal clip and range fields.
 - Playlist create/list/detail/metadata/add/remove/publish/reorder/save/unsave/like/dislike/restore/delete are available through `sunox playlist ...`; use `playlist set <id> --image-file <path>` for local cover uploads.
 - Clip delete/restore/purge and like/dislike are available through `sunox clip delete`, `sunox clip restore`, `sunox clip purge`, `sunox clip like`, and `sunox clip dislike`. `sunox clip empty-trash -y` permanently deletes every trashed clip. Purge and empty-trash are irreversible and require an explicit user request. `--clear` removes the selected reaction.
