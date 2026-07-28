@@ -3,6 +3,17 @@ use std::path::Path;
 
 use crate::core::CliError;
 
+#[cfg(any(windows, test))]
+const LOCAL_SYSTEM_SID: &str = "S-1-5-18";
+#[cfg(any(windows, test))]
+const BUILTIN_ADMINISTRATORS_SID: &str = "S-1-5-32-544";
+
+#[cfg(any(windows, test))]
+fn private_owner_is_allowed(actual_owner: &str, current_user: &str) -> bool {
+    matches!(actual_owner, LOCAL_SYSTEM_SID | BUILTIN_ADMINISTRATORS_SID)
+        || actual_owner == current_user
+}
+
 pub(super) fn harden_private_directory(path: &Path) -> Result<(), CliError> {
     #[cfg(unix)]
     {
@@ -107,6 +118,7 @@ pub(super) fn make_world_readable_for_test(path: &Path, directory: bool) {
 
 #[cfg(windows)]
 mod windows {
+    use super::{BUILTIN_ADMINISTRATORS_SID, LOCAL_SYSTEM_SID, private_owner_is_allowed};
     use std::ffi::c_void;
     use std::fs::{File, OpenOptions};
     use std::io;
@@ -209,7 +221,7 @@ mod windows {
 
     fn apply_dacl(file: &File, directory: bool, world_readable: bool) -> io::Result<()> {
         let user_sid = current_user_sid_string()?;
-        verify_current_owner(file, &user_sid)?;
+        verify_allowed_owner(file, &user_sid)?;
         let inheritance = if directory { "OICI" } else { "" };
         let world_ace = if world_readable {
             format!("(A;{inheritance};GR;;;WD)")
@@ -217,7 +229,7 @@ mod windows {
             String::new()
         };
         let descriptor = format!(
-            "D:P(A;{inheritance};FA;;;{user_sid})(A;{inheritance};FA;;;SY)(A;{inheritance};FA;;;BA){world_ace}"
+            "D:P(A;{inheritance};FA;;;{user_sid})(A;{inheritance};FA;;;{LOCAL_SYSTEM_SID})(A;{inheritance};FA;;;{BUILTIN_ADMINISTRATORS_SID}){world_ace}"
         );
         let descriptor = wide_string(&descriptor);
         let mut security_descriptor = null_mut();
@@ -278,7 +290,7 @@ mod windows {
         Ok(())
     }
 
-    fn verify_current_owner(file: &File, expected_owner: &str) -> io::Result<()> {
+    fn verify_allowed_owner(file: &File, current_user: &str) -> io::Result<()> {
         let mut owner = null_mut();
         let mut security_descriptor = null_mut();
         let status = unsafe {
@@ -304,11 +316,11 @@ mod windows {
             ));
         }
         let actual_owner = sid_to_string(owner)?;
-        if actual_owner != expected_owner {
+        if !private_owner_is_allowed(&actual_owner, current_user) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!(
-                    "refusing to change a private object's DACL because its owner is {actual_owner}, not the current user {expected_owner}"
+                    "refusing to change a private object's DACL because its owner {actual_owner} is not the current user, LocalSystem, or Builtin Administrators"
                 ),
             ));
         }
@@ -488,13 +500,16 @@ mod windows {
 
         let user_sid = current_user_sid_string().expect("current user SID");
         assert!(!owner.is_null());
-        assert_eq!(
-            sid_to_string(owner).expect("owner SID"),
-            user_sid,
-            "private object is not owned by the current user"
+        let owner_sid = sid_to_string(owner).expect("owner SID");
+        assert!(
+            private_owner_is_allowed(&owner_sid, &user_sid),
+            "private object owner {owner_sid} is not one of its allowed full-control trustees"
         );
-        let expected =
-            BTreeSet::from([user_sid, "S-1-5-18".to_string(), "S-1-5-32-544".to_string()]);
+        let expected = BTreeSet::from([
+            user_sid,
+            LOCAL_SYSTEM_SID.to_string(),
+            BUILTIN_ADMINISTRATORS_SID.to_string(),
+        ]);
         let inheritance = (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u8;
         let mut trustees = Vec::new();
         for index in 0..acl_size.AceCount {
@@ -563,5 +578,31 @@ mod windows {
         let file =
             open_private_object(path, directory, true).expect("open fixture for ACL mutation");
         apply_dacl(&file, directory, true).expect("add explicit Everyone read ACE");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BUILTIN_ADMINISTRATORS_SID, LOCAL_SYSTEM_SID, private_owner_is_allowed};
+
+    const CURRENT_USER_SID: &str = "S-1-5-21-1000-1000-1000-1001";
+
+    #[test]
+    fn private_owner_allowlist_matches_every_full_control_trustee() {
+        assert!(private_owner_is_allowed(CURRENT_USER_SID, CURRENT_USER_SID));
+        assert!(private_owner_is_allowed(LOCAL_SYSTEM_SID, CURRENT_USER_SID));
+        assert!(private_owner_is_allowed(
+            BUILTIN_ADMINISTRATORS_SID,
+            CURRENT_USER_SID
+        ));
+    }
+
+    #[test]
+    fn private_owner_allowlist_rejects_unrelated_trustees() {
+        assert!(!private_owner_is_allowed(
+            "S-1-5-21-2000-2000-2000-2002",
+            CURRENT_USER_SID
+        ));
+        assert!(!private_owner_is_allowed("S-1-1-0", CURRENT_USER_SID));
     }
 }
