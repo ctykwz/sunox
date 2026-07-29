@@ -1,5 +1,7 @@
 //! Generation challenge solving via a piloted Chromium-family browser instance.
 
+use std::time::Duration;
+
 pub(crate) mod bridge_contract;
 mod browser;
 mod cdp;
@@ -11,12 +13,16 @@ use crate::auth::AuthState;
 use crate::core::{ChallengeBrowserMode, CliError};
 
 pub(super) const SUNO_HCAPTCHA_SITEKEY: &str = "d65453de-3f1a-4aac-9366-a0f06e52b2ce";
+pub(super) const SUNO_HCAPTCHA_SCRIPT_URL: &str =
+    "https://hcaptcha-endpoint-prod.suno.com/1/api.js?render=explicit";
 #[cfg(test)]
 pub(super) const SUNO_TURNSTILE_SITEKEY: &str = "0x4AAAAAADI7xDNyj-3LcIbi";
 pub(super) const SUNO_TURNSTILE_SCRIPT_URL: &str =
     "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
 #[cfg(test)]
 pub(super) const SUNO_CHALLENGE_SDK_READY_TIMEOUT_MS: u64 = 15_000;
+#[cfg(test)]
+pub(super) const SUNO_HCAPTCHA_SILENT_TIMEOUT_MS: u64 = 15_000;
 #[cfg(test)]
 pub(super) const SUNO_TURNSTILE_IDLE_TIMEOUT_MS: u64 = 15_000;
 #[cfg(test)]
@@ -26,6 +32,37 @@ pub(super) const SUNO_HCAPTCHA_ASSET_HOST: &str = "https://hcaptcha-assets-prod.
 pub(super) const SUNO_HCAPTCHA_IMAGE_HOST: &str = "https://hcaptcha-imgs-prod.suno.com";
 pub(super) const SUNO_HCAPTCHA_REPORT_API: &str = "https://hcaptcha-reportapi-prod.suno.com";
 pub(super) const CDP_HOST: &str = "127.0.0.1";
+const BRIDGE_UNAVAILABLE_GUIDANCE: &str = "the configured Sunox Browser Bridge did not respond. Run `sunox doctor --browser-bridge` to verify the authenticated transport and narrow the cause before changing the installation. Keep the extension enabled. Use `-c challenge_browser=isolated` only when a separate challenge browser is acceptable";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BridgeProbeStatus {
+    NotConfigured,
+    Responsive,
+    Busy,
+    PortConflict,
+    Unavailable,
+}
+
+impl BridgeProbeStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::NotConfigured => "not_configured",
+            Self::Responsive => "responsive",
+            Self::Busy => "busy",
+            Self::PortConflict => "port_conflict",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+pub(crate) struct BridgeProbe {
+    pub status: BridgeProbeStatus,
+    pub port: Option<u16>,
+    pub occupied_ports: Vec<u16>,
+    pub bridge_occupied_ports: Vec<u16>,
+    pub foreign_occupied_ports: Vec<u16>,
+    pub latency: Duration,
+}
 
 /// Solve a fresh browser challenge and return the token to attach to a
 /// `/api/generate/v2-web/` request body.
@@ -39,10 +76,7 @@ pub async fn solve(
         match existing::try_solve(provider).await {
             Ok(Some(token)) => return Ok(token),
             Ok(None) if bridge_failure_is_terminal(mode, bridge_configured) => {
-                return Err(CliError::Config(
-                    "the configured Sunox Browser Bridge did not respond; run `sunox install-browser-extension --force`, then click Reload on the extension in Chrome and keep it enabled. Use `-c challenge_browser=isolated` only when a separate challenge browser is acceptable"
-                        .into(),
-                ));
+                return Err(CliError::Config(BRIDGE_UNAVAILABLE_GUIDANCE.into()));
             }
             Ok(None) => {}
             Err(error) if bridge_failure_is_terminal(mode, bridge_configured) => return Err(error),
@@ -66,6 +100,10 @@ pub async fn solve(
     }
 }
 
+pub(crate) async fn probe_existing_bridge() -> Result<BridgeProbe, CliError> {
+    existing::probe().await
+}
+
 fn bridge_failure_is_terminal(mode: ChallengeBrowserMode, bridge_configured: bool) -> bool {
     mode == ChallengeBrowserMode::Existing
         || (mode == ChallengeBrowserMode::Auto && bridge_configured)
@@ -78,10 +116,11 @@ pub(crate) fn delete_legacy_browser_profile() -> Result<(), CliError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        SUNO_CHALLENGE_SDK_READY_TIMEOUT_MS, SUNO_HCAPTCHA_ASSET_HOST, SUNO_HCAPTCHA_ENDPOINT,
-        SUNO_HCAPTCHA_IMAGE_HOST, SUNO_HCAPTCHA_REPORT_API, SUNO_HCAPTCHA_SITEKEY,
-        SUNO_TURNSTILE_IDLE_TIMEOUT_MS, SUNO_TURNSTILE_INTERACTIVE_TIMEOUT_MS,
-        SUNO_TURNSTILE_SCRIPT_URL, SUNO_TURNSTILE_SITEKEY, bridge_failure_is_terminal,
+        BRIDGE_UNAVAILABLE_GUIDANCE, SUNO_CHALLENGE_SDK_READY_TIMEOUT_MS, SUNO_HCAPTCHA_ASSET_HOST,
+        SUNO_HCAPTCHA_ENDPOINT, SUNO_HCAPTCHA_IMAGE_HOST, SUNO_HCAPTCHA_REPORT_API,
+        SUNO_HCAPTCHA_SCRIPT_URL, SUNO_HCAPTCHA_SILENT_TIMEOUT_MS, SUNO_HCAPTCHA_SITEKEY,
+        SUNO_TURNSTILE_IDLE_TIMEOUT_MS, SUNO_TURNSTILE_SCRIPT_URL, SUNO_TURNSTILE_SITEKEY,
+        bridge_failure_is_terminal,
     };
     use crate::api::challenge::ChallengeProvider;
     use crate::core::ChallengeBrowserMode;
@@ -117,6 +156,7 @@ mod tests {
             ("HCAPTCHA_SITEKEY", SUNO_HCAPTCHA_SITEKEY),
             ("TURNSTILE_SITEKEY", SUNO_TURNSTILE_SITEKEY),
             ("TURNSTILE_SCRIPT", SUNO_TURNSTILE_SCRIPT_URL),
+            ("HCAPTCHA_SCRIPT", SUNO_HCAPTCHA_SCRIPT_URL),
             ("HCAPTCHA_ENDPOINT", SUNO_HCAPTCHA_ENDPOINT),
             ("HCAPTCHA_ASSET_HOST", SUNO_HCAPTCHA_ASSET_HOST),
             ("HCAPTCHA_IMAGE_HOST", SUNO_HCAPTCHA_IMAGE_HOST),
@@ -136,8 +176,8 @@ mod tests {
         );
         assert_bridge_protocol_number(
             page,
-            "TURNSTILE_INTERACTIVE_TIMEOUT_MS",
-            SUNO_TURNSTILE_INTERACTIVE_TIMEOUT_MS,
+            "HCAPTCHA_SILENT_TIMEOUT_MS",
+            SUNO_HCAPTCHA_SILENT_TIMEOUT_MS,
         );
     }
 
@@ -160,5 +200,11 @@ mod tests {
             ChallengeBrowserMode::Isolated,
             true
         ));
+    }
+
+    #[test]
+    fn unavailable_bridge_guidance_diagnoses_before_reinstalling() {
+        assert!(BRIDGE_UNAVAILABLE_GUIDANCE.contains("sunox doctor --browser-bridge"));
+        assert!(!BRIDGE_UNAVAILABLE_GUIDANCE.contains("install-browser-extension"));
     }
 }

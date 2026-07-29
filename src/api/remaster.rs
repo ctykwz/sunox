@@ -1,5 +1,5 @@
 use super::SunoClient;
-use super::types::{Clip, GenerateResponse, RemasterVariation};
+use super::types::{GenerateResponse, GenerationResult, RemasterVariation};
 use crate::core::CliError;
 use serde::Serialize;
 
@@ -18,7 +18,7 @@ impl SunoClient {
         clip_id: &str,
         remaster_model_key: &str,
         variation_category: RemasterVariation,
-    ) -> Result<Vec<Clip>, CliError> {
+    ) -> Result<GenerationResult, CliError> {
         let req = RemasterRequest {
             clip_id,
             model_name: remaster_model_key,
@@ -31,8 +31,9 @@ impl SunoClient {
                 .send()
                 .await?;
             let resp = self.check_response(resp).await?;
-            let result: GenerateResponse = resp.json().await?;
-            result.into_clips()
+            let raw: serde_json::Value = resp.json().await?;
+            let result: GenerateResponse = serde_json::from_value(raw.clone())?;
+            result.into_result(raw)
         })
         .await
     }

@@ -38,11 +38,13 @@ impl SunoClient {
             .find(|clip| clip.id == clip_id)
             .ok_or_else(|| CliError::NotFound(format!("clip: {clip_id}")))?;
 
-        let mut req = GenerateRequest::new(model_key, "custom");
+        let mut req = GenerateRequest::new(model_key, "simple");
         req.task = Some("cover".into());
+        req.generation_type = "SIMPLE_REMIX".into();
         req.title = Some(source.title);
         req.tags = tags.map(String::from);
         req.cover_clip_id = Some(clip_id.to_string());
+        req.metadata.is_remix = Some(true);
         req.set_challenge_token(challenge_token);
         Ok(req)
     }

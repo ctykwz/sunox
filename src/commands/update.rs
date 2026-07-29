@@ -446,10 +446,15 @@ fn ensure_install_directory_writable() -> Result<(), CliError> {
 fn output_update_result(current: &str, latest: &str, up_to_date: bool, ctx: &AppContext) {
     let status = if up_to_date { "up_to_date" } else { "updated" };
     let bridge_configured = !up_to_date
-        && crate::commands::browser_extension::bridge_secret()
-            .ok()
-            .flatten()
-            .is_some();
+        && match crate::commands::browser_extension::bridge_is_configured() {
+            Ok(configured) => configured,
+            Err(error) => {
+                eprintln!(
+                    "Warning: Browser Bridge pairing state could not be read after the update: {error}"
+                );
+                true
+            }
+        };
     let next_steps = update_next_steps(up_to_date, bridge_configured);
     let result = serde_json::json!({
         "current_version": current,
@@ -479,7 +484,7 @@ fn update_next_steps(up_to_date: bool, bridge_configured: bool) -> Vec<&'static 
     let mut steps = vec!["Run `sunox install-skill --force` to refresh the agent skill"];
     if bridge_configured {
         steps.push(
-            "Run `sunox install-browser-extension --force`, then click Reload on the Sunox Browser Bridge in Chrome",
+            "Run `sunox install-browser-extension --force` to check the Browser Bridge bundle, then follow its single `activation_required` decision; `activation_options` are conditional alternatives, and `reload_required=true` is only the definite-Reload case",
         );
     }
     steps
@@ -556,14 +561,17 @@ mod tests {
     };
 
     #[test]
-    fn successful_update_steps_refresh_a_configured_browser_bridge() {
+    fn successful_update_steps_use_the_idempotent_browser_bridge_check() {
         assert!(update_next_steps(true, true).is_empty());
         assert_eq!(update_next_steps(false, false).len(), 1);
 
         let steps = update_next_steps(false, true);
         assert_eq!(steps.len(), 2);
         assert!(steps[1].contains("install-browser-extension --force"));
-        assert!(steps[1].contains("click Reload"));
+        assert!(steps[1].contains("activation_required"));
+        assert!(steps[1].contains("activation_options"));
+        assert!(steps[1].contains("conditional alternatives"));
+        assert!(steps[1].contains("reload_required=true"));
     }
 
     #[test]

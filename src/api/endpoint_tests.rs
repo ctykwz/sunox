@@ -51,6 +51,7 @@ fn billing_info_response(plan_id: &str) -> String {
                 "is_default_model": true,
                 "description": "default test model",
                 "capabilities": ["create_control_sliders"],
+                "badges": ["custom"],
                 "max_lengths": {}
             },
             {
@@ -1338,7 +1339,7 @@ async fn generate_posts_current_web_contract() {
     let billing = billing_info_response("tier-pro");
     let server = MockServer::json_sequence(&[
         billing.as_str(),
-        r#"{"clips":[{"id":"clip-1","title":"Demo","status":"submitted","model_name":"chirp-v4-5","created_at":"2026-06-30T00:00:00Z"}]}"#,
+        r#"{"id":"request-1","clip_review_prompt_id":"review-1","protocol_revision":"2026-07","clips":[{"id":"clip-1","title":"Demo","status":"submitted","model_name":"chirp-v4-5","created_at":"2026-06-30T00:00:00Z"}]}"#,
     ])
     .await;
     let client = server.client();
@@ -1367,8 +1368,9 @@ async fn generate_posts_current_web_contract() {
     assert!(body.get("gpt_description_prompt").is_none());
     assert_eq!(body["token_provider"], 1);
     assert_eq!(body["metadata"]["create_mode"], "custom");
+    assert_eq!(body["metadata"]["is_max_mode"], false);
     assert!(body["metadata"].get("lyrics_model").is_none());
-    assert_eq!(body["metadata"]["web_client_pathname"], "/create");
+    assert_eq!(body["metadata"]["web_client_pathname"], "/home/advanced");
     assert_eq!(body["metadata"]["user_tier"], "tier-pro");
     assert!(
         body["transaction_uuid"]
@@ -1380,6 +1382,35 @@ async fn generate_posts_current_web_contract() {
             .as_str()
             .is_some_and(|id| !id.is_empty())
     );
+}
+
+#[tokio::test]
+async fn prepared_generation_preserves_current_response_envelope() {
+    let raw = serde_json::json!({
+        "id": null,
+        "clip_review_prompt_id": "review-1",
+        "protocol_revision": "2026-07",
+        "clips": [{
+            "id": "clip-1",
+            "title": "Demo",
+            "status": "submitted",
+            "model_name": "chirp-fenix",
+            "created_at": "2026-07-27T00:00:00Z"
+        }]
+    });
+    let server = MockServer::json(&raw.to_string()).await;
+    let client = server.client();
+    let mut generate = GenerateRequest::new("chirp-fenix", "custom");
+    generate.metadata.user_tier = "tier-pro".into();
+    generate.set_challenge_token(Some("captcha-token".into()));
+
+    let result = client
+        .submit_prepared_generation_after_challenge(&generate)
+        .await
+        .expect("generate");
+    let output = serde_json::to_value(result).expect("result json");
+
+    assert_eq!(output, raw);
 }
 
 #[tokio::test]
@@ -1455,6 +1486,28 @@ async fn generate_rejects_control_sliders_for_a_model_without_the_web_capability
 }
 
 #[tokio::test]
+async fn generate_rejects_tag_upsample_before_calling_it_for_an_unsupported_model() {
+    let billing = billing_info_response("tier-pro");
+    let server = MockServer::json(&billing).await;
+    let client = server.client();
+    let mut generate = GenerateRequest::new("chirp-v4-5", "custom");
+    generate.metadata.user_tier = "existing-tier".into();
+
+    let error = client
+        .prepare_generation_request_with_features(
+            &mut generate,
+            &[super::generate::TAG_UPSAMPLE_FEATURE],
+        )
+        .await
+        .expect_err("unsupported tag upsample must stop before its endpoint");
+
+    let requests = server.captured_all().await;
+    assert!(matches!(error, CliError::Config(message) if message.contains("tag_upsample")));
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/api/billing/info/");
+}
+
+#[tokio::test]
 async fn generation_challenge_posts_current_web_contract() {
     let server = MockServer::json(r#"{"required":true,"captcha_version":1}"#).await;
     let client = server.client();
@@ -1511,8 +1564,8 @@ async fn prompt_upsample_posts_current_web_contract() {
 async fn inspiration_posts_live_captured_playlist_condition_contract() {
     let billing = billing_info_response("tier-pro");
     let server = MockServer::json_sequence(&[
-        r#"{"upsampled":"dry garage pop, tight drums","request_id":"request-inspire"}"#,
         billing.as_str(),
+        r#"{"upsampled":"dry garage pop, tight drums","request_id":"request-inspire"}"#,
         r#"{"required":false}"#,
         r#"{"clips":[{"id":"clip-inspired","title":"New Song","status":"submitted","model_name":"chirp-fenix","created_at":"2026-07-10T00:00:00Z"}]}"#,
     ])
@@ -1535,9 +1588,10 @@ async fn inspiration_posts_live_captured_playlist_condition_contract() {
     assert_eq!(clips[0].id, "clip-inspired");
     let requests = server.captured_all().await;
     assert_eq!(requests.len(), 4);
-    assert_eq!(requests[0].path, "/api/prompts/upsample");
+    assert_eq!(requests[0].path, "/api/billing/info/");
+    assert_eq!(requests[1].path, "/api/prompts/upsample");
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&requests[0].body)
+        serde_json::from_str::<serde_json::Value>(&requests[1].body)
             .expect("upsample request json"),
         serde_json::json!({
             "original_tags": "garage pop",
@@ -1545,7 +1599,6 @@ async fn inspiration_posts_live_captured_playlist_condition_contract() {
             "is_instrumental": false
         })
     );
-    assert_eq!(requests[1].path, "/api/billing/info/");
     assert_eq!(requests[2].path, "/api/c/check");
     assert_eq!(requests[3].path, "/api/generate/v2-web/");
     let body = serde_json::from_str::<serde_json::Value>(&requests[3].body).expect("request json");
@@ -1570,6 +1623,49 @@ async fn inspiration_posts_live_captured_playlist_condition_contract() {
         body["playlist_clip_ids"],
         serde_json::json!(["clip-source"])
     );
+}
+
+#[tokio::test]
+async fn inspiration_revalidates_upsampled_tags_against_the_resolved_model_limit() {
+    let billing = billing_info_with_models(
+        "tier-pro",
+        serde_json::json!([{
+            "name": "v5.5",
+            "external_key": "chirp-fenix",
+            "can_use": true,
+            "is_default_model": true,
+            "description": "default test model",
+            "badges": ["custom"],
+            "max_lengths": {"tags": 4}
+        }]),
+    );
+    let server = MockServer::json_sequence(&[
+        billing.as_str(),
+        r#"{"upsampled":"tags are too long","request_id":"request-inspire"}"#,
+    ])
+    .await;
+    let client = server.client();
+
+    let error = client
+        .prepare_inspiration_request(InspirationOptions {
+            clip_id: "clip-source",
+            title: "New Song",
+            tags: "pop",
+            negative_tags: "",
+            lyrics: "[Verse]\nNew words",
+            weirdness: 40.0,
+            challenge_token: None,
+        })
+        .await
+        .expect_err("upsampled tags must still respect the selected model limit");
+
+    assert!(
+        matches!(error, CliError::Config(message) if message.contains("generation field `tags`"))
+    );
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].path, "/api/billing/info/");
+    assert_eq!(requests[1].path, "/api/prompts/upsample");
 }
 
 #[tokio::test]
@@ -1656,43 +1752,30 @@ async fn generate_without_token_preflights_then_submits_when_challenge_is_not_re
     assert_eq!(requests[2].path, "/api/generate/v2-web/");
     let body = serde_json::from_str::<serde_json::Value>(&requests[2].body).expect("request json");
     assert_eq!(body["metadata"]["user_tier"], "tier-pro");
-    assert!(!body.as_object().expect("body object").contains_key("token"));
-    assert!(
-        !body
-            .as_object()
-            .expect("body object")
-            .contains_key("token_provider")
-    );
+    assert!(body["token"].is_null());
+    assert!(body["token_provider"].is_null());
 }
 
 #[tokio::test]
-async fn generate_falls_back_when_billing_info_is_unavailable() {
-    let server = MockServer::json_status_sequence(&[
-        (500, r#"{"detail":"billing unavailable"}"#),
-        (200, r#"{"required":false}"#),
-        (
-            200,
-            r#"{"clips":[{"id":"clip-1","title":"Demo","status":"submitted","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z"}]}"#,
-        ),
-    ])
-    .await;
+async fn generate_does_not_fallback_across_a_billing_server_error() {
+    let server =
+        MockServer::json_status_sequence(&[(500, r#"{"detail":"billing unavailable"}"#)]).await;
     let client = server.client();
-    let generate = GenerateRequest::new("chirp-fenix", "custom");
+    let generate = GenerateRequest::new("auto", "custom");
 
-    let clips = client.generate(&generate).await.expect("generate");
+    let error = client
+        .generate(&generate)
+        .await
+        .expect_err("billing server errors must not change the selected model");
 
-    assert_eq!(clips[0].id, "clip-1");
+    assert!(matches!(error, CliError::SunoApi { status: 500, .. }));
     let requests = server.captured_all().await;
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].path, "/api/billing/info/");
-    assert_eq!(requests[1].path, "/api/c/check");
-    assert_eq!(requests[2].path, "/api/generate/v2-web/");
-    let body = serde_json::from_str::<serde_json::Value>(&requests[2].body).expect("request json");
-    assert_eq!(body["metadata"]["user_tier"], "");
 }
 
 #[tokio::test]
-async fn generate_does_not_drop_requested_controls_when_billing_is_unavailable() {
+async fn generate_preserves_a_billing_server_error_when_controls_were_requested() {
     let server =
         MockServer::json_status_sequence(&[(500, r#"{"detail":"billing unavailable"}"#)]).await;
     let client = server.client();
@@ -1705,14 +1788,87 @@ async fn generate_does_not_drop_requested_controls_when_billing_is_unavailable()
     let error = client
         .generate(&generate)
         .await
-        .expect_err("unknown model capability must stop before generation");
+        .expect_err("billing server error must stop generation");
 
-    assert!(
-        matches!(error, CliError::Config(message) if message.contains("could not verify whether"))
-    );
+    assert!(matches!(error, CliError::SunoApi { status: 500, .. }));
     let requests = server.captured_all().await;
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].path, "/api/billing/info/");
+}
+
+#[tokio::test]
+async fn generate_does_not_fallback_across_billing_schema_drift() {
+    let server = MockServer::json(r#"{"credits":"not-a-number"}"#).await;
+    let client = server.client();
+    let generate = GenerateRequest::new("auto", "custom");
+
+    let error = client
+        .generate(&generate)
+        .await
+        .expect_err("malformed billing JSON must not silently select another model");
+
+    assert!(matches!(error, CliError::Http(error) if error.is_decode()));
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/api/billing/info/");
+}
+
+#[tokio::test]
+async fn auto_model_uses_the_web_constant_only_for_a_transport_outage() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("reserve unused port");
+    let address = listener.local_addr().expect("unused address");
+    drop(listener);
+    let client = SunoClient::new_for_tests(
+        format!("http://{address}"),
+        AuthState {
+            jwt: Some("test-jwt".into()),
+            ..AuthState::default()
+        },
+    )
+    .expect("test client");
+    let mut generate = GenerateRequest::new("auto", "custom");
+
+    client
+        .prepare_generation_request(&mut generate)
+        .await
+        .expect("connection outage may use the current Web constant");
+
+    assert_eq!(generate.mv, "chirp-auk-turbo");
+    assert_eq!(generate.metadata.user_tier, "");
+}
+
+#[tokio::test]
+async fn cover_fails_closed_when_billing_transport_cannot_validate_and_map_the_base_model() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("reserve unused port");
+    let address = listener.local_addr().expect("unused address");
+    drop(listener);
+    let client = SunoClient::new_for_tests(
+        format!("http://{address}"),
+        AuthState {
+            jwt: Some("test-jwt".into()),
+            ..AuthState::default()
+        },
+    )
+    .expect("test client");
+    let mut request = GenerateRequest::new("chirp-v4", "simple");
+    request.task = Some("cover".into());
+
+    let error = client
+        .prepare_generation_request(&mut request)
+        .await
+        .expect_err("Cover must not submit an unmapped model after a billing outage");
+
+    assert!(
+        matches!(error, CliError::Config(message) if message.contains("validating and mapping its model"))
+    );
+    assert_eq!(
+        request.mv, "chirp-v4",
+        "the request must remain unprepared and must never reach submission"
+    );
 }
 
 #[tokio::test]
@@ -1869,8 +2025,39 @@ async fn cover_posts_generate_v2_cover_contract() {
     assert_eq!(body["tags"], "pop");
     assert_eq!(body["cover_clip_id"], "clip-a");
     assert_eq!(body["task"], "cover");
-    assert_eq!(body["metadata"]["create_mode"], "custom");
+    assert_eq!(body["generation_type"], "SIMPLE_REMIX");
+    assert_eq!(body["metadata"]["create_mode"], "simple");
+    assert_eq!(body["metadata"]["is_remix"], true);
     assert_eq!(body["metadata"]["user_tier"], "tier-pro");
+}
+
+#[tokio::test]
+async fn cover_rejects_an_unavailable_legacy_base_model_before_tau_mapping() {
+    let billing = billing_info_with_models(
+        "tier-pro",
+        serde_json::json!([{
+            "name": "v4",
+            "external_key": "chirp-v4",
+            "can_use": false,
+            "is_default_model": false,
+            "description": "unavailable legacy model",
+            "max_lengths": {}
+        }]),
+    );
+    let server = MockServer::json(&billing).await;
+    let client = server.client();
+    let mut request = GenerateRequest::new("chirp-v4", "simple");
+    request.task = Some("cover".into());
+
+    let error = client
+        .prepare_generation_request(&mut request)
+        .await
+        .expect_err("unavailable base model must not be hidden by tau mapping");
+
+    assert!(matches!(error, CliError::Config(message) if message.contains("cannot use")));
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/api/billing/info/");
 }
 
 #[tokio::test]
@@ -1913,13 +2100,22 @@ async fn cover_with_challenge_token_posts_generate_without_preflight_contract() 
 
 #[tokio::test]
 async fn remaster_posts_generate_v2_remaster_contract() {
-    let server = MockServer::json(
-        r#"{"clips":[{"id":"remaster-1","title":"Remaster","status":"submitted","model_name":"chirp-flounder","created_at":"2026-06-30T00:00:00Z"}]}"#,
-    )
-    .await;
+    let raw = serde_json::json!({
+        "clips": [{
+            "id": "remaster-1",
+            "title": "Remaster",
+            "status": "submitted",
+            "model_name": "chirp-flounder",
+            "created_at": "2026-06-30T00:00:00Z"
+        }],
+        "batch_size": 1,
+        "status": "submitted",
+        "upstream_metadata": {"request_id": "remaster-request-1"}
+    });
+    let server = MockServer::json(&raw.to_string()).await;
     let client = server.client();
 
-    let clips = client
+    let result = client
         .remaster(
             "clip-a",
             "chirp-flounder",
@@ -1928,7 +2124,12 @@ async fn remaster_posts_generate_v2_remaster_contract() {
         .await
         .expect("remaster");
 
-    assert_eq!(clips[0].id, "remaster-1");
+    assert_eq!(result.clips[0].id, "remaster-1");
+    assert_eq!(
+        serde_json::to_value(&result).expect("serialize remaster result"),
+        raw,
+        "remaster must preserve the exact upstream response envelope"
+    );
     let request = server.captured().await;
     assert_eq!(request.method, "POST");
     assert_eq!(request.path, "/api/generate/upsample");
@@ -1966,15 +2167,25 @@ async fn remaster_default_variation_posts_normal() {
 
 #[tokio::test]
 async fn concat_posts_current_web_contract() {
-    let server = MockServer::json(
-        r#"{"id":"concat-1","title":"Concat","status":"submitted","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z"}"#,
-    )
-    .await;
+    let raw = serde_json::json!({
+        "id": "concat-1",
+        "title": "Concat",
+        "status": "submitted",
+        "model_name": "chirp-fenix",
+        "created_at": "2026-06-30T00:00:00Z",
+        "upstream_metadata": {"request_id": "concat-request-1"}
+    });
+    let server = MockServer::json(&raw.to_string()).await;
     let client = server.client();
 
-    let clip = client.concat("clip-a").await.expect("concat");
+    let result = client.concat("clip-a").await.expect("concat");
 
-    assert_eq!(clip.id, "concat-1");
+    assert_eq!(result.clips[0].id, "concat-1");
+    assert_eq!(
+        serde_json::to_value(&result).expect("serialize concat result"),
+        raw,
+        "concat must preserve the exact upstream bare-clip response"
+    );
     let request = server.captured().await;
     assert_eq!(request.method, "POST");
     assert_eq!(request.path, "/api/generate/concat/v2/");
@@ -2485,13 +2696,8 @@ async fn stems_posts_current_web_contract() {
     assert_eq!(requests[3].method, "POST");
     assert_eq!(requests[3].path, "/api/generate/v2-web/");
     let body = serde_json::from_str::<serde_json::Value>(&requests[3].body).expect("request json");
-    assert!(!body.as_object().expect("body object").contains_key("token"));
-    assert!(
-        !body
-            .as_object()
-            .expect("body object")
-            .contains_key("token_provider")
-    );
+    assert!(body["token"].is_null());
+    assert!(body["token_provider"].is_null());
     assert_eq!(body["task"], "gen_stem");
     assert_eq!(body["mv"], "chirp-v3-0");
     assert_eq!(body["title"], "Source Song");
@@ -2504,12 +2710,7 @@ async fn stems_posts_current_web_contract() {
     assert_eq!(body["metadata"]["create_mode"], "custom");
     assert_eq!(body["metadata"]["is_remix"], true);
     assert_eq!(body["metadata"]["user_tier"], "tier-pro");
-    assert!(
-        !body["metadata"]
-            .as_object()
-            .expect("metadata object")
-            .contains_key("is_max_mode")
-    );
+    assert_eq!(body["metadata"]["is_max_mode"], false);
     assert!(
         !body["metadata"]
             .as_object()
@@ -2648,8 +2849,8 @@ async fn extend_metadata_fallback_does_not_merge_same_title_different_clip() {
     let server = MockServer::json_sequence(&[
         r#"{"id":"clip-a","title":"Source Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z","metadata":{"prompt":"[Verse]\nOriginal words"}}"#,
         r#"{"clips":[{"id":"clip-other","title":"Source Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z","metadata":{"tags":"wrong same-title tags","negative_tags":"wrong negatives","make_instrumental":true}}]}"#,
-        r#"{"required":false}"#,
         billing.as_str(),
+        r#"{"required":false}"#,
         r#"{"clips":[{"id":"extend-1","title":"Source Song","status":"submitted","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z"}]}"#,
     ])
     .await;
@@ -2671,6 +2872,11 @@ async fn extend_metadata_fallback_does_not_merge_same_title_different_clip() {
 
     let requests = server.captured_all().await;
     assert_eq!(requests.len(), 5);
+    assert_eq!(requests[0].path, "/api/clip/clip-a");
+    assert_eq!(requests[1].path, "/api/feed/v3");
+    assert_eq!(requests[2].path, "/api/billing/info/");
+    assert_eq!(requests[3].path, "/api/c/check");
+    assert_eq!(requests[4].path, "/api/generate/v2-web/");
     let body = serde_json::from_str::<serde_json::Value>(&requests[4].body).expect("request json");
     assert_eq!(body["tags"], "");
     assert_eq!(body["negative_tags"], "");

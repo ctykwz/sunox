@@ -146,13 +146,21 @@ sunox update                       最新の GitHub Release に更新
 生成系のリクエストを送る前に、Sunox は Suno Web と同じ Challenge チェックを行います。
 Challenge が不要なら、ブラウザを起動せずにそのまま送信します。Suno が Challenge を要求した
 場合は、まずオプションの Browser Bridge 拡張機能が、普段使っている Chrome プロファイル内で
-不可視の検証ウィジェットを実行します。拡張機能は通常、不可視のリスナーだけを維持し、検証が
-必要なときだけオフスクリーンの `suno.com` Challenge Frame を作成します。この専用コンテキストは
-20 分間再利用された後、自動的に削除されます。Suno のタブを開いたり残したりする必要はなく、
-Bridge がブラウザウィンドウを作成することもありません。
+不可視の検証ウィジェットを実行します。拡張機能は待機中にはローカルリスナーだけを維持します。
+検証が必要なときは、nonce に紐付いた短時間だけ存在するトップレベルの `suno.com` ポップアップを
+作成する代わりに、Chrome の不可視 offscreen document 内へ nonce 付きの `suno.com` iframe を
+1 つ作成します。プロバイダーの計測用に通常の viewport サイズは維持しますが、Chrome はタブ、
+popup、最小化ウィンドウ、別ブラウザプロセスを作成しません。拡張機能所有の第 1 階層 iframe
+は一時的な分離ストレージを使うため、ユーザーの Suno Cookie や永続データを読み取れません。
+Bridge は `document_start` でホスト応答を停止し、現在の検証プロバイダーだけを許可する最小
+ドキュメントへ置き換えます。ネットワーク側とドキュメント側の nonce、および最終的な要求・
+応答ヘッダーがすべて一致した場合だけ接続します。予期しないナビゲーション、キャッシュ、
+再読み込み、切断、ID 不一致は iframe を削除して安全側に失敗します。トークンまたは最終エラー
+の後も即座に iframe を削除し、可視またはログイン済みのコンテキストへフォールバックしません。
+この動作は macOS と Windows の両方に対応します。
 
 既定の `auto` モードが対応する Chromium 系ブラウザへフォールバックするのは、Bridge の
-ペアリング情報がまだ設定されていない場合だけです。一度 Bridge をインストールしてペアリング
+インストール記録がまだない場合だけです。一度 Bridge をインストールしてペアリング
 すると、Bridge が利用できない場合はエラーで停止し、別のブラウザプロセスを起動しません。
 別ブラウザへのフォールバックを明示的に許可する場合だけ、`challenge_browser=isolated` を
 使用してください。
@@ -175,17 +183,47 @@ sunox install-browser-extension
    フォルダー選択画面のアドレスバーにパスを貼り付けます。
 4. 拡張機能を有効にしたままにします。Suno のタブを開いておく必要はありません。
 
-拡張機能は Chrome を再起動してもそのまま利用できます。Sunox の更新に新しい Bridge が含まれて
-いる場合は、次のコマンドで拡張機能のファイルを更新します。
+曲の作成、Challenge の実行、クレジットの消費をせずに Bridge の通信を確認できます。
+
+```bash
+sunox doctor --browser-bridge
+```
+
+拡張機能は Chrome を再起動してもそのまま利用できます。マニフェストには独立した Bridge
+runtime build を使用するため、CLI だけを変更したリリースでは展開済みバンドルは変化せず、
+Chrome の再読み込みも不要です。Sunox の更新で Bridge 自体が実際に変わった場合は、次の
+コマンドで拡張機能のファイルを更新します。
 
 ```bash
 sunox install-browser-extension --force
 ```
 
-続いて、Sunox Browser Bridge の拡張機能カードで **再読み込み** をクリックします。Suno のページを
-再読み込みする必要はありません。Sunox は macOS と Windows のどちらでも、ユーザーごとの
-アプリケーション設定フォルダーを自動的に選びます。Chrome がこのパッケージ化されていない
-拡張機能を使用している間は、そのフォルダーを移動または削除しないでください。
+このコマンドは、Chrome が完全に一致する runtime とペアリングを認証するまで activation 状態を
+保持します。初回展開では `status=installed`、`reload_required=null`、
+`runtime_ack_pending=true`、`pending_origin=load_unpacked`、
+`activation_required=load_unpacked` を返します。**パッケージ化されていない拡張機能を読み込む**
+操作を完了してから `sunox doctor --browser-bridge` を実行してください。ファイルが存在するだけで
+Bridge を準備完了とは判定しません。
+
+認証済みのインストールが変更された場合は `reload_required=true`、
+`runtime_ack_pending=true`、`activation_required=reload` を返します。**再読み込み** を一度だけ
+クリックしてから doctor を実行します。未認証または復元されたインストールで Chrome の状態が
+不明な場合は `activation_required=ensure_loaded` となり、`activation_options` に
+`load_unpacked_if_missing` や `enable_and_reload_if_present` など条件付きの選択肢が入ります。
+これらは相互排他的な分岐であり、順番にすべて実行する手順ではありません。既に最新のバンドルは
+能動的にプローブされ、正確な認証に成功すると marker を削除し、`reload_required=false`、
+`runtime_ack_pending=false`、activation 要求なしを返します。不明なままなら
+`reload_required=null` と `runtime_ack_pending=true` を返すため、再読み込みを繰り返さず、単一の
+`activation_required` 判断に従ってください。
+
+doctor は、欠落または修復可能な破損状態のペアリング secret を区別し、管理された
+`install-browser-extension --force` 修復を一度だけ案内します。シンボリックリンク、非 UTF-8
+データ、読み取り不能なパスなど危険またはアクセス不能なエントリは fail closed となり、force や
+再読み込みで修復できるとは保証しません。CLI だけの更新、コンピューターの再起動、Chrome の再起動
+だけで Bridge の再インストールや再読み込みが必要になることはありません。Suno のページを再読み込み
+する必要もありません。Sunox は macOS と Windows のどちらでもユーザーごとの設定フォルダーを
+自動的に選びます。Chrome がこの拡張機能を使用している間は、そのフォルダーを移動または削除しないで
+ください。
 
 関連する上書きオプションは次のとおりです。
 
@@ -199,11 +237,13 @@ sunox install-browser-extension --force
 `isolated`（常に一時ブラウザを使用）を指定できます。1 回だけ上書きする場合は
 `-c challenge_browser=existing` を使います。`existing` という名前は既存設定との互換性のために
 残されており、現在は「既存の Chrome プロファイルにインストールされた Bridge を使う」という
-意味です。Bridge 自身がオフスクリーンの Suno Frame を管理するため、タブもウィンドウも不要です。
-Bridge が見つからない、古い、または応答しない場合は、別ブラウザを開かずにエラーになります。
-`auto` で一時ブラウザへフォールバックできるのは、Bridge のペアリング情報が未設定の場合だけです。
-インストール済みの Bridge が無効、古い、または到達不能な場合、`auto` もエラーで停止します。
-別ブラウザを許可する場合は、`isolated` を明示的に指定してください。
+意味です。Bridge は nonce に紐付いた offscreen iframe を自動的に作成して削除し、タブや
+ブラウザウィンドウは開きません。設定またはペアリング済みの Bridge が見つからない、古い、または応答しない場合は、
+可視コンテキストへ切り替えずエラーになります。`auto` で一時ブラウザへ
+フォールバックできるのは、Bridge のインストール記録がない場合だけです。インストール済みの
+Bridge が無効、古い、到達不能、またはペアリング secret が欠落している場合、`auto` もエラーで
+停止します。別ブラウザを許可する
+場合は、`isolated` を明示的に指定してください。
 
 無人実行で Suno のタブを追加せず、別のブラウザプロセスも起動したくない場合は、Browser Bridge を
 インストールして `--no-captcha` を外します。この状態では `auto` と
@@ -213,13 +253,13 @@ Bridge が見つからない、古い、または応答しない場合は、別�
 なれば、送信前に停止します。Bridge が未設定の状態で、既定の `auto` から単に `--no-captcha` を
 外すだけでは、一時ブラウザへのフォールバックが許可されたままです。
 
-Browser Bridge のインストールは、Sunox が管理する非表示コンテキストで不可視の Challenge を実行
+Browser Bridge のインストールは、Sunox が自動管理する短時間のコンテキストで Challenge を実行
 することへの継続的な許可とみなされます。生成のたびに確認を取り直す必要はありません。
-「ポップアップなし」「新しいブラウザなし」「表示される CAPTCHA なし」といった指定は、
+「Suno のタブを残さない」「新しいブラウザを起動しない」「CAPTCHA を表示しない」といった指定は、
 インストール済みの Bridge の利用を許可するものであり、`--no-captcha` を意味しません。
 Bridge だけに限定する明示的な設定は、引き続き `challenge_browser=existing` です。Bridge を
-インストール済みでも `--no-captcha` を使うのは、不可視の Bridge を含むすべての Challenge が
-明示的に禁止された場合、またはそのフラグ自体が明示された場合だけです。
+インストール済みでも `--no-captcha` を使うのは、Bridge を含むすべての Challenge が明示的に
+禁止された場合、またはそのフラグ自体が明示された場合だけです。
 
 ## JSON と自動化
 

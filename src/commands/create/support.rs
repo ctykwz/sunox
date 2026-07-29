@@ -1,7 +1,7 @@
 use std::future::Future;
 
 use crate::api::challenge::{ChallengeProvider, GenerationChallenge};
-use crate::api::types::Clip;
+use crate::api::types::{Clip, GenerationResult};
 use crate::app::AppContext;
 use crate::captcha;
 use crate::core::CliError;
@@ -84,7 +84,7 @@ pub(super) async fn execute_generation_submission<Prepare, PrepareFuture>(
     challenge_mode: ChallengeMode,
     ctx: &AppContext,
     prepare: Prepare,
-) -> Result<Vec<Clip>, CliError>
+) -> Result<GenerationResult, CliError>
 where
     Prepare: FnOnce() -> PrepareFuture,
     PrepareFuture: Future<
@@ -150,6 +150,13 @@ pub(super) fn output_clips(clips: &[Clip], ctx: &AppContext) {
                 eprintln!("\nUse `sunox clip wait {ids}` to wait for completion");
             }
         }
+    }
+}
+
+pub(super) fn output_generation(result: &GenerationResult, ctx: &AppContext) {
+    match ctx.fmt {
+        OutputFormat::Json => output::json::success(result),
+        OutputFormat::Table => output_clips(&result.clips, ctx),
     }
 }
 

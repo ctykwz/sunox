@@ -14,9 +14,7 @@ mod playlist;
 mod prompts;
 mod upload;
 
-#[cfg(test)]
-pub use account::MaxLengths;
-pub use account::{BillingInfo, Model, RemasterModelInfo};
+pub use account::{BillingInfo, MaxLengths, Model, RemasterModelInfo};
 pub use clip::Clip;
 pub use clip_info::{
     ClipAttribution, ClipComments, ClipInfo, ClipInfoSupplementalError, RemixCountResponse,
@@ -24,7 +22,9 @@ pub use clip_info::{
 };
 pub use clip_mutation::{ClipReaction, ClipTrashRequest, SetClipReactionRequest};
 pub use feed::{FeedFilters, FeedResponse, FeedV3Request};
-pub use generation::{ControlSliders, GenerateRequest, GenerateResponse, LastTagsGeneration};
+pub use generation::{
+    ControlSliders, GenerateRequest, GenerateResponse, GenerationResult, LastTagsGeneration,
+};
 pub use lyrics::{AlignedWord, CowriteLyricsResponse};
 pub use metadata::{SetMetadataRequest, SetVisibilityRequest};
 pub use operations::{ConcatRequest, RemasterVariation};

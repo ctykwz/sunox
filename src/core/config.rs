@@ -84,6 +84,12 @@ impl AppConfig {
             .extract()
             .map_err(|e| CliError::Config(format!("parse config: {e}")))?;
         config.apply_env_overrides(vars)?;
+        // Figment deserializes persisted TOML directly into AppConfig, so
+        // canonicalize it through the same gate used by config writes. A
+        // removed v2 value is migrated in memory to account-driven selection
+        // instead of either submitting the obsolete protocol or bricking the
+        // `config set` command needed to update the file.
+        config.default_model = normalize_loaded_model_key(&config.default_model)?;
         ensure_poll_interval_secs(config.poll_interval_secs)?;
         ensure_poll_timeout_secs(config.poll_timeout_secs)?;
         Ok(config)
@@ -277,7 +283,6 @@ fn normalize_model_key(value: &str) -> Result<String, CliError> {
         "v4" | "chirp-v4" => "chirp-v4",
         "v3.5" | "chirp-v3-5" => "chirp-v3-5",
         "v3" | "chirp-v3-0" => "chirp-v3-0",
-        "v2" | "chirp-v2-xxl-alpha" => "chirp-v2-xxl-alpha",
         _ => {
             return Err(CliError::Config(format!(
                 "unknown model `{value}`; use auto, a CLI model version such as v5.5, or a Suno API model key such as chirp-fenix"
@@ -285,6 +290,16 @@ fn normalize_model_key(value: &str) -> Result<String, CliError> {
         }
     };
     Ok(normalized.to_string())
+}
+
+fn normalize_loaded_model_key(value: &str) -> Result<String, CliError> {
+    if matches!(value, "v2" | "chirp-v2-xxl-alpha") {
+        eprintln!(
+            "Warning: configured model `{value}` was removed from the current Suno Web protocol; using `default_model=auto`. Run `sunox config set default_model <model>` to update config.toml."
+        );
+        return Ok("auto".into());
+    }
+    normalize_model_key(value)
 }
 
 fn normalize_override_value(value: &str) -> String {
@@ -363,6 +378,41 @@ mod tests {
             .expect("set free model");
 
         assert_eq!(config.default_model.as_deref(), Some("chirp-auk-turbo"));
+    }
+
+    #[test]
+    fn stored_config_rejects_the_removed_v2_model() {
+        let mut config = StoredConfig::default();
+
+        let error = config
+            .set("default_model", "v2")
+            .expect_err("v2 is no longer in the current Web model protocol");
+
+        assert!(error.to_string().contains("unknown model `v2`"));
+    }
+
+    #[test]
+    fn load_migrates_a_removed_model_from_an_existing_config_file() {
+        let dir = tempfile::tempdir().expect("test dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "default_model = \"chirp-v2-xxl-alpha\"\n")
+            .expect("write legacy config");
+
+        let config = AppConfig::load_from_path(Some(path), [])
+            .expect("removed persisted model should recover safely");
+
+        assert_eq!(config.default_model, "auto");
+    }
+
+    #[test]
+    fn load_canonicalizes_a_supported_alias_from_an_existing_config_file() {
+        let dir = tempfile::tempdir().expect("test dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "default_model = \"v5.5\"\n").expect("write config");
+
+        let config = AppConfig::load_from_path(Some(path), []).expect("load config");
+
+        assert_eq!(config.default_model, "chirp-fenix");
     }
 
     #[test]

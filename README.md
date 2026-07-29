@@ -148,6 +148,7 @@ sunox clip upload <file>          Upload local audio
 sunox credits                     Show credits and plan information
 sunox models                      Show models available to the account
 sunox doctor --network            Check DNS, TCP, and HTTPS access
+sunox doctor --browser-bridge     Check Bridge transport without running a challenge
 sunox update                      Install the latest GitHub release
 ```
 
@@ -158,13 +159,23 @@ Run `sunox --help` or `sunox <command> --help` for the complete set of options.
 Before a generation-backed request, Sunox calls Suno's generation challenge check. When no
 challenge is required, it submits directly and does not launch a browser. When Suno requires a
 challenge, Sunox first asks the optional Browser Bridge extension to execute the invisible widget
-inside the user's regular Chrome profile. The extension maintains an invisible listener and embeds
-an offscreen `suno.com` challenge frame only when verification needs one. It reuses that private
-context for 20 minutes, then removes it. Users do not need to open or retain a Suno tab, and the
-Bridge does not create a browser window. If the bridge does not respond, the default `auto` mode falls back to the
-matching installed Chromium-family browser only when no Bridge pairing is configured. Once the
-Bridge has been installed, `auto` fails closed instead of launching a separate browser process.
-Use `challenge_browser=isolated` explicitly when that separate fallback is acceptable.
+inside the user's regular Chrome profile. The extension keeps only its local listener alive while
+idle. For a required challenge, it creates one nonce-bound `suno.com` iframe inside Chrome's
+invisible offscreen document. The frame keeps a normal layout viewport for visibility-sensitive
+provider code, but Chrome creates no tab, popup, minimized window, or separate browser process.
+The frame is credentialless, so it cannot read the user's Suno cookies or persistent browser
+storage. At `document_start`, the Bridge stops the host response and replaces it with a minimal
+provider-only challenge document. Only the first-level extension-owned frame whose network-visible
+query nonce, document nonce, final request headers, and controlled response headers all agree may
+connect. Unexpected navigation, caching, reload, disconnect, protocol drift, or identity mismatch
+removes the frame and fails closed. The frame is also removed immediately after a token or terminal
+error, and there is no visible or credentialed fallback. Raw provider errors never cross the Bridge
+boundary or enter storage or logs.
+This flow is supported on macOS and Windows. If the Bridge does not
+respond, the default `auto` mode falls back to the matching installed Chromium-family browser only
+when no Bridge installation has been recorded. Once the Bridge has been installed, `auto` fails closed
+instead of launching that separate browser. Use `challenge_browser=isolated` explicitly when the
+separate fallback is acceptable.
 
 ### Install the Browser Bridge on macOS or Windows
 
@@ -182,18 +193,46 @@ sunox install-browser-extension
    Sunox. On macOS, press `Shift+Command+G` in the folder picker and paste the printed path because
    `~/Library` is hidden by default. On Windows, paste the printed path into the folder picker's
    address bar.
-4. Keep the extension enabled. No Suno tab needs to remain open.
+4. Keep the extension enabled. The Bridge creates no Suno tab or browser window.
 
-The extension stays installed across browser restarts. After a Sunox update that changes the
-bridge, refresh its files and reload it in Chrome:
+Verify the Bridge transport without creating a song, running a challenge, or consuming credits:
+
+```bash
+sunox doctor --browser-bridge
+```
+
+The extension stays installed across browser restarts. Its manifest uses the independent Bridge
+runtime build, so a CLI-only release does not change the extracted bundle or require a Chrome
+reload. After a Sunox update that actually changes the Bridge, refresh its files:
 
 ```bash
 sunox install-browser-extension --force
 ```
 
-Then click **Reload** on the Sunox Browser Bridge card. No Suno page reload is needed. The command
-chooses the correct per-user application directory on both macOS and Windows; do not move or delete
-that directory while Chrome is using the unpacked extension.
+The command records activation until Chrome authenticates the exact runtime and pairing. A first
+extraction returns `status=installed`, `reload_required=null`, `runtime_ack_pending=true`,
+`pending_origin=load_unpacked`, and `activation_required=load_unpacked`: complete **Load unpacked**
+and then run `sunox doctor --browser-bridge`. It does not claim the Bridge is ready merely because
+the files exist.
+
+When an acknowledged installation changes, the result is `reload_required=true`,
+`runtime_ack_pending=true`, and `activation_required=reload`: click **Reload** exactly once and run
+doctor. If a never-acknowledged or restored installation has uncertain Chrome state,
+`activation_required=ensure_loaded`; `activation_options` contains condition-labelled alternatives
+such as `load_unpacked_if_missing` or `enable_and_reload_if_present`. These are mutually exclusive
+branches, not steps to run in sequence. An already-current bundle is actively probed; exact
+authentication clears the marker and returns `reload_required=false`,
+`runtime_ack_pending=false`, and no activation requirement. If it remains unknown, the result is
+`reload_required=null` and `runtime_ack_pending=true`; follow its single activation decision rather
+than repeatedly clicking Reload.
+
+Doctor distinguishes a missing or repairably corrupt pairing secret and directs one managed
+`install-browser-extension --force` repair. Unsafe or inaccessible entries, including symlinks,
+non-UTF-8 data, and unreadable paths, fail closed and are not promised to be repairable by force or
+Reload. A CLI-only update, computer restart, or Chrome restart never by itself requires
+reinstalling or reloading the Bridge. No Suno page reload is needed. The command chooses the
+correct per-user application directory on both macOS and Windows; do not move or delete that
+directory while Chrome is using the unpacked extension.
 
 The relevant overrides are:
 
@@ -207,9 +246,11 @@ Set `challenge_browser` to `auto` (default), `existing` (require the Bridge and 
 separate browser process), or `isolated` (always use the temporary browser). A one-command override
 looks like `-c challenge_browser=existing`. The `existing` name is retained for configuration
 compatibility; it now means “use the installed Bridge in the existing Chrome profile.” The Bridge
-manages its own offscreen Suno frame, so no browser tab or window is required. A missing or stale
-bridge is reported as an error instead of opening another browser. In `auto` mode, Sunox may open
-the isolated fallback only when no Bridge pairing is configured. An installed Bridge that is
+automatically creates and removes its nonce-bound offscreen iframe, so no user-opened or retained
+Suno tab or browser window is created. It accepts only the currently supported Suno/Clerk redirect
+shape and does not execute until the return URL has been cleaned and stabilized. A configured
+Bridge that is missing, stale, or protocol-drifted is reported as an error instead of opening another browser. In `auto` mode, Sunox may open
+the isolated fallback only when no Bridge installation has been recorded. An installed Bridge that is
 disabled, stale, or unreachable fails closed; use `isolated` explicitly to allow a separate browser
 process.
 
@@ -221,12 +262,12 @@ installation is unknown, keep `--no-captcha`; a required challenge will then sto
 Without a configured Bridge, merely omitting `--no-captcha` in the default `auto` mode still allows
 the isolated-browser fallback.
 
-Installing the Bridge is standing permission for Sunox to execute invisible challenges in its
-managed hidden context; it does not require separate permission for every generation. Requests such
-as “no popup”, “no new browser”, or “no visible captcha” allow the installed Bridge and do not mean
-`--no-captcha`; `challenge_browser=existing` remains the explicit Bridge-only override. Keep
-`--no-captcha` despite an installed Bridge only when every challenge mechanism, including the
-invisible Bridge, is explicitly forbidden or that exact flag is requested.
+Installing the Bridge is standing permission for Sunox to execute challenges in its automatically
+managed, short-lived context; it does not require separate permission for every generation.
+Requests such as “do not leave a Suno tab open”, “no new browser process”, or “no visible captcha”
+allow the installed Bridge and do not mean `--no-captcha`; `challenge_browser=existing` remains the
+explicit Bridge-only override. Keep `--no-captcha` despite an installed Bridge only when every
+challenge mechanism, including the Bridge, is explicitly forbidden or that exact flag is requested.
 
 ## JSON output and automation
 
@@ -236,6 +277,12 @@ Every command supports `--json`. Sunox also selects JSON automatically when stdo
 sunox clip list --json
 sunox clip list | jq '.data.clips[0].title'
 ```
+
+Commands submitted through `/api/generate/v2-web/`, plus `clip remaster`, preserve Suno's upstream
+clips envelope exactly under `.data`; read their submitted clip IDs from `.data.clips[].id`.
+`clip concat` preserves its upstream bare Clip object instead, so its ID is `.data.id`. Table output
+still uses the parsed clip fields. This avoids materializing omitted upstream fields as synthetic
+`null`, `0`, or empty metadata values.
 
 Errors use stable codes and nonzero exit statuses. Partial multi-step operations include completed,
 failed, and unattempted items so callers can retry only what is necessary.
