@@ -341,8 +341,7 @@ fn acknowledge_loaded_runtime(authenticated_secret: &str) {
         authenticated_secret,
     ) {
         eprintln!(
-            "Warning: authenticated Browser Bridge runtime {} could not clear its reload-pending marker: {error}",
-            BROWSER_BRIDGE_RUNTIME_BUILD
+            "Warning: authenticated Browser Bridge runtime {BROWSER_BRIDGE_RUNTIME_BUILD} could not clear its reload-pending marker: {error}"
         );
     }
 }
