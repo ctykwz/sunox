@@ -1370,7 +1370,7 @@ async fn generate_posts_current_web_contract() {
     assert_eq!(body["metadata"]["create_mode"], "custom");
     assert_eq!(body["metadata"]["is_max_mode"], false);
     assert!(body["metadata"].get("lyrics_model").is_none());
-    assert_eq!(body["metadata"]["web_client_pathname"], "/create");
+    assert_eq!(body["metadata"]["web_client_pathname"], "/home/advanced");
     assert_eq!(body["metadata"]["user_tier"], "tier-pro");
     assert!(
         body["transaction_uuid"]

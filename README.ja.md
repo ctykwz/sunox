@@ -151,9 +151,13 @@ Challenge が不要なら、ブラウザを起動せずにそのまま送信し�
 作成する代わりに、Chrome の不可視 offscreen document 内へ nonce 付きの `suno.com` iframe を
 1 つ作成します。プロバイダーの計測用に通常の viewport サイズは維持しますが、Chrome はタブ、
 popup、最小化ウィンドウ、別ブラウザプロセスを作成しません。拡張機能所有の第 1 階層 iframe
-だけが接続でき、予期しないナビゲーション、再読み込み、切断、ID 不一致は iframe を削除して
-安全側に失敗します。トークンまたは最終エラーの後も即座に iframe を削除し、可視コンテキストへ
-フォールバックしません。この動作は macOS と Windows の両方に対応します。
+は一時的な分離ストレージを使うため、ユーザーの Suno Cookie や永続データを読み取れません。
+Bridge は `document_start` でホスト応答を停止し、現在の検証プロバイダーだけを許可する最小
+ドキュメントへ置き換えます。ネットワーク側とドキュメント側の nonce、および最終的な要求・
+応答ヘッダーがすべて一致した場合だけ接続します。予期しないナビゲーション、キャッシュ、
+再読み込み、切断、ID 不一致は iframe を削除して安全側に失敗します。トークンまたは最終エラー
+の後も即座に iframe を削除し、可視またはログイン済みのコンテキストへフォールバックしません。
+この動作は macOS と Windows の両方に対応します。
 
 既定の `auto` モードが対応する Chromium 系ブラウザへフォールバックするのは、Bridge の
 インストール記録がまだない場合だけです。一度 Bridge をインストールしてペアリング
@@ -185,22 +189,40 @@ sunox install-browser-extension
 sunox doctor --browser-bridge
 ```
 
-拡張機能は Chrome を再起動してもそのまま利用できます。Sunox の更新に新しい Bridge が含まれて
-いる場合は、次のコマンドで拡張機能のファイルを更新します。
+拡張機能は Chrome を再起動してもそのまま利用できます。マニフェストには独立した Bridge
+runtime build を使用するため、CLI だけを変更したリリースでは展開済みバンドルは変化せず、
+Chrome の再読み込みも不要です。Sunox の更新で Bridge 自体が実際に変わった場合は、次の
+コマンドで拡張機能のファイルを更新します。
 
 ```bash
 sunox install-browser-extension --force
 ```
 
-このコマンドは、生成したバンドルと展開済みのファイルを最初に比較します。再読み込みの判断には
-`reload_required` だけを使用してください。これが `true` なら、ファイルが
-`already_current` でも Chrome がそのランタイムをまだ確認していない可能性があるため、
-Sunox Browser Bridge の拡張機能カードで **再読み込み** をクリックします。
-`reload_required=false` の場合だけ、Chrome で再読み込みする必要はありません。コンピューター
-または Chrome を再起動しただけで Bridge の再インストールや再読み込みが必要になることは
-ありません。Suno のページを再読み込みする必要もありません。Sunox は macOS と Windows の
-どちらでも、ユーザーごとのアプリケーション設定フォルダーを自動的に選びます。Chrome がこの
-パッケージ化されていない拡張機能を使用している間は、そのフォルダーを移動または削除しないで
+このコマンドは、Chrome が完全に一致する runtime とペアリングを認証するまで activation 状態を
+保持します。初回展開では `status=installed`、`reload_required=null`、
+`runtime_ack_pending=true`、`pending_origin=load_unpacked`、
+`activation_required=load_unpacked` を返します。**パッケージ化されていない拡張機能を読み込む**
+操作を完了してから `sunox doctor --browser-bridge` を実行してください。ファイルが存在するだけで
+Bridge を準備完了とは判定しません。
+
+認証済みのインストールが変更された場合は `reload_required=true`、
+`runtime_ack_pending=true`、`activation_required=reload` を返します。**再読み込み** を一度だけ
+クリックしてから doctor を実行します。未認証または復元されたインストールで Chrome の状態が
+不明な場合は `activation_required=ensure_loaded` となり、`activation_options` に
+`load_unpacked_if_missing` や `enable_and_reload_if_present` など条件付きの選択肢が入ります。
+これらは相互排他的な分岐であり、順番にすべて実行する手順ではありません。既に最新のバンドルは
+能動的にプローブされ、正確な認証に成功すると marker を削除し、`reload_required=false`、
+`runtime_ack_pending=false`、activation 要求なしを返します。不明なままなら
+`reload_required=null` と `runtime_ack_pending=true` を返すため、再読み込みを繰り返さず、単一の
+`activation_required` 判断に従ってください。
+
+doctor は、欠落または修復可能な破損状態のペアリング secret を区別し、管理された
+`install-browser-extension --force` 修復を一度だけ案内します。シンボリックリンク、非 UTF-8
+データ、読み取り不能なパスなど危険またはアクセス不能なエントリは fail closed となり、force や
+再読み込みで修復できるとは保証しません。CLI だけの更新、コンピューターの再起動、Chrome の再起動
+だけで Bridge の再インストールや再読み込みが必要になることはありません。Suno のページを再読み込み
+する必要もありません。Sunox は macOS と Windows のどちらでもユーザーごとの設定フォルダーを
+自動的に選びます。Chrome がこの拡張機能を使用している間は、そのフォルダーを移動または削除しないで
 ください。
 
 関連する上書きオプションは次のとおりです。

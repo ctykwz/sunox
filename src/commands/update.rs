@@ -484,7 +484,7 @@ fn update_next_steps(up_to_date: bool, bridge_configured: bool) -> Vec<&'static 
     let mut steps = vec!["Run `sunox install-skill --force` to refresh the agent skill"];
     if bridge_configured {
         steps.push(
-            "Run `sunox install-browser-extension --force` to check the Browser Bridge bundle; reload it in Chrome only if the command reports `reload_required=true`",
+            "Run `sunox install-browser-extension --force` to check the Browser Bridge bundle, then follow its single `activation_required` decision; `activation_options` are conditional alternatives, and `reload_required=true` is only the definite-Reload case",
         );
     }
     steps
@@ -568,6 +568,9 @@ mod tests {
         let steps = update_next_steps(false, true);
         assert_eq!(steps.len(), 2);
         assert!(steps[1].contains("install-browser-extension --force"));
+        assert!(steps[1].contains("activation_required"));
+        assert!(steps[1].contains("activation_options"));
+        assert!(steps[1].contains("conditional alternatives"));
         assert!(steps[1].contains("reload_required=true"));
     }
 

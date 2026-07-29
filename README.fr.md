@@ -158,9 +158,14 @@ son listener local. Lorsqu'une vérification est nécessaire, elle utilise le do
 invisible de Chrome et y place un iframe `suno.com` unique lié à un nonce. L'iframe conserve un
 viewport normal pour le fournisseur, mais Chrome ne crée ni onglet, ni popup, ni fenêtre réduite,
 ni processus de navigateur séparé. Seul l'iframe de premier niveau appartenant à l'extension peut
-se connecter ; toute navigation, recharge, déconnexion ou identité inattendue supprime l'iframe et
-fait échouer la requête de façon sûre. L'iframe est aussi supprimé après le jeton ou l'erreur finale,
-sans aucun recours visible. Ce comportement est pris en charge sous macOS comme sous Windows.
+se connecter. Il utilise un stockage temporaire isolé et ne peut donc lire ni les cookies Suno ni
+les données persistantes de l'utilisateur. À `document_start`, le Bridge arrête la réponse du site
+et la remplace par un document minimal qui n'autorise que le fournisseur de vérification actif.
+Le nonce réseau, le nonce du document et les en-têtes finaux doivent tous correspondre. Toute
+navigation, mise en cache, recharge, déconnexion ou identité inattendue supprime l'iframe et fait
+échouer la requête de façon sûre. L'iframe est aussi supprimé après le jeton ou l'erreur finale,
+sans recours à un contexte visible ou authentifié. Ce comportement est pris en charge sous macOS
+comme sous Windows.
 
 Si le Bridge ne répond pas, le mode `auto` par défaut ne se replie sur un navigateur de la famille
 Chromium installé que lorsqu'aucune installation du Bridge n'a été enregistrée. Une fois le Bridge installé,
@@ -191,21 +196,42 @@ Vérifiez le transport du Bridge sans créer de morceau, exécuter de challenge 
 sunox doctor --browser-bridge
 ```
 
-L'extension reste installée après le redémarrage du navigateur. Après une mise à jour de Sunox qui
-modifie le Bridge, actualisez ses fichiers et rechargez-la dans Chrome :
+L'extension reste installée après le redémarrage du navigateur. Son manifeste utilise l'identité
+indépendante du runtime Bridge : une version qui ne modifie que le CLI ne change donc pas le paquet
+extrait et n'impose aucun rechargement de Chrome. Si une mise à jour de Sunox modifie réellement le
+Bridge, actualisez ses fichiers :
 
 ```bash
 sunox install-browser-extension --force
 ```
 
-La commande compare d'abord le paquet généré aux fichiers extraits. Utilisez
-`reload_required` comme seul critère : cliquez sur **Actualiser** dans la carte Sunox Browser Bridge
-lorsqu'il vaut `true`, même si les fichiers sont `already_current` mais que Chrome n'a pas encore
-confirmé ce runtime. Avec `reload_required=false`, aucun rechargement dans Chrome n'est nécessaire.
-Le seul redémarrage de l'ordinateur ou de Chrome n'impose jamais de réinstaller ni de recharger le
-Bridge. Il n'est pas nécessaire de recharger une page Suno. La commande choisit le répertoire
-d'application propre à chaque utilisateur sur macOS comme sur Windows ; ne déplacez pas et ne
-supprimez pas ce répertoire tant que Chrome utilise l'extension non empaquetée.
+La commande conserve l'état d'activation jusqu'à ce que Chrome authentifie exactement le runtime et
+l'appairage. La première extraction renvoie `status=installed`, `reload_required=null`,
+`runtime_ack_pending=true`, `pending_origin=load_unpacked` et
+`activation_required=load_unpacked` : terminez **Charger l'extension non empaquetée**, puis exécutez
+`sunox doctor --browser-bridge`. La seule présence des fichiers ne signifie pas que le Bridge est
+prêt.
+
+Lorsqu'une installation déjà authentifiée change, la commande renvoie `reload_required=true`,
+`runtime_ack_pending=true` et `activation_required=reload` : cliquez exactement une fois sur
+**Actualiser**, puis exécutez doctor. Si l'état Chrome d'une installation jamais authentifiée ou
+restaurée est incertain, `activation_required=ensure_loaded` ; `activation_options` contient des
+alternatives conditionnelles telles que `load_unpacked_if_missing` ou
+`enable_and_reload_if_present`. Ce sont des branches mutuellement exclusives, pas des étapes
+successives. Un paquet déjà à jour est sondé activement : une authentification exacte efface le
+marqueur et renvoie `reload_required=false`, `runtime_ack_pending=false` et aucune activation. Si
+l'état reste inconnu, la commande renvoie `reload_required=null` et
+`runtime_ack_pending=true` ; suivez l'unique décision `activation_required` au lieu de cliquer en
+boucle sur Actualiser.
+
+Doctor distingue un secret d'appairage absent ou corrompu mais réparable et prescrit une seule
+réparation gérée avec `install-browser-extension --force`. Les entrées dangereuses ou inaccessibles,
+notamment les liens symboliques, les données non UTF-8 et les chemins illisibles, échouent de manière
+fermée sans promettre que force ou Actualiser puissent les réparer. Une mise à jour du CLI seul, ou
+le seul redémarrage de l'ordinateur ou de Chrome, n'impose jamais à lui seul de réinstaller ni de
+recharger le Bridge. Il n'est pas nécessaire de recharger une page Suno. La commande choisit le
+répertoire d'application propre à chaque utilisateur sur macOS comme sur Windows ; ne déplacez pas
+et ne supprimez pas ce répertoire tant que Chrome utilise l'extension non empaquetée.
 
 ```text
 --captcha          Effectuer la vérification même si le contrôle initial ne la demande pas

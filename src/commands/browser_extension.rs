@@ -38,9 +38,14 @@ const INSTALL_LOCK_FILE: &str = "browser-extension-install.lock";
 const INSTALLATION_MARKER_FILE: &str = "browser-extension-installed";
 const INSTALLATION_MARKER_CONTENT: &str = "sunox-browser-bridge-installed\nschema=1\n";
 const RELOAD_PENDING_FILE: &str = "browser-extension-reload-pending";
+const RUNTIME_ACK_FILE: &str = "browser-extension-runtime-ack";
 const BRIDGE_SECRET_FILE: &str = "browser-extension-secret";
 const DEFAULT_EXTENSION_DIRECTORY: &str = "browser-extension";
-const INSTALL_BEHAVIOR_GUIDANCE: &str = "No Suno tab or browser window is opened. For a required challenge, the bridge creates a nonce-bound Suno iframe inside Chrome's invisible offscreen document, waits for the clean canonical page to stabilize, executes one silent challenge, removes the frame on every terminal path, and fails closed instead of creating a visible or minimized fallback; once paired, auto also fails closed instead of launching an isolated browser.";
+// Builds extracted from the v0.2.0 development branch briefly used the CLI
+// package version as manifest.version_name. Accept only these exact rendered
+// manifests while migrating to the stable Bridge runtime identity.
+const LEGACY_CURRENT_VERSION_NAMES: &[&str] = &["0.2.0"];
+const INSTALL_BEHAVIOR_GUIDANCE: &str = "No Suno tab or browser window is opened. For a required challenge, the bridge creates one credentialless, nonce-bound Suno iframe inside Chrome's invisible offscreen document, stops and replaces the host response with a provider-only challenge document, executes one silent challenge, removes the frame on every terminal path, and fails closed instead of creating a visible or minimized fallback; once paired, auto also fails closed instead of launching an isolated browser.";
 
 #[derive(Clone, Copy)]
 enum BundleAssetContents {
@@ -168,6 +173,9 @@ const LEGACY_035_DIGEST: &str = "0ebcdac8ffb3a851f4a3a11ed47b171cf235bfe6aa9ac6c
 // Pre-release extension tree on feature/fix-bridge-restart-recovery,
 // rendered as extension 0.3.6 / CLI 0.1.1.
 const LEGACY_036_DIGEST: &str = "8edcb5d071b691c34b1ae5db661ed69a22749ccb9df47da6f0e9635b7aff6945";
+// Pre-release v0.2.0 extension tree at runtime 0.3.16, before
+// manifest.version_name moved from the CLI version to the runtime identity.
+const LEGACY_0316_DIGEST: &str = "f686b5eefe76a23a1373b515f11b994da9d3be3a05661afaec28336e9a0dafef";
 
 #[derive(Clone, Copy)]
 struct LegacyLineage {
@@ -202,11 +210,81 @@ struct DirectorySnapshot {
 struct ReloadPendingMarker {
     runtime_build: String,
     secret_fingerprint: Option<String>,
+    activation: PendingActivation,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ReloadPendingState {
+    Missing,
+    Valid(ReloadPendingMarker),
+    Exposed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RuntimeAckMarker {
+    runtime_build: String,
+    secret_fingerprint: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PendingActivation {
+    LoadUnpacked,
+    Reload,
+    Restore,
+}
+
+impl PendingActivation {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::LoadUnpacked => "load_unpacked",
+            Self::Reload => "reload",
+            Self::Restore => "restore",
+        }
+    }
 }
 
 struct LoadedBridgeSecret {
     value: String,
-    created: bool,
+    persisted: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BridgePairingStatus {
+    Present,
+    Missing,
+    PairingMissing,
+    Corrupt,
+    BundleMissing,
+    BundleOutdated,
+    BundleCorrupt,
+    BundleUnrecognized,
+    Exposed,
+    UnsafeOrInaccessible,
+}
+
+impl BridgePairingStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Present => "present",
+            Self::Missing => "missing",
+            Self::PairingMissing => "pairing_missing",
+            Self::Corrupt => "corrupt",
+            Self::BundleMissing => "bundle_missing",
+            Self::BundleOutdated => "bundle_outdated",
+            Self::BundleCorrupt => "bundle_corrupt",
+            Self::BundleUnrecognized => "bundle_unrecognized",
+            Self::Exposed => "exposed",
+            Self::UnsafeOrInaccessible => "unsafe_or_inaccessible",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ManagedBundleOwnership {
+    Missing,
+    Empty,
+    Managed,
+    Unrecognized,
 }
 
 const LEGACY_LINEAGES: &[LegacyLineage] = &[
@@ -242,48 +320,157 @@ const LEGACY_LINEAGES: &[LegacyLineage] = &[
         files: LEGACY_034_036_FILES,
         digest: LEGACY_036_DIGEST,
     },
+    LegacyLineage {
+        extension_version: "0.3.16",
+        cli_version: Some("0.2.0"),
+        protocol_version: 3,
+        runtime_build: Some("0.3.16"),
+        files: LEGACY_034_036_FILES,
+        digest: LEGACY_0316_DIGEST,
+    },
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InstallOutcome {
     Installed,
+    Restored,
     Updated,
     AlreadyCurrent,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InstallRuntimeState {
+    reload_required: Option<bool>,
+    runtime_ack_pending: bool,
+    pending_origin: Option<PendingActivation>,
+}
+
 impl InstallOutcome {
-    fn status(self, reload_required: bool) -> &'static str {
-        if reload_required {
-            return "reload_pending";
-        }
+    fn status(self, runtime_state: InstallRuntimeState) -> &'static str {
         match self {
             Self::Installed => "installed",
+            Self::Restored => "restored",
+            Self::Updated
+                if matches!(
+                    runtime_state.pending_origin,
+                    Some(PendingActivation::LoadUnpacked | PendingActivation::Restore)
+                ) =>
+            {
+                "activation_pending"
+            }
+            Self::Updated if runtime_state.reload_required == Some(true) => "reload_pending",
+            Self::AlreadyCurrent if runtime_state.runtime_ack_pending => "runtime_ack_pending",
             Self::Updated => "updated",
             Self::AlreadyCurrent => "already_current",
         }
     }
 
-    fn reload_required(self, pending: bool) -> bool {
-        !matches!(self, Self::Installed) && pending
+    fn runtime_state(self, pending: Option<PendingActivation>) -> InstallRuntimeState {
+        InstallRuntimeState {
+            // Only a bundle changed by this invocation proves that Chrome must
+            // load new files. A pre-existing marker on an already-current
+            // bundle means that the exact runtime has not authenticated yet.
+            // Until a live probe succeeds, that state proves neither that
+            // Reload is still needed nor that it has already happened.
+            reload_required: match pending {
+                Some(PendingActivation::Reload) if matches!(self, Self::Updated) => Some(true),
+                Some(_) => None,
+                None => Some(false),
+            },
+            runtime_ack_pending: pending.is_some(),
+            pending_origin: pending,
+        }
+    }
+}
+
+fn activation_guidance(
+    outcome: InstallOutcome,
+    runtime_state: InstallRuntimeState,
+) -> (Option<&'static str>, Vec<&'static str>) {
+    match (outcome, runtime_state.pending_origin) {
+        (_, None) => (None, Vec::new()),
+        (InstallOutcome::Installed, Some(PendingActivation::LoadUnpacked)) => {
+            (Some("load_unpacked"), vec!["load_unpacked"])
+        }
+        (InstallOutcome::Updated, Some(PendingActivation::LoadUnpacked)) => (
+            Some("ensure_loaded"),
+            vec!["load_unpacked_if_missing", "enable_and_reload_if_present"],
+        ),
+        (InstallOutcome::AlreadyCurrent, Some(PendingActivation::LoadUnpacked)) => (
+            Some("ensure_loaded"),
+            vec![
+                "load_unpacked_if_missing",
+                "enable_if_disabled",
+                "reload_if_enabled_but_unresponsive",
+            ],
+        ),
+        (InstallOutcome::Updated, Some(PendingActivation::Reload)) => {
+            (Some("reload"), vec!["reload"])
+        }
+        (InstallOutcome::AlreadyCurrent, Some(PendingActivation::Reload)) => (
+            Some("ensure_loaded"),
+            vec![
+                "enable_if_disabled",
+                "reload_if_enabled_but_unresponsive_or_not_refreshed",
+            ],
+        ),
+        (InstallOutcome::Installed, Some(PendingActivation::Reload)) => {
+            (Some("load_unpacked"), vec!["load_unpacked"])
+        }
+        (InstallOutcome::Restored, Some(_)) => (
+            Some("ensure_loaded"),
+            vec!["load_unpacked_if_missing", "enable_and_reload_if_present"],
+        ),
+        (InstallOutcome::Installed, Some(PendingActivation::Restore)) => {
+            (Some("load_unpacked"), vec!["load_unpacked"])
+        }
+        (InstallOutcome::Updated, Some(PendingActivation::Restore))
+        | (InstallOutcome::AlreadyCurrent, Some(PendingActivation::Restore)) => (
+            Some("ensure_loaded"),
+            vec!["load_unpacked_if_missing", "enable_and_reload_if_present"],
+        ),
     }
 }
 
 struct BrowserExtensionInstallLock {
     file: File,
-    #[cfg(windows)]
     _config_dir: File,
-    #[cfg(windows)]
     config_dir_identity: DirectoryIdentity,
+    config_dir_was_exposed: bool,
 }
 
 impl BrowserExtensionInstallLock {
     fn acquire(config_dir: &Path) -> Result<Self, CliError> {
+        Self::acquire_with_exposure_policy(config_dir, true)?.ok_or_else(|| {
+            CliError::Config(
+                "the Browser Bridge configuration directory requires pairing rotation".into(),
+            )
+        })
+    }
+
+    fn acquire_for_ack(config_dir: &Path) -> Result<Option<Self>, CliError> {
+        Self::acquire_with_exposure_policy(config_dir, false)
+    }
+
+    fn acquire_with_exposure_policy(
+        config_dir: &Path,
+        repair_exposed_directory: bool,
+    ) -> Result<Option<Self>, CliError> {
         std::fs::create_dir_all(config_dir)?;
-        #[cfg(windows)]
-        let config_dir_handle = permissions::open_and_harden_locked_directory(config_dir)?;
-        #[cfg(windows)]
-        let config_dir_identity =
-            windows_directory_identity_from_handle(&config_dir_handle, config_dir)?;
+        let config_dir_handle = permissions::open_locked_directory_without_following_symlink(
+            config_dir,
+            "Sunox configuration directory",
+        )?;
+        let config_dir_was_exposed =
+            permissions::verify_owned_nonwritable_directory_handle(&config_dir_handle, config_dir)?
+                == permissions::PrivateObjectStatus::Exposed;
+        if config_dir_was_exposed && !repair_exposed_directory {
+            return Ok(None);
+        }
+        if config_dir_was_exposed {
+            permissions::harden_private_directory_handle(&config_dir_handle, config_dir)?;
+        }
+        let config_dir_identity = directory_identity_from_handle(&config_dir_handle, config_dir)?;
         let path = config_dir.join(INSTALL_LOCK_FILE);
         reject_symlink(&path, "Browser Bridge install lock")?;
         let mut options = OpenOptions::new();
@@ -302,16 +489,14 @@ impl BrowserExtensionInstallLock {
         })?;
         permissions::harden_private_file_handle(&file, &path)?;
         file.lock_exclusive()?;
-        Ok(Self {
+        Ok(Some(Self {
             file,
-            #[cfg(windows)]
             _config_dir: config_dir_handle,
-            #[cfg(windows)]
             config_dir_identity,
-        })
+            config_dir_was_exposed,
+        }))
     }
 
-    #[cfg(windows)]
     fn verify_config_directory(&self, config_dir: &Path) -> Result<(), CliError> {
         if directory_identity(config_dir)? == self.config_dir_identity {
             return Ok(());
@@ -320,6 +505,17 @@ impl BrowserExtensionInstallLock {
             "the Sunox configuration directory was replaced while acquiring the Browser Bridge install lock at {}",
             config_dir.display()
         )))
+    }
+
+    fn config_directory_was_exposed(&self) -> bool {
+        self.config_dir_was_exposed
+    }
+
+    fn config_directory_is_exposed_now(&self, config_dir: &Path) -> Result<bool, CliError> {
+        Ok(
+            permissions::verify_owned_nonwritable_directory_handle(&self._config_dir, config_dir)?
+                == permissions::PrivateObjectStatus::Exposed,
+        )
     }
 }
 
@@ -334,56 +530,131 @@ pub async fn install(args: InstallBrowserExtensionArgs, ctx: &AppContext) -> Res
         .ok_or_else(|| CliError::Config("could not resolve config directory".into()))?;
     let destination = resolve_install_destination(args.path, &config_dir)?;
     let outcome = install_bundle(&destination, &config_dir, args.force)?;
-    let reload_required = outcome.reload_required(reload_pending()?);
-    let next_steps = install_next_steps(outcome, reload_required);
+    let runtime_state = runtime_state_after_probe(outcome, &config_dir, async {
+        if let Err(error) = crate::captcha::probe_existing_bridge().await {
+            eprintln!(
+                "Warning: the current Browser Bridge runtime could not be probed after checking its files: {error}"
+            );
+        }
+    })
+    .await?;
+    let (activation_required, activation_options) = activation_guidance(outcome, runtime_state);
+    let next_steps = install_next_steps(outcome, runtime_state);
 
     match ctx.fmt {
         OutputFormat::Json => output::json::success(serde_json::json!({
             "installed": true,
-            "status": outcome.status(reload_required),
+            "status": outcome.status(runtime_state),
             "path": destination.display().to_string(),
-            "reload_required": reload_required,
+            "reload_required": runtime_state.reload_required,
+            "runtime_ack_pending": runtime_state.runtime_ack_pending,
+            "pending_origin": runtime_state.pending_origin.map(PendingActivation::as_str),
+            "activation_required": activation_required,
+            "activation_options": activation_options,
             "next_steps": next_steps,
         })),
         OutputFormat::Table => {
-            match (outcome, reload_required) {
-                (InstallOutcome::Installed, _) => {
+            match outcome {
+                InstallOutcome::Installed => {
                     eprintln!(
-                        "Extracted the Sunox Browser Bridge to: {}",
+                        "Extracted the Sunox Browser Bridge to: {} (reload_required=unknown, runtime_ack_pending=true, pending_origin=load_unpacked, activation_required=load_unpacked)",
                         destination.display()
                     );
                     eprintln!(
                         "Open chrome://extensions, enable Developer mode, choose Load unpacked, and select that directory."
                     );
-                }
-                (InstallOutcome::Updated, true) => {
                     eprintln!(
-                        "Updated the Sunox Browser Bridge at: {} (reload_required=true)",
+                        "Then run `sunox doctor --browser-bridge` to authenticate the loaded runtime. Do not click Reload before the extension has first been loaded."
+                    );
+                }
+                InstallOutcome::Restored if runtime_state.runtime_ack_pending => {
+                    eprintln!(
+                        "Restored the Sunox Browser Bridge files at: {} (reload_required=unknown, runtime_ack_pending=true, pending_origin=restore, activation_required=ensure_loaded; activation_options=load_unpacked_if_missing|enable_and_reload_if_present)",
                         destination.display()
                     );
                     eprintln!(
-                        "Open chrome://extensions and click Reload on the existing Sunox Browser Bridge."
+                        "In chrome://extensions: if no Sunox Browser Bridge card exists, choose Load unpacked and select that directory; if the card exists, enable it and click Reload once. Then run `sunox doctor --browser-bridge`."
                     );
                 }
-                (InstallOutcome::AlreadyCurrent, true) => {
+                InstallOutcome::Restored => {
                     eprintln!(
-                        "Sunox Browser Bridge files are current at: {}, but Chrome still needs Reload (reload_required=true)",
+                        "Restored the Sunox Browser Bridge files at: {} (reload_required=false, runtime_ack_pending=false)",
+                        destination.display()
+                    );
+                    eprintln!("The exact loaded runtime and pairing are already authenticated.");
+                }
+                InstallOutcome::Updated
+                    if runtime_state.pending_origin == Some(PendingActivation::Restore) =>
+                {
+                    eprintln!(
+                        "Updated restored Sunox Browser Bridge files before runtime acknowledgement at: {} (reload_required=unknown, runtime_ack_pending=true, pending_origin=restore, activation_required=ensure_loaded; activation_options=load_unpacked_if_missing|enable_and_reload_if_present)",
                         destination.display()
                     );
                     eprintln!(
-                        "Open chrome://extensions and click Reload on the existing Sunox Browser Bridge."
+                        "In chrome://extensions: if no Sunox Browser Bridge card exists, choose Load unpacked and select that directory; if the card exists, enable it and click Reload once because its files changed. Then run `sunox doctor --browser-bridge`."
                     );
                 }
-                (InstallOutcome::AlreadyCurrent, false) => {
+                InstallOutcome::Updated
+                    if runtime_state.pending_origin == Some(PendingActivation::LoadUnpacked) =>
+                {
                     eprintln!(
-                        "Sunox Browser Bridge files are already current at: {} (reload_required=false)",
+                        "Updated the Sunox Browser Bridge before its first runtime acknowledgement at: {} (reload_required=unknown, runtime_ack_pending=true, pending_origin=load_unpacked, activation_required=ensure_loaded; activation_options=load_unpacked_if_missing|enable_and_reload_if_present)",
+                        destination.display()
+                    );
+                    eprintln!(
+                        "In chrome://extensions: if no Sunox Browser Bridge card exists, choose Load unpacked and select that directory; if the card exists, ensure it is enabled and click Reload once because its files changed. Then run `sunox doctor --browser-bridge`."
+                    );
+                }
+                InstallOutcome::Updated if runtime_state.reload_required == Some(true) => {
+                    eprintln!(
+                        "Updated the Sunox Browser Bridge at: {} (reload_required=true, runtime_ack_pending=true, pending_origin=reload, activation_required=reload)",
+                        destination.display()
+                    );
+                    eprintln!(
+                        "Open chrome://extensions and click Reload once on the existing Sunox Browser Bridge, then run `sunox doctor --browser-bridge` to confirm the loaded runtime."
+                    );
+                }
+                InstallOutcome::AlreadyCurrent
+                    if runtime_state.pending_origin == Some(PendingActivation::LoadUnpacked) =>
+                {
+                    eprintln!(
+                        "Sunox Browser Bridge files are current at: {} (reload_required=unknown, runtime_ack_pending=true, pending_origin=load_unpacked, activation_required=ensure_loaded; activation_options=load_unpacked_if_missing|enable_if_disabled|reload_if_enabled_but_unresponsive)",
+                        destination.display()
+                    );
+                    eprintln!(
+                        "Chrome has not authenticated this installation. In chrome://extensions, choose Load unpacked only if no Sunox Browser Bridge card exists. If the card exists, enable it; if it was already enabled and this probe still failed, click Reload once. Then run `sunox doctor --browser-bridge`."
+                    );
+                }
+                InstallOutcome::AlreadyCurrent
+                    if runtime_state.pending_origin == Some(PendingActivation::Restore) =>
+                {
+                    eprintln!(
+                        "Sunox Browser Bridge restored files are current at: {} (reload_required=unknown, runtime_ack_pending=true, pending_origin=restore, activation_required=ensure_loaded; activation_options=load_unpacked_if_missing|enable_and_reload_if_present)",
+                        destination.display()
+                    );
+                    eprintln!(
+                        "In chrome://extensions: if no Sunox Browser Bridge card exists, choose Load unpacked and select that directory; if the card exists, enable it and click Reload once. Then run `sunox doctor --browser-bridge`."
+                    );
+                }
+                InstallOutcome::AlreadyCurrent if runtime_state.runtime_ack_pending => {
+                    eprintln!(
+                        "Sunox Browser Bridge files are current at: {} (reload_required=unknown, runtime_ack_pending=true, pending_origin=reload, activation_required=ensure_loaded; activation_options=enable_if_disabled|reload_if_enabled_but_unresponsive_or_not_refreshed)",
+                        destination.display()
+                    );
+                    eprintln!(
+                        "The loaded runtime has not authenticated yet. Ensure Chrome is running and the extension is enabled. If you have not reloaded it since the last Sunox update, click Reload once; then run `sunox doctor --browser-bridge`."
+                    );
+                }
+                InstallOutcome::AlreadyCurrent => {
+                    eprintln!(
+                        "Sunox Browser Bridge files are already current at: {} (reload_required=false, runtime_ack_pending=false)",
                         destination.display()
                     );
                     eprintln!("No Chrome reload is required.");
                 }
-                (InstallOutcome::Updated, false) => {
+                InstallOutcome::Updated => {
                     eprintln!(
-                        "Updated the Sunox Browser Bridge at: {} (reload_required=false)",
+                        "Updated the Sunox Browser Bridge at: {} (reload_required=false, runtime_ack_pending=false)",
                         destination.display()
                     );
                     eprintln!(
@@ -395,6 +666,26 @@ pub async fn install(args: InstallBrowserExtensionArgs, ctx: &AppContext) -> Res
         }
     }
     Ok(())
+}
+
+async fn runtime_state_after_probe(
+    outcome: InstallOutcome,
+    config_dir: &Path,
+    probe: impl std::future::Future<Output = ()>,
+) -> Result<InstallRuntimeState, CliError> {
+    let mut pending = reload_pending_at(config_dir)?.map(|marker| marker.activation);
+    if matches!(
+        outcome,
+        InstallOutcome::AlreadyCurrent | InstallOutcome::Restored
+    ) && pending.is_some()
+    {
+        probe.await;
+        // A successful exact runtime+secret probe clears the marker. Any
+        // other result leaves it intact and therefore remains explicitly
+        // unknown instead of being mistaken for another required Reload.
+        pending = reload_pending_at(config_dir)?.map(|marker| marker.activation);
+    }
+    Ok(outcome.runtime_state(pending))
 }
 
 fn resolve_install_destination(
@@ -414,25 +705,92 @@ fn resolve_install_destination(
     ))
 }
 
-fn install_next_steps(outcome: InstallOutcome, reload_required: bool) -> Vec<&'static str> {
-    match (outcome, reload_required) {
-        (InstallOutcome::Installed, _) => vec![
+fn install_next_steps(
+    outcome: InstallOutcome,
+    runtime_state: InstallRuntimeState,
+) -> Vec<&'static str> {
+    match outcome {
+        InstallOutcome::Installed => vec![
             "Open chrome://extensions",
             "Enable Developer mode",
             "Choose Load unpacked and select the reported path",
+            "Run `sunox doctor --browser-bridge` to authenticate the loaded runtime",
             "No Suno tab or browser window is created",
         ],
-        (_, true) => vec![
+        InstallOutcome::Restored if runtime_state.runtime_ack_pending => vec![
             "Open chrome://extensions",
-            "Click Reload on the existing extension",
+            "If no Sunox Browser Bridge card exists, enable Developer mode, choose Load unpacked, and select the reported path",
+            "If the card exists, enable it and click Reload once",
+            "Run `sunox doctor --browser-bridge` to authenticate the loaded runtime",
             "No Suno tab or browser window is created",
         ],
-        (InstallOutcome::AlreadyCurrent, false) => vec![
+        InstallOutcome::Restored => vec![
             "No Chrome reload is required",
             "Keep the extension enabled",
             "No Suno tab or browser window is created",
         ],
-        (InstallOutcome::Updated, false) => vec![
+        InstallOutcome::Updated
+            if runtime_state.pending_origin == Some(PendingActivation::Restore) =>
+        {
+            vec![
+                "Open chrome://extensions",
+                "If no Sunox Browser Bridge card exists, enable Developer mode, choose Load unpacked, and select the reported path",
+                "If the card exists, enable it and click Reload once because its files changed",
+                "Run `sunox doctor --browser-bridge` to authenticate the loaded runtime",
+                "No Suno tab or browser window is created",
+            ]
+        }
+        InstallOutcome::Updated
+            if runtime_state.pending_origin == Some(PendingActivation::LoadUnpacked) =>
+        {
+            vec![
+                "Open chrome://extensions",
+                "If no Sunox Browser Bridge card exists, choose Load unpacked and select the reported path",
+                "If the card exists, enable it and click Reload once because its files changed",
+                "Run `sunox doctor --browser-bridge` to confirm the loaded runtime",
+                "No Suno tab or browser window is created",
+            ]
+        }
+        InstallOutcome::Updated if runtime_state.reload_required == Some(true) => vec![
+            "Open chrome://extensions",
+            "Click Reload once on the existing extension",
+            "Run `sunox doctor --browser-bridge` to confirm the loaded runtime",
+            "No Suno tab or browser window is created",
+        ],
+        InstallOutcome::AlreadyCurrent
+            if runtime_state.pending_origin == Some(PendingActivation::LoadUnpacked) =>
+        {
+            vec![
+                "Open chrome://extensions",
+                "If no Sunox Browser Bridge card exists, enable Developer mode, choose Load unpacked, and select the reported path",
+                "If the card exists, enable it; if it was already enabled and the probe still failed, click Reload once",
+                "Run `sunox doctor --browser-bridge` to authenticate the loaded runtime",
+                "No Suno tab or browser window is created",
+            ]
+        }
+        InstallOutcome::AlreadyCurrent
+            if runtime_state.pending_origin == Some(PendingActivation::Restore) =>
+        {
+            vec![
+                "Open chrome://extensions",
+                "If no Sunox Browser Bridge card exists, enable Developer mode, choose Load unpacked, and select the reported path",
+                "If the card exists, enable it and click Reload once",
+                "Run `sunox doctor --browser-bridge` to authenticate the loaded runtime",
+                "No Suno tab or browser window is created",
+            ]
+        }
+        InstallOutcome::AlreadyCurrent if runtime_state.runtime_ack_pending => vec![
+            "Ensure Chrome is running and the extension is enabled",
+            "If it has not been reloaded since the last Sunox update, click Reload once",
+            "Run `sunox doctor --browser-bridge` to confirm the loaded runtime",
+            "No Suno tab or browser window is created",
+        ],
+        InstallOutcome::AlreadyCurrent => vec![
+            "No Chrome reload is required",
+            "Keep the extension enabled",
+            "No Suno tab or browser window is created",
+        ],
+        InstallOutcome::Updated => vec![
             "The current Browser Bridge runtime already acknowledged this update",
             "No Chrome reload is required",
             "No Suno tab or browser window is created",
@@ -445,12 +803,14 @@ fn install_bundle(
     config_dir: &Path,
     force: bool,
 ) -> Result<InstallOutcome, CliError> {
+    reject_config_directory_symlink(config_dir)?;
     reject_destination_symlink(destination)?;
     let (_, locked_config_dir) = resolve_and_validate_install_paths(destination, config_dir)?;
     let _lock = BrowserExtensionInstallLock::acquire(&locked_config_dir)?;
     // Resolve again after acquiring the lock. This closes the window where a
     // path component could be replaced with a symlink while this process was
     // waiting for another installer.
+    reject_config_directory_symlink(config_dir)?;
     reject_destination_symlink(destination)?;
     let (resolved_destination, resolved_config_dir) =
         resolve_and_validate_install_paths(destination, config_dir)?;
@@ -461,9 +821,18 @@ fn install_bundle(
             resolved_config_dir.display()
         )));
     }
-    #[cfg(windows)]
     _lock.verify_config_directory(&resolved_config_dir)?;
     let destination = resolved_destination.as_path();
+    let prior_pending = reload_pending_at(&resolved_config_dir)?;
+    let _ = runtime_ack_at(&resolved_config_dir)?;
+    let _ = installation_marker_recorded_at(&resolved_config_dir)?;
+    let bridge_artifacts_recorded = bridge_artifact_entry_exists_at(&resolved_config_dir)?;
+    let pairing_status = if _lock.config_directory_was_exposed() && bridge_artifacts_recorded {
+        BridgePairingStatus::Exposed
+    } else {
+        bridge_pairing_status_at(&resolved_config_dir)
+    };
+    let installation_recorded = bridge_artifacts_recorded;
 
     let existed = destination.exists();
     let mut had_existing_bundle = false;
@@ -475,13 +844,14 @@ fn install_bundle(
                 destination.display()
             )));
         }
-        if !force {
+        let destination_is_empty = directory_is_empty(destination)?;
+        if !force && !destination_is_empty {
             return Err(CliError::Config(format!(
                 "{} already exists — pass --force to update it",
                 destination.display()
             )));
         }
-        if !directory_is_empty(destination)? {
+        if !destination_is_empty {
             had_existing_bundle = true;
             if !is_managed_bundle(destination)? {
                 return Err(CliError::Config(format!(
@@ -498,7 +868,10 @@ fn install_bundle(
         None
     };
 
-    let loaded_secret = load_or_create_secret(&resolved_config_dir)?;
+    let loaded_secret = load_or_prepare_secret(
+        &resolved_config_dir,
+        pairing_status == BridgePairingStatus::Exposed,
+    )?;
     let parent = destination
         .parent()
         .ok_or_else(|| CliError::Config("extension path has no parent directory".into()))?;
@@ -527,22 +900,42 @@ fn install_bundle(
                 || pending.secret_fingerprint.as_deref()
                     != Some(current_secret_fingerprint.as_str())
             {
-                mark_reload_pending_locked(
+                mark_runtime_ack_pending_locked(
                     &resolved_config_dir,
                     BROWSER_BRIDGE_RUNTIME_BUILD,
                     &loaded_secret.value,
+                    pending.activation,
                 )?;
             }
+        } else if !runtime_ack_matches_at(
+            &resolved_config_dir,
+            BROWSER_BRIDGE_RUNTIME_BUILD,
+            &loaded_secret.value,
+        )? {
+            // Files without either pending evidence or an exact durable
+            // acknowledgement are not proof that Chrome ever loaded and
+            // authenticated this bundle. Re-establish a conservative state so
+            // the caller probes the live runtime before reporting readiness.
+            mark_runtime_ack_pending_locked(
+                &resolved_config_dir,
+                BROWSER_BRIDGE_RUNTIME_BUILD,
+                &loaded_secret.value,
+                PendingActivation::Restore,
+            )?;
         }
         record_installation_locked(&resolved_config_dir)?;
         return Ok(InstallOutcome::AlreadyCurrent);
     }
 
     if had_existing_bundle {
-        let (install_secret, persist_after_swap) = if loaded_secret.created {
-            (loaded_secret.value, false)
-        } else {
+        let pending_activation = prior_pending
+            .as_ref()
+            .map(|marker| marker.activation)
+            .unwrap_or(PendingActivation::Reload);
+        let (install_secret, persist_after_swap) = if loaded_secret.persisted {
             (new_bridge_secret(), true)
+        } else {
+            (loaded_secret.value, true)
         };
         write_private_asset(
             staging.path(),
@@ -558,17 +951,72 @@ fn install_bundle(
                 .expect("existing managed bundle has a captured snapshot"),
             &install_secret,
             persist_after_swap,
+            pending_activation,
         )?;
     } else {
-        replace_directory(staging, destination, existing_snapshot.as_ref(), || Ok(()))?;
+        // The bundle becomes usable only after Chrome loads this exact build
+        // with this pairing secret. Commit that activation expectation as part
+        // of the directory swap so a marker failure cannot leave a successful
+        // installation that falsely reports an acknowledged runtime.
+        let pending_activation = if installation_recorded {
+            PendingActivation::Restore
+        } else {
+            PendingActivation::LoadUnpacked
+        };
+        let (install_secret, persist_after_swap) =
+            if installation_recorded && loaded_secret.persisted {
+                // Restoring a missing bundle must not reuse an old positive
+                // acknowledgement: the Chrome card may have disappeared with the
+                // directory. Rotate the pairing so the restored files require a
+                // fresh authenticated runtime.
+                (new_bridge_secret(), true)
+            } else {
+                let persist_after_swap = !loaded_secret.persisted;
+                (loaded_secret.value, persist_after_swap)
+            };
+        write_private_asset(
+            staging.path(),
+            "config.js",
+            render_config(&install_secret).as_bytes(),
+        )?;
+        // Persist pending evidence before the staged directory becomes live.
+        // A crash or failed swap may leave a conservative stale marker, but
+        // can never leave unauthenticated files that look acknowledged.
+        mark_runtime_ack_pending_locked(
+            &resolved_config_dir,
+            BROWSER_BRIDGE_RUNTIME_BUILD,
+            &install_secret,
+            pending_activation,
+        )?;
+        replace_directory(staging, destination, existing_snapshot.as_ref(), || {
+            if persist_after_swap {
+                persist_rotated_secret(&resolved_config_dir, &install_secret)
+            } else {
+                Ok(())
+            }
+        })?;
     }
     harden_bundle_permissions(destination)?;
     record_installation_locked(&resolved_config_dir)?;
     Ok(if had_existing_bundle {
         InstallOutcome::Updated
+    } else if installation_recorded {
+        InstallOutcome::Restored
     } else {
         InstallOutcome::Installed
     })
+}
+
+fn reject_config_directory_symlink(config_dir: &Path) -> Result<(), CliError> {
+    match std::fs::symlink_metadata(config_dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(CliError::Config(format!(
+            "the Sunox configuration directory {} is a symbolic link and Browser Bridge installation will not follow it",
+            config_dir.display()
+        ))),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(CliError::Io(error)),
+    }
 }
 
 fn reject_destination_symlink(destination: &Path) -> Result<(), CliError> {
@@ -719,9 +1167,7 @@ fn is_recognizable_legacy_bundle(
     let extension_version = manifest["version"].as_str();
     let cli_version = manifest["version_name"].as_str();
 
-    if extension_version == Some(BROWSER_BRIDGE_RUNTIME_BUILD)
-        && cli_version == Some(env!("CARGO_PKG_VERSION"))
-    {
+    if manifest_bytes_match_current_runtime(manifest_text.as_bytes()) {
         return current_bundle_without_sentinel_matches(directory, entries);
     }
 
@@ -798,7 +1244,9 @@ fn current_bundle_without_sentinel_matches(
                 }
             }
             BundleAssetContents::RenderedManifest => {
-                if std::fs::read(directory.join(asset.path))? != render_manifest().as_bytes() {
+                if !manifest_bytes_match_current_runtime(&std::fs::read(
+                    directory.join(asset.path),
+                )?) {
                     return Ok(false);
                 }
             }
@@ -1044,6 +1492,37 @@ fn directory_identity(directory: &Path) -> Result<DirectoryIdentity, CliError> {
     }
 }
 
+fn directory_identity_from_handle(
+    directory: &File,
+    path: &Path,
+) -> Result<DirectoryIdentity, CliError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = directory.metadata()?;
+        if !metadata.is_dir() {
+            return Err(CliError::Config(format!(
+                "{} is not a regular directory",
+                path.display()
+            )));
+        }
+        return Ok(DirectoryIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        });
+    }
+    #[cfg(windows)]
+    {
+        return windows_directory_identity_from_handle(directory, path);
+    }
+    #[allow(unreachable_code)]
+    Err(CliError::Config(format!(
+        "directory identity is unsupported for {} on this platform",
+        path.display()
+    )))
+}
+
 #[cfg(windows)]
 fn windows_directory_identity_from_handle(
     directory: &File,
@@ -1095,18 +1574,60 @@ fn bundles_equal(expected: &Path, actual: &Path) -> Result<bool, CliError> {
         return Ok(false);
     }
     for name in actual_names {
-        if std::fs::read(expected.join(&name))? != std::fs::read(actual.join(&name))? {
+        let expected_contents = std::fs::read(expected.join(&name))?;
+        let actual_contents = std::fs::read(actual.join(&name))?;
+        if name == "manifest.json"
+            && expected_contents == render_manifest().as_bytes()
+            && manifest_bytes_match_current_runtime(&actual_contents)
+        {
+            continue;
+        }
+        if expected_contents != actual_contents {
             return Ok(false);
         }
     }
     Ok(true)
 }
 
+fn manifest_bytes_match_current_runtime(contents: &[u8]) -> bool {
+    contents == render_manifest().as_bytes()
+        || LEGACY_CURRENT_VERSION_NAMES.iter().any(|version_name| {
+            contents == render_manifest_with_version_name(version_name).as_bytes()
+        })
+}
+
 fn render_config(secret: &str) -> String {
-    CONFIG_TEMPLATE
+    render_config_template(
+        CONFIG_TEMPLATE,
+        PROTOCOL_VERSION,
+        Some(BROWSER_BRIDGE_RUNTIME_BUILD),
+        secret,
+    )
+}
+
+fn render_lineage_config(lineage: &LegacyLineage, secret: &str) -> String {
+    render_config_template(
+        if lineage.runtime_build.is_some() {
+            CONFIG_TEMPLATE
+        } else {
+            LEGACY_CONFIG_TEMPLATE
+        },
+        lineage.protocol_version,
+        lineage.runtime_build,
+        secret,
+    )
+}
+
+fn render_config_template(
+    template: &str,
+    protocol_version: u8,
+    runtime_build: Option<&str>,
+    secret: &str,
+) -> String {
+    let mut rendered = template
         .replace(
             "__SUNOX_BRIDGE_PROTOCOL_VERSION__",
-            &PROTOCOL_VERSION.to_string(),
+            &protocol_version.to_string(),
         )
         .replace(
             "__SUNOX_BRIDGE_PORT_START__",
@@ -1116,43 +1637,52 @@ fn render_config(secret: &str) -> String {
             "__SUNOX_BRIDGE_PORT_COUNT__",
             &LOOPBACK_PORT_COUNT.to_string(),
         )
-        .replace(
-            "__SUNOX_BRIDGE_RUNTIME_BUILD__",
-            BROWSER_BRIDGE_RUNTIME_BUILD,
-        )
-        .replace("__SUNOX_BRIDGE_SECRET__", secret)
+        .replace("__SUNOX_BRIDGE_SECRET__", secret);
+    if let Some(runtime_build) = runtime_build {
+        rendered = rendered.replace("__SUNOX_BRIDGE_RUNTIME_BUILD__", runtime_build);
+    }
+    rendered
 }
 
 fn render_manifest() -> String {
+    render_manifest_with_version_name(BROWSER_BRIDGE_RUNTIME_BUILD)
+}
+
+fn render_manifest_with_version_name(version_name: &str) -> String {
     MANIFEST
         .replace(
             "__SUNOX_BRIDGE_RUNTIME_BUILD__",
             BROWSER_BRIDGE_RUNTIME_BUILD,
         )
-        .replace("__SUNOX_VERSION__", env!("CARGO_PKG_VERSION"))
+        .replacen(
+            &format!("\"version_name\": \"{BROWSER_BRIDGE_RUNTIME_BUILD}\""),
+            &format!("\"version_name\": \"{version_name}\""),
+            1,
+        )
 }
 
-fn load_or_create_secret(config_dir: &Path) -> Result<LoadedBridgeSecret, CliError> {
+fn load_or_prepare_secret(
+    config_dir: &Path,
+    rotate_exposed_secret: bool,
+) -> Result<LoadedBridgeSecret, CliError> {
     std::fs::create_dir_all(config_dir)?;
-    #[cfg(windows)]
-    permissions::harden_private_directory(config_dir)?;
     let path = config_dir.join(BRIDGE_SECRET_FILE);
-    if let Some(secret) = read_file_without_following_symlink(&path, "browser extension secret")? {
-        let secret = secret.trim();
-        if valid_secret(secret) {
-            permissions::harden_private_file(&path)?;
-            return Ok(LoadedBridgeSecret {
-                value: secret.to_string(),
-                created: false,
-            });
+    if !rotate_exposed_secret {
+        match read_private_file_without_following_symlink(&path, "browser extension secret")? {
+            PrivateFileRead::Private(secret) if valid_secret(secret.trim()) => {
+                return Ok(LoadedBridgeSecret {
+                    value: secret.trim().to_string(),
+                    persisted: true,
+                });
+            }
+            PrivateFileRead::Missing | PrivateFileRead::Private(_) | PrivateFileRead::Exposed => {}
         }
     }
 
     let secret = new_bridge_secret();
-    atomic_write_private_file(&path, secret.as_bytes(), "browser extension secret")?;
     Ok(LoadedBridgeSecret {
         value: secret,
-        created: true,
+        persisted: false,
     })
 }
 
@@ -1211,9 +1741,18 @@ fn valid_secret(secret: &str) -> bool {
 }
 
 fn read_bridge_secret(path: &Path) -> Result<Option<String>, CliError> {
-    let secret = match read_file_without_following_symlink(path, "browser extension secret")? {
-        Some(secret) => secret,
-        None => return Ok(None),
+    let secret = match read_private_file_without_following_symlink(
+        path,
+        "browser extension secret",
+    )? {
+        PrivateFileRead::Private(secret) => secret,
+        PrivateFileRead::Missing => return Ok(None),
+        PrivateFileRead::Exposed => {
+            return Err(CliError::Config(format!(
+                "browser extension secret at {} is more permissive than the private-file policy and will not be trusted; run `sunox install-browser-extension --force` to rotate it",
+                path.display()
+            )));
+        }
     };
     let secret = secret.trim();
     if !valid_secret(secret) {
@@ -1223,6 +1762,54 @@ fn read_bridge_secret(path: &Path) -> Result<Option<String>, CliError> {
         ));
     }
     Ok(Some(secret.to_string()))
+}
+
+enum PrivateFileRead {
+    Missing,
+    Private(String),
+    Exposed,
+}
+
+fn read_private_file_without_following_symlink(
+    path: &Path,
+    description: &str,
+) -> Result<PrivateFileRead, CliError> {
+    reject_symlink(path, description)?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_no_follow(&mut options);
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PrivateFileRead::Missing);
+        }
+        Err(error) => {
+            return Err(CliError::Config(format!(
+                "could not read {description} at {}: {error}",
+                path.display()
+            )));
+        }
+    };
+    if permissions::verify_private_file_handle(&file, path)?
+        == permissions::PrivateObjectStatus::Exposed
+    {
+        return Ok(PrivateFileRead::Exposed);
+    }
+    let mut contents = Vec::new();
+    file.read_to_end(&mut contents).map_err(|error| {
+        CliError::Config(format!(
+            "could not read {description} at {}: {error}",
+            path.display()
+        ))
+    })?;
+    String::from_utf8(contents)
+        .map(PrivateFileRead::Private)
+        .map_err(|error| {
+            CliError::Config(format!(
+                "could not read {description} at {} as UTF-8: {error}",
+                path.display()
+            ))
+        })
 }
 
 fn read_file_without_following_symlink(
@@ -1306,82 +1893,443 @@ fn record_installation_locked(config_dir: &Path) -> Result<(), CliError> {
     )
 }
 
-fn installation_evidence_at(config_dir: &Path) -> Result<bool, CliError> {
-    let marker = config_dir.join(INSTALLATION_MARKER_FILE);
-    match read_file_without_following_symlink(&marker, "Browser Bridge installation marker")? {
-        Some(contents) if contents == INSTALLATION_MARKER_CONTENT => return Ok(true),
-        Some(_) => {
-            return Err(CliError::Config(format!(
-                "Browser Bridge installation marker at {} is corrupt; run `sunox install-browser-extension --force`",
-                marker.display()
-            )));
+fn bridge_artifact_entry_exists_at(config_dir: &Path) -> Result<bool, CliError> {
+    for name in [
+        BRIDGE_SECRET_FILE,
+        INSTALLATION_MARKER_FILE,
+        RELOAD_PENDING_FILE,
+        RUNTIME_ACK_FILE,
+    ] {
+        match std::fs::symlink_metadata(config_dir.join(name)) {
+            Ok(_) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(CliError::Io(error)),
         }
-        None => {}
     }
+    let bundle = config_dir.join(DEFAULT_EXTENSION_DIRECTORY);
+    match std::fs::symlink_metadata(&bundle) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            Ok(!directory_is_empty(&bundle)?)
+        }
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(CliError::Io(error)),
+    }
+}
 
-    // v0.1.x did not persist the installation marker. Safely recognize its
-    // default managed bundle so an upgraded installation still fails closed
-    // if the pairing secret is later lost.
-    let default_bundle = config_dir.join(DEFAULT_EXTENSION_DIRECTORY);
-    match std::fs::symlink_metadata(&default_bundle) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-            return Err(CliError::Config(format!(
-                "reserved Browser Bridge path {} exists but is not a regular managed directory",
-                default_bundle.display()
-            )));
+fn managed_bundle_ownership_at(config_dir: &Path) -> Result<ManagedBundleOwnership, CliError> {
+    let bundle = config_dir.join(DEFAULT_EXTENSION_DIRECTORY);
+    let metadata = match std::fs::symlink_metadata(&bundle) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ManagedBundleOwnership::Missing);
         }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(CliError::Config(format!(
-                "could not inspect Browser Bridge installation evidence at {}: {error}",
-                default_bundle.display()
-            )));
+        Err(error) => return Err(CliError::Io(error)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Ok(ManagedBundleOwnership::Unrecognized);
+    }
+    if directory_is_empty(&bundle)? {
+        return Ok(ManagedBundleOwnership::Empty);
+    }
+    Ok(if is_managed_bundle(&bundle)? {
+        ManagedBundleOwnership::Managed
+    } else {
+        ManagedBundleOwnership::Unrecognized
+    })
+}
+
+fn installation_evidence_at(config_dir: &Path) -> Result<bool, CliError> {
+    if !bridge_artifact_entry_exists_at(config_dir)? {
+        return Ok(false);
+    }
+    validate_reserved_state_entries_at(config_dir)?;
+    if managed_bundle_ownership_at(config_dir)? == ManagedBundleOwnership::Unrecognized {
+        return Err(CliError::Config(format!(
+            "reserved Browser Bridge path {} contains an unrecognized entry that Sunox will not overwrite",
+            config_dir.join(DEFAULT_EXTENSION_DIRECTORY).display()
+        )));
+    }
+    Ok(true)
+}
+
+fn installation_marker_recorded_at(config_dir: &Path) -> Result<bool, CliError> {
+    let marker = config_dir.join(INSTALLATION_MARKER_FILE);
+    match read_private_file_without_following_symlink(
+        &marker,
+        "Browser Bridge installation marker",
+    )? {
+        PrivateFileRead::Private(contents) if contents == INSTALLATION_MARKER_CONTENT => {
+            return Ok(true);
         }
+        // This marker carries no secret or activation decision. Any owned
+        // regular but stale/exposed contents remain conservative artifact
+        // evidence and may be atomically rebuilt by the force installer.
+        PrivateFileRead::Private(_) | PrivateFileRead::Missing | PrivateFileRead::Exposed => {}
     }
-    if is_managed_bundle(&default_bundle)? {
-        return Ok(true);
-    }
-    Err(CliError::Config(format!(
-        "reserved Browser Bridge path {} exists but its managed installation evidence is invalid; run `sunox install-browser-extension --force`",
-        default_bundle.display()
-    )))
+    Ok(false)
+}
+
+fn validate_reserved_state_entries_at(config_dir: &Path) -> Result<(), CliError> {
+    let _ = installation_marker_recorded_at(config_dir)?;
+    let _ = reload_pending_state_at(config_dir)?;
+    let _ = runtime_ack_at(config_dir)?;
+    Ok(())
 }
 
 pub(crate) fn bridge_secret() -> Result<Option<String>, CliError> {
     let Some(config_dir) = crate::core::project_config_dir() else {
         return Ok(None);
     };
+    trusted_bridge_secret_at(&config_dir)
+}
+
+fn trusted_bridge_secret_at(config_dir: &Path) -> Result<Option<String>, CliError> {
+    match bridge_pairing_status_at(config_dir) {
+        BridgePairingStatus::Present => {}
+        BridgePairingStatus::Missing => return Ok(None),
+        BridgePairingStatus::PairingMissing => {
+            return Err(CliError::Config(
+                "the Browser Bridge installation is recorded, but its pairing secret is missing; run `sunox install-browser-extension --force` once to rebuild it".into(),
+            ));
+        }
+        BridgePairingStatus::Corrupt => {
+            return Err(CliError::Config(
+                "Browser Bridge pairing material is inconsistent or corrupt; run `sunox install-browser-extension --force`".into(),
+            ));
+        }
+        BridgePairingStatus::BundleMissing => {
+            return Err(CliError::Config(
+                "Browser Bridge pairing exists, but its managed bundle is missing; run `sunox install-browser-extension --force` once to restore it".into(),
+            ));
+        }
+        BridgePairingStatus::BundleOutdated => {
+            return Err(CliError::Config(
+                "Browser Bridge pairing and managed bundle are valid, but the recognized Bridge runtime is outdated; run `sunox install-browser-extension --force` once to update it, then follow the command's activation guidance".into(),
+            ));
+        }
+        BridgePairingStatus::BundleCorrupt => {
+            return Err(CliError::Config(
+                "Browser Bridge pairing exists, but its managed bundle is incomplete or modified; run `sunox install-browser-extension --force` once to replace it".into(),
+            ));
+        }
+        BridgePairingStatus::BundleUnrecognized => {
+            return Err(CliError::Config(
+                "the reserved Browser Bridge path contains a bundle whose Sunox ownership cannot be proven. Sunox will not use or overwrite it; inspect the per-user configuration path manually".into(),
+            ));
+        }
+        BridgePairingStatus::Exposed => {
+            return Err(CliError::Config(
+                "Browser Bridge pairing material is more permissive than the private-file policy and will not be trusted; run `sunox install-browser-extension --force` to rotate it".into(),
+            ));
+        }
+        BridgePairingStatus::UnsafeOrInaccessible => {
+            return Err(CliError::Config(
+                "Browser Bridge pairing or managed activation state cannot be read safely; inspect the reserved Browser Bridge entries in the per-user Sunox configuration path before retrying".into(),
+            ));
+        }
+    }
     let path = config_dir.join(BRIDGE_SECRET_FILE);
     read_bridge_secret(&path)
+}
+
+pub(crate) fn bridge_pairing_status() -> BridgePairingStatus {
+    let Some(config_dir) = crate::core::project_config_dir() else {
+        return BridgePairingStatus::Missing;
+    };
+    bridge_pairing_status_at(&config_dir)
+}
+
+fn bridge_pairing_status_at(config_dir: &Path) -> BridgePairingStatus {
+    let config_directory_status =
+        match private_directory_status_at(config_dir, true, "Sunox configuration directory") {
+            Ok(None) => return BridgePairingStatus::Missing,
+            Ok(Some(status)) => status,
+            Err(_) => return BridgePairingStatus::UnsafeOrInaccessible,
+        };
+    match bridge_artifact_entry_exists_at(config_dir) {
+        Ok(false) => return BridgePairingStatus::Missing,
+        Ok(true) => {}
+        Err(_) => return BridgePairingStatus::UnsafeOrInaccessible,
+    }
+    if validate_reserved_state_entries_at(config_dir).is_err() {
+        return BridgePairingStatus::UnsafeOrInaccessible;
+    }
+    let bundle_ownership = match managed_bundle_ownership_at(config_dir) {
+        Ok(ManagedBundleOwnership::Unrecognized) => {
+            return BridgePairingStatus::BundleUnrecognized;
+        }
+        Ok(ownership) => ownership,
+        Err(_) => return BridgePairingStatus::UnsafeOrInaccessible,
+    };
+    if config_directory_status == permissions::PrivateObjectStatus::Exposed {
+        return BridgePairingStatus::Exposed;
+    }
+
+    let secret = match read_private_file_without_following_symlink(
+        &config_dir.join(BRIDGE_SECRET_FILE),
+        "browser extension secret",
+    ) {
+        Ok(PrivateFileRead::Missing) => return BridgePairingStatus::PairingMissing,
+        Ok(PrivateFileRead::Exposed) => return BridgePairingStatus::Exposed,
+        Ok(PrivateFileRead::Private(secret)) if valid_secret(secret.trim()) => secret,
+        Ok(PrivateFileRead::Private(_)) => return BridgePairingStatus::Corrupt,
+        Err(_) => return BridgePairingStatus::UnsafeOrInaccessible,
+    };
+
+    if matches!(
+        bundle_ownership,
+        ManagedBundleOwnership::Missing | ManagedBundleOwnership::Empty
+    ) {
+        return BridgePairingStatus::BundleMissing;
+    }
+
+    let bundle = config_dir.join(DEFAULT_EXTENSION_DIRECTORY);
+    match private_directory_status_at(&bundle, false, "Browser Bridge bundle directory") {
+        Ok(None) => BridgePairingStatus::BundleMissing,
+        Ok(Some(permissions::PrivateObjectStatus::Exposed)) => BridgePairingStatus::Exposed,
+        Ok(Some(permissions::PrivateObjectStatus::Private)) => {
+            match read_private_file_without_following_symlink(
+                &bundle.join("config.js"),
+                "Browser Bridge rendered configuration",
+            ) {
+                Ok(PrivateFileRead::Exposed) => BridgePairingStatus::Exposed,
+                Ok(PrivateFileRead::Private(config)) => match (
+                    config == render_config(secret.trim()),
+                    current_managed_bundle_matches_at(&bundle),
+                ) {
+                    (true, Ok(true)) => BridgePairingStatus::Present,
+                    (_, Err(_)) => BridgePairingStatus::UnsafeOrInaccessible,
+                    _ => match known_outdated_bundle_matches_at(&bundle, secret.trim()) {
+                        Ok(true) => BridgePairingStatus::BundleOutdated,
+                        Ok(false) => BridgePairingStatus::BundleCorrupt,
+                        Err(_) => BridgePairingStatus::UnsafeOrInaccessible,
+                    },
+                },
+                Ok(PrivateFileRead::Missing) => BridgePairingStatus::BundleCorrupt,
+                Err(_) => BridgePairingStatus::UnsafeOrInaccessible,
+            }
+        }
+        Err(_) => BridgePairingStatus::UnsafeOrInaccessible,
+    }
+}
+
+fn current_managed_bundle_matches_at(bundle: &Path) -> Result<bool, CliError> {
+    let mut entries = bundle_file_names(bundle)?;
+    if !entries.remove(MANAGED_SENTINEL)
+        || read_file_without_following_symlink(
+            &bundle.join(MANAGED_SENTINEL),
+            "Browser Bridge managed marker",
+        )?
+        .as_deref()
+            != Some(MANAGED_SENTINEL_CONTENT)
+    {
+        return Ok(false);
+    }
+    current_bundle_without_sentinel_matches(bundle, &entries)
+}
+
+fn known_outdated_bundle_matches_at(bundle: &Path, secret: &str) -> Result<bool, CliError> {
+    let mut entries = bundle_file_names(bundle)?;
+    match read_file_without_following_symlink(
+        &bundle.join(MANAGED_SENTINEL),
+        "Browser Bridge managed marker",
+    )? {
+        Some(contents) if contents == MANAGED_SENTINEL_CONTENT => {
+            entries.remove(MANAGED_SENTINEL);
+        }
+        Some(_) => return Ok(false),
+        None => {}
+    }
+
+    let manifest_text = match read_file_without_following_symlink(
+        &bundle.join("manifest.json"),
+        "Browser Bridge manifest",
+    )? {
+        Some(manifest) => manifest,
+        None => return Ok(false),
+    };
+    let Ok(manifest): Result<serde_json::Value, _> = serde_json::from_str(&manifest_text) else {
+        return Ok(false);
+    };
+    if manifest["manifest_version"] != 3
+        || manifest["name"] != "Sunox Browser Bridge"
+        || manifest["background"]["service_worker"] != "service-worker.js"
+    {
+        return Ok(false);
+    }
+    let Some(lineage) = find_legacy_lineage(
+        manifest["version"].as_str(),
+        manifest["version_name"].as_str(),
+    ) else {
+        return Ok(false);
+    };
+    if entries != bundle_file_set(lineage.files)
+        || immutable_bundle_digest(bundle, lineage.files)? != lineage.digest
+    {
+        return Ok(false);
+    }
+    let config = read_file_without_following_symlink(
+        &bundle.join("config.js"),
+        "Browser Bridge rendered configuration",
+    )?;
+    Ok(config.as_deref() == Some(render_lineage_config(lineage, secret).as_str()))
+}
+
+fn private_directory_status_at(
+    path: &Path,
+    outer_config_directory: bool,
+    description: &str,
+) -> Result<Option<permissions::PrivateObjectStatus>, CliError> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Err(CliError::Config(format!(
+                "{description} at {} is not a regular directory",
+                path.display()
+            )));
+        }
+        Err(error) => return Err(CliError::Io(error)),
+    }
+    let directory = permissions::open_directory_without_following_symlink(path, description)?;
+    let status = if outer_config_directory {
+        permissions::verify_owned_nonwritable_directory_handle(&directory, path)?
+    } else {
+        permissions::verify_private_directory_handle(&directory, path)?
+    };
+    Ok(Some(status))
 }
 
 pub(crate) fn bridge_is_configured() -> Result<bool, CliError> {
     let Some(config_dir) = crate::core::project_config_dir() else {
         return Ok(false);
     };
-    if read_bridge_secret(&config_dir.join(BRIDGE_SECRET_FILE))?.is_some() {
-        return Ok(true);
+    bridge_is_configured_at(&config_dir)
+}
+
+fn bridge_is_configured_at(config_dir: &Path) -> Result<bool, CliError> {
+    match bridge_pairing_status_at(config_dir) {
+        BridgePairingStatus::Present => return Ok(true),
+        BridgePairingStatus::Missing => {}
+        BridgePairingStatus::PairingMissing => {
+            return Err(CliError::Config(
+                "Browser Bridge installation evidence exists but its pairing secret is missing; rebuild it with `sunox install-browser-extension --force`".into(),
+            ));
+        }
+        BridgePairingStatus::Corrupt => {
+            return Err(CliError::Config(
+                "Browser Bridge pairing material is inconsistent or corrupt; run `sunox install-browser-extension --force`".into(),
+            ));
+        }
+        BridgePairingStatus::BundleMissing | BridgePairingStatus::BundleCorrupt => {
+            return Err(CliError::Config(
+                "Browser Bridge installation is recorded but its managed bundle must be restored with `sunox install-browser-extension --force`".into(),
+            ));
+        }
+        BridgePairingStatus::BundleOutdated => {
+            return Err(CliError::Config(
+                "Browser Bridge is installed with a recognized but outdated runtime; update it once with `sunox install-browser-extension --force`".into(),
+            ));
+        }
+        BridgePairingStatus::BundleUnrecognized => {
+            return Err(CliError::Config(
+                "the reserved Browser Bridge path contains an unrecognized bundle that Sunox will not overwrite; inspect the per-user configuration path manually".into(),
+            ));
+        }
+        BridgePairingStatus::Exposed => {
+            return Err(CliError::Config(
+                "Browser Bridge pairing material is exposed and must be rotated with `sunox install-browser-extension --force`".into(),
+            ));
+        }
+        BridgePairingStatus::UnsafeOrInaccessible => {
+            return Err(CliError::Config(
+                "Browser Bridge pairing or managed activation state cannot be read safely; inspect the reserved Browser Bridge entries in the per-user Sunox configuration path before retrying".into(),
+            ));
+        }
     }
-    installation_evidence_at(&config_dir)
+    installation_evidence_at(config_dir)
 }
 
 fn reload_pending_at(config_dir: &Path) -> Result<Option<ReloadPendingMarker>, CliError> {
+    Ok(match reload_pending_state_at(config_dir)? {
+        ReloadPendingState::Missing => None,
+        ReloadPendingState::Valid(marker) => Some(marker),
+        // An exposed marker is not trusted for build/fingerprint/action data,
+        // but remains conservative pending evidence until force rewrites it.
+        ReloadPendingState::Exposed => Some(ReloadPendingMarker {
+            runtime_build: BROWSER_BRIDGE_RUNTIME_BUILD.to_string(),
+            secret_fingerprint: None,
+            activation: PendingActivation::Restore,
+        }),
+    })
+}
+
+fn reload_pending_state_at(config_dir: &Path) -> Result<ReloadPendingState, CliError> {
     let path = config_dir.join(RELOAD_PENDING_FILE);
-    let Some(contents) =
-        read_file_without_following_symlink(&path, "Browser Bridge reload-pending marker")?
-    else {
-        return Ok(None);
+    let contents = match read_private_file_without_following_symlink(
+        &path,
+        "Browser Bridge reload-pending marker",
+    )? {
+        PrivateFileRead::Missing => return Ok(ReloadPendingState::Missing),
+        PrivateFileRead::Exposed => return Ok(ReloadPendingState::Exposed),
+        PrivateFileRead::Private(contents) => contents,
     };
     let contents = contents.trim();
     if valid_build_id(contents) {
-        return Ok(Some(ReloadPendingMarker {
+        return Ok(ReloadPendingState::Valid(ReloadPendingMarker {
             runtime_build: contents.to_string(),
             secret_fingerprint: None,
+            activation: PendingActivation::Reload,
         }));
     }
 
     let mut lines = contents.lines();
+    let parsed = (|| {
+        let schema = lines.next()?;
+        let runtime_build = lines.next()?.strip_prefix("runtime_build=")?;
+        let secret_fingerprint = lines.next()?.strip_prefix("secret_fingerprint=")?;
+        let activation = match schema {
+            "schema=1" => PendingActivation::Reload,
+            "schema=2" => match lines.next()?.strip_prefix("activation=")? {
+                "load_unpacked" => PendingActivation::LoadUnpacked,
+                "reload" => PendingActivation::Reload,
+                "restore" => PendingActivation::Restore,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if lines.next().is_some()
+            || !valid_build_id(runtime_build)
+            || !valid_secret_fingerprint(secret_fingerprint)
+        {
+            return None;
+        }
+        Some(ReloadPendingMarker {
+            runtime_build: runtime_build.to_string(),
+            secret_fingerprint: Some(secret_fingerprint.to_string()),
+            activation,
+        })
+    })();
+    let Some(marker) = parsed else {
+        return Err(CliError::Config(format!(
+            "Browser Bridge runtime-ack marker at {} is corrupt. Sunox will not infer an activation action or overwrite it automatically; inspect the per-user configuration path and remove the marker only after verifying it is the regular Sunox marker file, then rerun `sunox install-browser-extension --force`",
+            path.display()
+        )));
+    };
+    Ok(ReloadPendingState::Valid(marker))
+}
+
+fn runtime_ack_at(config_dir: &Path) -> Result<Option<RuntimeAckMarker>, CliError> {
+    let path = config_dir.join(RUNTIME_ACK_FILE);
+    let contents = match read_private_file_without_following_symlink(
+        &path,
+        "Browser Bridge runtime acknowledgement",
+    )? {
+        PrivateFileRead::Missing | PrivateFileRead::Exposed => return Ok(None),
+        PrivateFileRead::Private(contents) => contents,
+    };
+    let mut lines = contents.trim().lines();
     let parsed = (|| {
         if lines.next()? != "schema=1" {
             return None;
@@ -1394,18 +2342,25 @@ fn reload_pending_at(config_dir: &Path) -> Result<Option<ReloadPendingMarker>, C
         {
             return None;
         }
-        Some(ReloadPendingMarker {
+        Some(RuntimeAckMarker {
             runtime_build: runtime_build.to_string(),
-            secret_fingerprint: Some(secret_fingerprint.to_string()),
+            secret_fingerprint: secret_fingerprint.to_string(),
         })
     })();
-    let Some(marker) = parsed else {
-        return Err(CliError::Config(format!(
-            "Browser Bridge reload-pending marker at {} is corrupt",
-            path.display()
-        )));
-    };
-    Ok(Some(marker))
+    // Positive evidence is optional. A malformed regular private marker is
+    // treated as absent so force/doctor stay conservative and can replace it;
+    // unsafe file types, owners, or unreadable entries still fail above.
+    Ok(parsed)
+}
+
+fn runtime_ack_matches_at(
+    config_dir: &Path,
+    build_id: &str,
+    secret: &str,
+) -> Result<bool, CliError> {
+    Ok(runtime_ack_at(config_dir)?.is_some_and(|ack| {
+        ack.runtime_build == build_id && ack.secret_fingerprint == secret_fingerprint(secret)
+    }))
 }
 
 fn valid_build_id(build_id: &str) -> bool {
@@ -1423,15 +2378,33 @@ fn valid_secret_fingerprint(fingerprint: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+#[cfg(test)]
 fn mark_reload_pending_locked(
     config_dir: &Path,
     build_id: &str,
     secret: &str,
 ) -> Result<(), CliError> {
+    mark_runtime_ack_pending_locked(config_dir, build_id, secret, PendingActivation::Reload)
+}
+
+fn mark_runtime_ack_pending_locked(
+    config_dir: &Path,
+    build_id: &str,
+    secret: &str,
+    activation: PendingActivation,
+) -> Result<(), CliError> {
+    // Invalidate positive evidence first. If the process stops before the
+    // pending marker is written, the missing acknowledgement still forces a
+    // conservative probe instead of reporting false readiness.
+    remove_runtime_ack_locked(config_dir)?;
     let path = config_dir.join(RELOAD_PENDING_FILE);
+    if reload_pending_state_at(config_dir)? == ReloadPendingState::Exposed {
+        remove_private_state_file(&path, "Browser Bridge reload-pending marker")?;
+    }
     let marker = format!(
-        "schema=1\nruntime_build={build_id}\nsecret_fingerprint={}\n",
-        secret_fingerprint(secret)
+        "schema=2\nruntime_build={build_id}\nsecret_fingerprint={}\nactivation={}\n",
+        secret_fingerprint(secret),
+        activation.as_str(),
     );
     atomic_write_private_file(
         &path,
@@ -1440,11 +2413,80 @@ fn mark_reload_pending_locked(
     )
 }
 
-pub(crate) fn reload_pending() -> Result<bool, CliError> {
-    let Some(config_dir) = crate::core::project_config_dir() else {
-        return Ok(false);
+fn write_runtime_ack_locked(
+    config_dir: &Path,
+    build_id: &str,
+    secret: &str,
+) -> Result<(), CliError> {
+    let marker = format!(
+        "schema=1\nruntime_build={build_id}\nsecret_fingerprint={}\n",
+        secret_fingerprint(secret),
+    );
+    atomic_write_private_file(
+        &config_dir.join(RUNTIME_ACK_FILE),
+        marker.as_bytes(),
+        "Browser Bridge runtime acknowledgement",
+    )
+}
+
+fn remove_runtime_ack_locked(config_dir: &Path) -> Result<(), CliError> {
+    remove_private_state_file(
+        &config_dir.join(RUNTIME_ACK_FILE),
+        "Browser Bridge runtime acknowledgement",
+    )
+}
+
+fn remove_private_state_file(path: &Path, description: &str) -> Result<(), CliError> {
+    reject_symlink(path, description)?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_no_follow(&mut options);
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(CliError::Config(format!(
+                "could not safely open {description} at {} for removal: {error}",
+                path.display()
+            )));
+        }
     };
-    Ok(reload_pending_at(&config_dir)?.is_some())
+    // Exposed-but-owned regular files may be invalidated safely. Type and
+    // ownership failures remain errors and are never overwritten.
+    let _ = permissions::verify_private_file_handle(&file, path)?;
+    reject_symlink(path, description)?;
+    let current = std::fs::symlink_metadata(path)?;
+    if !current.is_file() {
+        return Err(CliError::Config(format!(
+            "{description} at {} changed before removal and is no longer a regular file",
+            path.display()
+        )));
+    }
+    std::fs::remove_file(path)?;
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+pub(crate) fn pending_activation() -> Result<Option<PendingActivation>, CliError> {
+    let Some(config_dir) = crate::core::project_config_dir() else {
+        return Ok(None);
+    };
+    if let Some(pending) = reload_pending_at(&config_dir)? {
+        return Ok(Some(pending.activation));
+    }
+    let Some(secret) = read_bridge_secret(&config_dir.join(BRIDGE_SECRET_FILE))? else {
+        return Ok(None);
+    };
+    if runtime_ack_matches_at(&config_dir, BROWSER_BRIDGE_RUNTIME_BUILD, &secret)? {
+        return Ok(None);
+    }
+    // Missing or stale positive evidence is itself an unknown activation
+    // state. This also closes the case where a pending marker was manually
+    // deleted before Chrome authenticated the runtime.
+    Ok(Some(PendingActivation::Restore))
 }
 
 pub(crate) fn acknowledge_runtime_build(
@@ -1462,30 +2504,51 @@ fn acknowledge_runtime_build_at(
     build_id: &str,
     authenticated_secret: &str,
 ) -> Result<bool, CliError> {
-    if !config_dir.exists() {
+    if build_id != BROWSER_BRIDGE_RUNTIME_BUILD || !config_dir.exists() {
         return Ok(false);
     }
     let resolved_config_dir = resolve_path_with_missing_tail(config_dir)?;
-    let _lock = BrowserExtensionInstallLock::acquire(&resolved_config_dir)?;
-    #[cfg(windows)]
-    _lock.verify_config_directory(&resolved_config_dir)?;
-    let Some(expected) = reload_pending_at(&resolved_config_dir)? else {
+    let Some(_lock) = BrowserExtensionInstallLock::acquire_for_ack(&resolved_config_dir)? else {
         return Ok(false);
     };
-    if expected.runtime_build != build_id
-        || expected
-            .secret_fingerprint
-            .as_deref()
-            .is_some_and(|fingerprint| fingerprint != secret_fingerprint(authenticated_secret))
-    {
+    _lock.verify_config_directory(&resolved_config_dir)?;
+    if _lock.config_directory_is_exposed_now(&resolved_config_dir)? {
+        // Never harden and reuse a value that may already have escaped. Leave
+        // the exposure visible so the managed force installer rotates it.
+        return Ok(false);
+    }
+    let Some(current_secret) = read_bridge_secret(&resolved_config_dir.join(BRIDGE_SECRET_FILE))?
+    else {
+        return Ok(false);
+    };
+    let pairing_status = bridge_pairing_status_at(&resolved_config_dir);
+    if current_secret != authenticated_secret || pairing_status != BridgePairingStatus::Present {
+        return Ok(false);
+    }
+    let pending = match reload_pending_state_at(&resolved_config_dir)? {
+        ReloadPendingState::Missing => None,
+        ReloadPendingState::Valid(marker) => Some(marker),
+        ReloadPendingState::Exposed => return Ok(false),
+    };
+    if pending.as_ref().is_some_and(|expected| {
+        expected.runtime_build != build_id
+            || expected
+                .secret_fingerprint
+                .as_deref()
+                .is_some_and(|fingerprint| fingerprint != secret_fingerprint(authenticated_secret))
+    }) {
         return Ok(false);
     }
 
-    let marker = resolved_config_dir.join(RELOAD_PENDING_FILE);
-    reject_symlink(&marker, "Browser Bridge reload-pending marker")?;
-    std::fs::remove_file(&marker)?;
-    #[cfg(unix)]
-    File::open(&resolved_config_dir)?.sync_all()?;
+    // Positive evidence is durable before pending is removed. If either write
+    // or removal fails, callers retain the conservative pending state.
+    write_runtime_ack_locked(&resolved_config_dir, build_id, authenticated_secret)?;
+    if pending.is_some() {
+        remove_private_state_file(
+            &resolved_config_dir.join(RELOAD_PENDING_FILE),
+            "Browser Bridge reload-pending marker",
+        )?;
+    }
     Ok(true)
 }
 
@@ -1524,11 +2587,17 @@ fn replace_updated_bundle(
     previous_snapshot: &DirectorySnapshot,
     install_secret: &str,
     persist_secret_after_swap: bool,
+    pending_activation: PendingActivation,
 ) -> Result<(), CliError> {
     // Persist the expectation before touching the live directory. If swapping
     // the bundle fails, keeping a conservative pending marker is safer than a
     // false negative after a successful swap whose marker could not be written.
-    mark_reload_pending_locked(config_dir, BROWSER_BRIDGE_RUNTIME_BUILD, install_secret)?;
+    mark_runtime_ack_pending_locked(
+        config_dir,
+        BROWSER_BRIDGE_RUNTIME_BUILD,
+        install_secret,
+        pending_activation,
+    )?;
     replace_directory(staging, destination, Some(previous_snapshot), || {
         if persist_secret_after_swap {
             persist_rotated_secret(config_dir, install_secret)
@@ -1674,7 +2743,7 @@ where
             None
         };
         return Err(CliError::Config(format!(
-            "installed Browser Bridge files but could not commit their paired secret: {commit_error}; quarantine_error={}; rollback_error={}; cleanup_error={}; previous bundle path={}; new bundle quarantine={}",
+            "installed Browser Bridge files but could not commit their paired runtime state: {commit_error}; quarantine_error={}; rollback_error={}; cleanup_error={}; previous bundle path={}; new bundle quarantine={}",
             display_optional_error(quarantine_error.as_ref()),
             display_optional_error(rollback_error.as_ref()),
             display_optional_error(cleanup_error.as_ref()),
@@ -1686,14 +2755,14 @@ where
     if let Some(previous_snapshot) = previous_snapshot {
         if !validate(backup, previous_snapshot).unwrap_or(false) {
             return Err(CliError::Config(format!(
-                "Browser Bridge was installed at {}, but the previous directory changed before cleanup; it was preserved at {} and reload remains pending",
+                "Browser Bridge was installed at {}, but the previous directory changed before cleanup; it was preserved at {} and runtime activation remains pending",
                 destination.display(),
                 backup.display()
             )));
         }
         if let Err(error) = remove_snapshot(backup, previous_snapshot) {
             return Err(CliError::Config(format!(
-                "Browser Bridge was installed at {}, but its validated previous bundle could not be removed safely from {}: {error}; reload remains pending",
+                "Browser Bridge was installed at {}, but its validated previous bundle could not be removed safely from {}: {error}; runtime activation remains pending",
                 destination.display(),
                 backup.display()
             )));
@@ -1867,52 +2936,112 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        BRIDGE, BrowserExtensionInstallLock, CONFIG_TEMPLATE, INSTALL_BEHAVIOR_GUIDANCE,
-        InstallOutcome, LOOPBACK_TRANSPORT, MANAGED_SENTINEL, MANIFEST, OFFSCREEN, OFFSCREEN_HTML,
-        PAGE, POLL_WORKER, SERVICE_WORKER, SHARED, acknowledge_runtime_build_at,
-        capture_stable_directory_snapshot, current_bundle_file_set, install_bundle,
-        install_next_steps, installation_evidence_at, mark_reload_pending_locked,
-        read_bridge_secret, reload_pending_at, remove_snapshot_tree, remove_snapshot_tree_paths,
-        render_config, render_manifest, replace_directory_paths, secret_fingerprint,
+        BRIDGE, BridgePairingStatus, BrowserExtensionInstallLock, CONFIG_TEMPLATE,
+        INSTALL_BEHAVIOR_GUIDANCE, InstallOutcome, LOOPBACK_TRANSPORT, MANAGED_SENTINEL, MANIFEST,
+        OFFSCREEN, OFFSCREEN_HTML, PAGE, POLL_WORKER, PendingActivation, SERVICE_WORKER, SHARED,
+        acknowledge_runtime_build_at, activation_guidance, bridge_is_configured_at,
+        bridge_pairing_status_at, capture_stable_directory_snapshot, current_bundle_file_set,
+        install_bundle, install_next_steps, installation_evidence_at,
+        manifest_bytes_match_current_runtime, mark_reload_pending_locked, read_bridge_secret,
+        reload_pending_at, remove_snapshot_tree, remove_snapshot_tree_paths, render_config,
+        render_manifest, render_manifest_with_version_name, replace_directory_paths,
+        runtime_state_after_probe, secret_fingerprint,
     };
 
     #[test]
     fn extension_assets_share_the_bridge_contract() {
+        assert_eq!(super::BROWSER_BRIDGE_RUNTIME_BUILD, "0.3.41");
         assert!(MANIFEST.contains("https://suno.com/*"));
         assert!(MANIFEST.contains("http://127.0.0.1/*"));
         assert!(MANIFEST.contains("\"version\": \"__SUNOX_BRIDGE_RUNTIME_BUILD__\""));
-        assert!(MANIFEST.contains("\"version_name\": \"__SUNOX_VERSION__\""));
+        assert!(MANIFEST.contains("\"version_name\": \"__SUNOX_BRIDGE_RUNTIME_BUILD__\""));
+        assert!(!MANIFEST.contains("__SUNOX_VERSION__"));
         assert!(MANIFEST.contains("\"alarms\""));
         assert!(!MANIFEST.contains("\"declarativeNetRequestFeedback\""));
         assert!(MANIFEST.contains("\"declarativeNetRequestWithHostAccess\""));
         assert!(MANIFEST.contains("\"offscreen\""));
+        assert!(MANIFEST.contains("\"webRequest\""));
         assert!(!MANIFEST.contains("\"activeTab\""));
         assert!(!MANIFEST.contains("\"storage\""));
         assert!(!MANIFEST.contains("\"system.display\""));
         assert!(!MANIFEST.contains("\"tabs\""));
         assert!(MANIFEST.contains("\"all_frames\": true"));
+        assert!(MANIFEST.contains("\"minimum_chrome_version\": \"128\""));
+        assert!(MANIFEST.contains("\"world\": \"ISOLATED\""));
+        assert!(!MANIFEST.contains("\"world\": \"MAIN\""));
+        assert!(!MANIFEST.contains("https://auth.suno.com/*"));
         assert!(MANIFEST.contains("icons/icon-16.png"));
         assert!(MANIFEST.contains("icons/icon-128.png"));
+        let manifest: serde_json::Value =
+            serde_json::from_str(MANIFEST).expect("valid Browser Bridge manifest asset");
+        assert_eq!(
+            manifest["content_scripts"],
+            serde_json::json!([{
+                "matches": ["https://suno.com/*"],
+                "js": ["bridge.js"],
+                "run_at": "document_start",
+                "all_frames": true,
+                "world": "ISOLATED"
+            }])
+        );
+        assert_eq!(
+            manifest["web_accessible_resources"],
+            serde_json::json!([{
+                "resources": ["page.js"],
+                "matches": ["https://suno.com/*"]
+            }])
+        );
         assert!(SERVICE_WORKER.contains("chrome.offscreen.createDocument"));
         assert!(SERVICE_WORKER.contains("chrome.declarativeNetRequest.updateDynamicRules"));
         assert!(SERVICE_WORKER.contains("chrome.declarativeNetRequest.updateSessionRules"));
         assert!(SERVICE_WORKER.contains("addRules"));
         assert!(SERVICE_WORKER.contains("content-security-policy"));
         assert!(SERVICE_WORKER.contains("x-frame-options"));
-        assert!(SERVICE_WORKER.contains("cspWithoutFrameAncestors"));
+        assert!(SERVICE_WORKER.contains("challengeDocumentCsp"));
+        assert!(SERVICE_WORKER.contains("__sunox_bridge"));
+        assert!(SERVICE_WORKER.contains("chrome.webRequest.onSendHeaders"));
+        assert!(SERVICE_WORKER.contains("chrome.webRequest.onResponseStarted"));
         assert!(SERVICE_WORKER.contains("reasons: [\"IFRAME_SCRIPTING\", \"WORKERS\"]"));
         assert!(SERVICE_WORKER.contains("chrome.alarms"));
         assert!(SERVICE_WORKER.contains("chrome.tabs.TAB_ID_NONE"));
         assert!(!SERVICE_WORKER.contains("chrome.windows"));
         assert!(!SERVICE_WORKER.contains("chrome.system.display"));
         assert!(!SERVICE_WORKER.contains("chrome.tabs.create"));
+        assert!(SERVICE_WORKER.contains("bindManagedSenderIdentity"));
+        assert!(
+            SERVICE_WORKER.contains("frameEnvironmentPromise = prepareFrameEnvironmentForOwner")
+        );
+        assert!(SERVICE_WORKER.contains("pendingEnvironmentOwnerDocumentId"));
+        assert!(SERVICE_WORKER.contains("requireCurrentOffscreenOwner"));
+        assert!(SERVICE_WORKER.contains("offscreenOwnerBinding"));
+        assert!(SERVICE_WORKER.contains("OFFSCREEN_CLIENT_ID_PATTERN"));
+        assert!(SERVICE_WORKER.contains("pendingEnvironmentNonce !== nonce"));
+        assert!(SERVICE_WORKER.contains("pendingEnvironmentNonce === nonce"));
+        assert!(SERVICE_WORKER.contains("sunox-frame-environment-retire-v1"));
+        assert!(SERVICE_WORKER.contains("network.retiring"));
+        assert!(SERVICE_WORKER.contains("sunox-managed-frame-stage-report-v1"));
+        assert!(SERVICE_WORKER.contains("sunox-managed-frame-stage-v1"));
         assert!(OFFSCREEN_HTML.contains("transport-loopback.js"));
         assert!(OFFSCREEN_HTML.contains("offscreen.js"));
         assert!(OFFSCREEN_HTML.contains("shared.js"));
         assert!(OFFSCREEN.contains("transport.claimChallenge"));
         assert!(OFFSCREEN.contains("transport.submitResult"));
+        assert!(OFFSCREEN.contains("runtimeMessageBeforeDeadline"));
+        assert!(!OFFSCREEN.contains("chrome.runtime.getContexts"));
+        assert!(!OFFSCREEN.contains("ownerDocumentId"));
+        assert!(OFFSCREEN.contains("clientId"));
+        assert!(OFFSCREEN.contains("managedFramePrepareTimeoutMs = 9_000"));
+        assert!(OFFSCREEN.contains("managedFrameReleaseTimeoutMs = 500"));
         assert!(OFFSCREEN.contains("document.createElement(\"iframe\")"));
+        assert!(OFFSCREEN.contains("managedFrame.credentialless = true"));
+        assert!(
+            OFFSCREEN.contains("managedFrame.referrerPolicy = \"strict-origin-when-cross-origin\"")
+        );
         assert!(OFFSCREEN.contains("sunox-managed-frame-execute-v2"));
+        assert!(OFFSCREEN.contains("sunox-frame-environment-retire-v1"));
+        assert!(OFFSCREEN.contains("retirementPending"));
+        assert!(OFFSCREEN.contains("sunox-managed-frame-stage-v1"));
+        assert!(OFFSCREEN.contains("managedFrameWarmupGraceMs"));
         assert!(!OFFSCREEN.contains("sunox-managed-window"));
         assert!(OFFSCREEN.contains("new Worker(\"poll-worker.js\")"));
         assert!(POLL_WORKER.contains("sunox-poll"));
@@ -1935,6 +3064,13 @@ mod tests {
         assert!(!LOOPBACK_TRANSPORT.contains("sunox-bridge-receipt-v1"));
         assert!(!LOOPBACK_TRANSPORT.contains("Authorization"));
         assert!(BRIDGE.contains("chrome.runtime.connect"));
+        assert!(BRIDGE.contains("window.stop()"));
+        assert!(BRIDGE.contains("let html = document.documentElement"));
+        assert!(BRIDGE.contains("html.replaceChildren(head, body)"));
+        assert!(!BRIDGE.contains("document.replaceChildren"));
+        assert!(BRIDGE.contains("chrome.runtime.getURL(\"page.js\")"));
+        assert!(BRIDGE.contains("document.head.appendChild(mainRunner)"));
+        assert!(BRIDGE.contains("sunox-managed-frame-stage-report-v1"));
         assert!(BRIDGE.contains("sunox-managed-frame-result-v2"));
         assert!(PAGE.contains("hcaptcha.execute"));
         assert!(PAGE.contains("turnstile.execute"));
@@ -1967,21 +3103,49 @@ mod tests {
     }
 
     #[test]
-    fn rendered_manifest_displays_the_cli_version() {
+    fn rendered_manifest_uses_only_the_stable_bridge_runtime_identity() {
         let manifest: serde_json::Value =
             serde_json::from_str(&render_manifest()).expect("rendered extension manifest");
 
         assert_eq!(manifest["version"], super::BROWSER_BRIDGE_RUNTIME_BUILD);
-        assert_eq!(manifest["version_name"], env!("CARGO_PKG_VERSION"));
-        assert!(!render_manifest().contains("__SUNOX_VERSION__"));
+        assert_eq!(
+            manifest["version_name"],
+            super::BROWSER_BRIDGE_RUNTIME_BUILD
+        );
+        assert!(!MANIFEST.contains("__SUNOX_VERSION__"));
         assert!(!render_manifest().contains("__SUNOX_BRIDGE_RUNTIME_BUILD__"));
+    }
+
+    #[test]
+    fn only_exact_current_or_known_dev_manifests_match_the_runtime_identity() {
+        let current = render_manifest();
+        let historical = render_manifest_with_version_name("0.2.0");
+        let mut reformatted: serde_json::Value =
+            serde_json::from_str(&historical).expect("historical manifest");
+        reformatted["description"] =
+            serde_json::json!("Runs Suno generation challenges invisibly for the Sunox CLI.");
+        let reformatted = serde_json::to_vec(&reformatted).expect("reformatted manifest");
+        let unknown = render_manifest_with_version_name("0.2.1");
+        let duplicate_version_name = historical.replacen(
+            "\"version_name\": \"0.2.0\",",
+            "\"version_name\": \"0.2.0\",\n  \"version_name\": \"0.2.0\",",
+            1,
+        );
+
+        assert!(manifest_bytes_match_current_runtime(current.as_bytes()));
+        assert!(manifest_bytes_match_current_runtime(historical.as_bytes()));
+        assert!(!manifest_bytes_match_current_runtime(&reformatted));
+        assert!(!manifest_bytes_match_current_runtime(unknown.as_bytes()));
+        assert!(!manifest_bytes_match_current_runtime(
+            duplicate_version_name.as_bytes()
+        ));
     }
 
     #[test]
     fn installed_current_bundle_entries_come_from_the_asset_registry() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let destination = temp.path().join("browser-extension");
         let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
 
         install_bundle(&destination, &config_dir, false).expect("install current bundle");
         let mut installed = super::bundle_file_names(&destination).expect("installed entries");
@@ -2005,11 +3169,147 @@ mod tests {
     #[test]
     fn update_acknowledged_before_render_is_a_valid_no_reload_success() {
         let outcome = InstallOutcome::Updated;
+        let runtime_state = outcome.runtime_state(None);
 
-        assert_eq!(outcome.status(false), "updated");
-        assert!(!outcome.reload_required(false));
-        let next_steps = install_next_steps(outcome, false);
+        assert_eq!(outcome.status(runtime_state), "updated");
+        assert_eq!(runtime_state.reload_required, Some(false));
+        assert!(!runtime_state.runtime_ack_pending);
+        let next_steps = install_next_steps(outcome, runtime_state);
         assert!(next_steps.contains(&"No Chrome reload is required"));
+    }
+
+    #[test]
+    fn changed_bundle_requires_one_reload_until_the_runtime_authenticates() {
+        let outcome = InstallOutcome::Updated;
+        let runtime_state = outcome.runtime_state(Some(PendingActivation::Reload));
+
+        assert_eq!(outcome.status(runtime_state), "reload_pending");
+        assert_eq!(runtime_state.reload_required, Some(true));
+        assert!(runtime_state.runtime_ack_pending);
+        assert_eq!(
+            runtime_state.pending_origin,
+            Some(PendingActivation::Reload)
+        );
+        let next_steps = install_next_steps(outcome, runtime_state);
+        assert!(next_steps.contains(&"Click Reload once on the existing extension"));
+        assert!(
+            next_steps
+                .iter()
+                .any(|step| step.contains("doctor --browser-bridge"))
+        );
+    }
+
+    #[test]
+    fn updated_restore_origin_stays_activation_pending_with_conditional_loading_guidance() {
+        let outcome = InstallOutcome::Updated;
+        let runtime_state = outcome.runtime_state(Some(PendingActivation::Restore));
+
+        assert_eq!(outcome.status(runtime_state), "activation_pending");
+        assert_eq!(runtime_state.reload_required, None);
+        assert!(runtime_state.runtime_ack_pending);
+        assert_eq!(
+            activation_guidance(outcome, runtime_state),
+            (
+                Some("ensure_loaded"),
+                vec!["load_unpacked_if_missing", "enable_and_reload_if_present"]
+            )
+        );
+        let next_steps = install_next_steps(outcome, runtime_state);
+        assert!(next_steps.iter().any(|step| step.contains("Load unpacked")));
+        assert!(next_steps.iter().any(|step| step.contains("card exists")));
+    }
+
+    #[test]
+    fn fresh_install_requires_load_unpacked_and_runtime_acknowledgement() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
+
+        let outcome = install_bundle(&destination, &config_dir, false).expect("initial install");
+        let pending = reload_pending_at(&config_dir)
+            .expect("activation marker")
+            .map(|marker| marker.activation);
+        let runtime_state = outcome.runtime_state(pending);
+
+        assert_eq!(outcome, InstallOutcome::Installed);
+        assert_eq!(outcome.status(runtime_state), "installed");
+        assert_eq!(runtime_state.reload_required, None);
+        assert!(runtime_state.runtime_ack_pending);
+        assert_eq!(
+            runtime_state.pending_origin,
+            Some(PendingActivation::LoadUnpacked)
+        );
+        let next_steps = install_next_steps(outcome, runtime_state);
+        assert!(next_steps.iter().any(|step| step.contains("Load unpacked")));
+        assert!(
+            next_steps
+                .iter()
+                .any(|step| step.contains("doctor --browser-bridge"))
+        );
+        assert!(!next_steps.iter().any(|step| step.contains("Click Reload")));
+        assert_eq!(
+            activation_guidance(outcome, runtime_state),
+            (Some("load_unpacked"), vec!["load_unpacked"])
+        );
+    }
+
+    #[test]
+    fn already_current_pending_bundle_reports_unknown_instead_of_repeating_reload() {
+        let outcome = InstallOutcome::AlreadyCurrent;
+        let runtime_state = outcome.runtime_state(Some(PendingActivation::Reload));
+
+        assert_eq!(outcome.status(runtime_state), "runtime_ack_pending");
+        assert_eq!(runtime_state.reload_required, None);
+        assert!(runtime_state.runtime_ack_pending);
+        let next_steps = install_next_steps(outcome, runtime_state);
+        assert!(
+            next_steps
+                .iter()
+                .any(|step| step.contains("doctor --browser-bridge"))
+        );
+        assert!(
+            !next_steps
+                .iter()
+                .any(|step| step == &"Click Reload on the existing extension")
+        );
+    }
+
+    #[tokio::test]
+    async fn already_current_pending_bundle_probes_and_accepts_only_the_exact_runtime_pairing() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
+        install_bundle(&destination, &config_dir, false).expect("initial install");
+        let secret =
+            fs::read_to_string(config_dir.join(super::BRIDGE_SECRET_FILE)).expect("secret");
+
+        let old_runtime_state =
+            runtime_state_after_probe(InstallOutcome::AlreadyCurrent, &config_dir, async {
+                assert!(
+                    !acknowledge_runtime_build_at(&config_dir, "0.3.5", &secret)
+                        .expect("old runtime acknowledgement")
+                );
+            })
+            .await
+            .expect("old runtime probe state");
+        assert_eq!(old_runtime_state.reload_required, None);
+        assert!(old_runtime_state.runtime_ack_pending);
+
+        let current_runtime_state =
+            runtime_state_after_probe(InstallOutcome::AlreadyCurrent, &config_dir, async {
+                assert!(
+                    acknowledge_runtime_build_at(
+                        &config_dir,
+                        super::BROWSER_BRIDGE_RUNTIME_BUILD,
+                        &secret,
+                    )
+                    .expect("current runtime acknowledgement")
+                );
+            })
+            .await
+            .expect("current runtime probe state");
+        assert_eq!(current_runtime_state.reload_required, Some(false));
+        assert!(!current_runtime_state.runtime_ack_pending);
     }
 
     #[test]
@@ -2019,6 +3319,7 @@ mod tests {
             ("0.3.4", Some("0.1.0")),
             ("0.3.5", Some("0.1.1")),
             ("0.3.6", Some("0.1.1")),
+            ("0.3.16", Some("0.2.0")),
         ] {
             let lineage = super::find_legacy_lineage(Some(extension_version), cli_version)
                 .expect("published lineage");
@@ -2080,6 +3381,10 @@ mod tests {
             super::find_legacy_lineage(Some("0.3.6"), Some("0.1.1")).expect("pre-release lineage");
         assert_eq!(pre_release.protocol_version, 3);
         assert_eq!(pre_release.runtime_build, Some("0.3.6"));
+        let current_pre_release = super::find_legacy_lineage(Some("0.3.16"), Some("0.2.0"))
+            .expect("current pre-release lineage");
+        assert_eq!(current_pre_release.protocol_version, 3);
+        assert_eq!(current_pre_release.runtime_build, Some("0.3.16"));
     }
 
     #[test]
@@ -2120,8 +3425,8 @@ mod tests {
     #[test]
     fn force_refuses_unknown_files_even_when_the_managed_sentinel_exists() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let destination = temp.path().join("browser-extension");
         let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
         install_bundle(&destination, &config_dir, false).expect("initial install");
         fs::write(destination.join("keep.txt"), "user data").expect("unknown file");
 
@@ -2138,8 +3443,8 @@ mod tests {
     #[test]
     fn force_refuses_unknown_empty_directories_in_a_managed_bundle() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let destination = temp.path().join("browser-extension");
         let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
         install_bundle(&destination, &config_dir, false).expect("initial install");
         fs::create_dir(destination.join("keep-empty")).expect("unknown directory");
 
@@ -2318,19 +3623,298 @@ mod tests {
         assert_eq!(outcome, InstallOutcome::Installed);
         assert!(destination.join(MANAGED_SENTINEL).is_file());
         assert!(config_dir.join("browser-extension-secret").is_file());
+        assert_eq!(
+            reload_pending_at(&config_dir)
+                .expect("activation marker")
+                .map(|marker| marker.activation),
+            Some(PendingActivation::LoadUnpacked)
+        );
     }
 
     #[test]
-    fn force_install_into_an_existing_empty_directory_is_still_installed() {
+    fn install_into_an_existing_empty_directory_needs_no_force_and_is_still_installed() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let destination = temp.path().join("browser-extension");
         let config_dir = temp.path().join("config");
-        fs::create_dir(&destination).expect("empty destination");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
+        fs::create_dir_all(&destination).expect("empty destination");
+        assert_eq!(
+            bridge_pairing_status_at(&config_dir),
+            BridgePairingStatus::Missing
+        );
+        assert!(!bridge_is_configured_at(&config_dir).expect("empty directory is not configured"));
+        assert!(
+            !installation_evidence_at(&config_dir)
+                .expect("an empty default bundle alone is not installation evidence")
+        );
 
         let outcome =
-            install_bundle(&destination, &config_dir, true).expect("install into empty directory");
+            install_bundle(&destination, &config_dir, false).expect("install into empty directory");
 
         assert_eq!(outcome, InstallOutcome::Installed);
+        assert_eq!(
+            reload_pending_at(&config_dir)
+                .expect("activation marker")
+                .map(|marker| marker.activation),
+            Some(PendingActivation::LoadUnpacked)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unrelated_or_exposed_config_directory_does_not_change_first_install_origin() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for mode in [0o755, 0o775] {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let config_dir = temp.path().join(format!("config-{mode:o}"));
+            let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
+            fs::create_dir(&config_dir).expect("pre-existing config directory");
+            fs::write(config_dir.join("auth.json"), "{}").expect("unrelated Sunox config");
+            fs::set_permissions(&config_dir, fs::Permissions::from_mode(mode))
+                .expect("set config directory mode");
+
+            assert_eq!(
+                bridge_pairing_status_at(&config_dir),
+                BridgePairingStatus::Missing
+            );
+            assert!(
+                !bridge_is_configured_at(&config_dir)
+                    .expect("unrelated config must not count as Bridge installation")
+            );
+
+            let outcome =
+                install_bundle(&destination, &config_dir, false).expect("first Bridge install");
+
+            assert_eq!(outcome, InstallOutcome::Installed);
+            assert_eq!(
+                reload_pending_at(&config_dir)
+                    .expect("activation marker")
+                    .map(|marker| marker.activation),
+                Some(PendingActivation::LoadUnpacked)
+            );
+            assert_eq!(
+                fs::read_to_string(config_dir.join("auth.json")).expect("unrelated config remains"),
+                "{}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn exposed_windows_config_acl_does_not_change_first_install_origin() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
+        fs::create_dir(&config_dir).expect("pre-existing config directory");
+        fs::write(config_dir.join("auth.json"), "{}").expect("unrelated Sunox config");
+        super::permissions::make_world_readable_for_test(&config_dir, true);
+
+        assert_eq!(
+            bridge_pairing_status_at(&config_dir),
+            BridgePairingStatus::Missing
+        );
+        let outcome =
+            install_bundle(&destination, &config_dir, false).expect("first Bridge install");
+
+        assert_eq!(outcome, InstallOutcome::Installed);
+        assert_eq!(
+            reload_pending_at(&config_dir)
+                .expect("activation marker")
+                .map(|marker| marker.activation),
+            Some(PendingActivation::LoadUnpacked)
+        );
+        super::permissions::assert_private_acl(&config_dir, true);
+    }
+
+    #[tokio::test]
+    async fn missing_bundle_restores_as_ensure_loaded_until_exact_runtime_ack() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
+        install_bundle(&destination, &config_dir, false).expect("initial install");
+        let secret =
+            fs::read_to_string(config_dir.join(super::BRIDGE_SECRET_FILE)).expect("pairing secret");
+        assert!(
+            acknowledge_runtime_build_at(
+                &config_dir,
+                super::BROWSER_BRIDGE_RUNTIME_BUILD,
+                secret.trim(),
+            )
+            .expect("initial acknowledgement")
+        );
+        fs::remove_dir_all(&destination).expect("simulate deleted bundle");
+
+        let outcome = install_bundle(&destination, &config_dir, false).expect("restore bundle");
+        let restored_secret = fs::read_to_string(config_dir.join(super::BRIDGE_SECRET_FILE))
+            .expect("restored secret");
+        assert_eq!(outcome, InstallOutcome::Restored);
+        assert_ne!(
+            restored_secret.trim(),
+            secret.trim(),
+            "restoring a missing bundle must invalidate the old positive acknowledgement"
+        );
+        assert_eq!(
+            reload_pending_at(&config_dir)
+                .expect("restore marker")
+                .map(|marker| marker.activation),
+            Some(PendingActivation::Restore)
+        );
+
+        let old_runtime_state = runtime_state_after_probe(outcome, &config_dir, async {
+            assert!(
+                !acknowledge_runtime_build_at(
+                    &config_dir,
+                    super::BROWSER_BRIDGE_RUNTIME_BUILD,
+                    secret.trim(),
+                )
+                .expect("old runtime acknowledgement")
+            );
+        })
+        .await
+        .expect("old runtime state");
+        assert_eq!(old_runtime_state.reload_required, None);
+        assert!(old_runtime_state.runtime_ack_pending);
+        assert_eq!(
+            activation_guidance(outcome, old_runtime_state),
+            (
+                Some("ensure_loaded"),
+                vec!["load_unpacked_if_missing", "enable_and_reload_if_present"]
+            )
+        );
+
+        let second_outcome =
+            install_bundle(&destination, &config_dir, true).expect("idempotent restore check");
+        let second_state = second_outcome.runtime_state(
+            reload_pending_at(&config_dir)
+                .expect("restore marker")
+                .map(|marker| marker.activation),
+        );
+        assert_eq!(second_outcome, InstallOutcome::AlreadyCurrent);
+        assert_eq!(
+            second_state.pending_origin,
+            Some(PendingActivation::Restore)
+        );
+        assert_eq!(
+            activation_guidance(second_outcome, second_state),
+            (
+                Some("ensure_loaded"),
+                vec!["load_unpacked_if_missing", "enable_and_reload_if_present"]
+            )
+        );
+        assert!(
+            install_next_steps(second_outcome, second_state)
+                .iter()
+                .any(|step| step.contains("Load unpacked"))
+        );
+
+        let exact_runtime_state = runtime_state_after_probe(second_outcome, &config_dir, async {
+            assert!(
+                acknowledge_runtime_build_at(
+                    &config_dir,
+                    super::BROWSER_BRIDGE_RUNTIME_BUILD,
+                    restored_secret.trim(),
+                )
+                .expect("exact runtime acknowledgement")
+            );
+        })
+        .await
+        .expect("exact runtime state");
+        assert_eq!(exact_runtime_state.reload_required, Some(false));
+        assert!(!exact_runtime_state.runtime_ack_pending);
+    }
+
+    #[test]
+    fn empty_bundle_directory_with_installation_evidence_is_restored_not_reinstalled() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
+        install_bundle(&destination, &config_dir, false).expect("initial install");
+        let secret =
+            fs::read_to_string(config_dir.join(super::BRIDGE_SECRET_FILE)).expect("pairing secret");
+        assert!(
+            acknowledge_runtime_build_at(
+                &config_dir,
+                super::BROWSER_BRIDGE_RUNTIME_BUILD,
+                secret.trim(),
+            )
+            .expect("initial acknowledgement")
+        );
+        fs::remove_dir_all(&destination).expect("remove bundle");
+        fs::create_dir(&destination).expect("empty bundle directory");
+
+        let outcome =
+            install_bundle(&destination, &config_dir, true).expect("restore empty bundle");
+
+        assert_eq!(outcome, InstallOutcome::Restored);
+        assert_eq!(
+            reload_pending_at(&config_dir)
+                .expect("restore marker")
+                .map(|marker| marker.activation),
+            Some(PendingActivation::Restore)
+        );
+    }
+
+    #[test]
+    fn legacy_pairing_secret_restores_missing_or_empty_bundle_without_a_marker() {
+        for secret_contents in ["a".repeat(64), "short".into()] {
+            for empty_destination in [false, true] {
+                let temp = tempfile::tempdir().expect("temp dir");
+                let config_dir = temp.path().join("config");
+                let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
+                fs::create_dir(&config_dir).expect("config dir");
+                super::atomic_write_private_file(
+                    &config_dir.join(super::BRIDGE_SECRET_FILE),
+                    secret_contents.as_bytes(),
+                    "legacy pairing secret",
+                )
+                .expect("legacy pairing secret");
+                if empty_destination {
+                    fs::create_dir(&destination).expect("empty destination");
+                }
+
+                let outcome = install_bundle(&destination, &config_dir, empty_destination)
+                    .expect("restore legacy installation");
+
+                assert_eq!(outcome, InstallOutcome::Restored);
+                assert_eq!(
+                    reload_pending_at(&config_dir)
+                        .expect("restore marker")
+                        .map(|marker| marker.activation),
+                    Some(PendingActivation::Restore)
+                );
+                let persisted = read_bridge_secret(&config_dir.join(super::BRIDGE_SECRET_FILE))
+                    .expect("repaired secret must be readable")
+                    .expect("repaired secret must exist");
+                assert_ne!(
+                    persisted, secret_contents,
+                    "restoring a missing bundle must rotate every legacy pairing"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn initial_marker_commit_failure_rolls_back_the_installed_bundle() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
+        fs::create_dir(&config_dir).expect("config dir");
+        let outside = temp.path().join("outside-marker");
+        fs::write(&outside, "do not replace").expect("outside marker");
+        symlink(&outside, config_dir.join(super::RELOAD_PENDING_FILE)).expect("pending symlink");
+
+        let error = install_bundle(&destination, &config_dir, false)
+            .expect_err("marker commit must fail closed");
+
+        assert!(error.to_string().contains("symbolic link"));
+        assert!(!destination.exists());
+        assert_eq!(
+            fs::read_to_string(&outside).expect("outside marker preserved"),
+            "do not replace"
+        );
     }
 
     #[cfg(unix)]
@@ -2339,18 +3923,16 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().expect("temp dir");
-        let destination = temp.path().join("browser-extension");
         let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
 
         install_bundle(&destination, &config_dir, false).expect("initial install");
-        let secret =
-            fs::read_to_string(config_dir.join(super::BRIDGE_SECRET_FILE)).expect("pairing secret");
-        mark_reload_pending_locked(
-            &config_dir,
-            super::BROWSER_BRIDGE_RUNTIME_BUILD,
-            secret.trim(),
-        )
-        .expect("reload-pending marker");
+        assert_eq!(
+            reload_pending_at(&config_dir)
+                .expect("activation marker")
+                .map(|marker| marker.activation),
+            Some(PendingActivation::LoadUnpacked)
+        );
 
         assert_eq!(
             fs::metadata(&destination)
@@ -2400,8 +3982,8 @@ mod tests {
     #[test]
     fn installed_bundle_and_all_pairing_material_have_protected_windows_dacls() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let destination = temp.path().join("browser-extension");
         let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
 
         install_bundle(&destination, &config_dir, false).expect("initial install");
         let secret =
@@ -2455,8 +4037,8 @@ mod tests {
     #[test]
     fn already_current_install_removes_an_explicit_everyone_ace_from_reload_marker() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let destination = temp.path().join("browser-extension");
         let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
 
         install_bundle(&destination, &config_dir, false).expect("initial install");
         let secret =
@@ -2534,8 +4116,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().expect("temp dir");
-        let destination = temp.path().join("browser-extension");
         let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
         install_bundle(&destination, &config_dir, false).expect("initial install");
         let original_secret = fs::read_to_string(config_dir.join("browser-extension-secret"))
             .expect("original secret");
@@ -2601,14 +4183,126 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn every_pairing_permission_exposure_fails_the_real_gate_and_force_rotates() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for exposed_component in ["config_dir", "secret", "bundle_dir", "bundle_config"] {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let config_dir = temp.path().join("config");
+            let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
+            install_bundle(&destination, &config_dir, false).expect("initial install");
+            let original_secret =
+                fs::read_to_string(config_dir.join(super::BRIDGE_SECRET_FILE)).expect("secret");
+            assert!(
+                acknowledge_runtime_build_at(
+                    &config_dir,
+                    super::BROWSER_BRIDGE_RUNTIME_BUILD,
+                    original_secret.trim(),
+                )
+                .expect("initial acknowledgement")
+            );
+
+            let (path, mode) = match exposed_component {
+                "config_dir" => (config_dir.clone(), 0o775),
+                "secret" => (config_dir.join(super::BRIDGE_SECRET_FILE), 0o644),
+                "bundle_dir" => (destination.clone(), 0o755),
+                "bundle_config" => (destination.join("config.js"), 0o644),
+                _ => unreachable!(),
+            };
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode))
+                .expect("expose pairing fixture");
+
+            assert_eq!(
+                bridge_pairing_status_at(&config_dir),
+                BridgePairingStatus::Exposed,
+                "{exposed_component} exposure must be detected"
+            );
+            assert!(
+                super::trusted_bridge_secret_at(&config_dir).is_err(),
+                "{exposed_component} exposure must block the real challenge secret"
+            );
+            assert!(
+                super::bridge_is_configured_at(&config_dir).is_err(),
+                "{exposed_component} exposure must not be treated as ready"
+            );
+
+            assert_eq!(
+                install_bundle(&destination, &config_dir, true).expect("repair exposure"),
+                InstallOutcome::Updated
+            );
+            let rotated_secret =
+                fs::read_to_string(config_dir.join(super::BRIDGE_SECRET_FILE)).expect("rotated");
+            assert_ne!(
+                rotated_secret.trim(),
+                original_secret.trim(),
+                "{exposed_component} exposure must invalidate the old capability"
+            );
+            assert_eq!(
+                bridge_pairing_status_at(&config_dir),
+                BridgePairingStatus::Present
+            );
+            assert!(
+                !acknowledge_runtime_build_at(
+                    &config_dir,
+                    super::BROWSER_BRIDGE_RUNTIME_BUILD,
+                    original_secret.trim(),
+                )
+                .expect("old capability rejection")
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_extended_acl_exposure_rotates_instead_of_reusing_the_secret() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
+        install_bundle(&destination, &config_dir, false).expect("initial install");
+        let secret_path = config_dir.join(super::BRIDGE_SECRET_FILE);
+        let original_secret = fs::read_to_string(&secret_path).expect("secret");
+        let status = Command::new("/bin/chmod")
+            .args(["+a", "everyone allow read"])
+            .arg(&secret_path)
+            .status()
+            .expect("run chmod +a");
+        assert!(status.success());
+
+        assert_eq!(
+            bridge_pairing_status_at(&config_dir),
+            BridgePairingStatus::Exposed
+        );
+        assert!(super::trusted_bridge_secret_at(&config_dir).is_err());
+
+        install_bundle(&destination, &config_dir, true).expect("repair ACL exposure");
+        let rotated_secret = fs::read_to_string(&secret_path).expect("rotated secret");
+        assert_ne!(rotated_secret.trim(), original_secret.trim());
+        assert_eq!(
+            bridge_pairing_status_at(&config_dir),
+            BridgePairingStatus::Present
+        );
+    }
+
     #[test]
     fn force_refuses_a_byte_modified_pre_sentinel_bundle() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let destination = temp.path().join("browser-extension");
         let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
         assert_eq!(
             install_bundle(&destination, &config_dir, false).expect("initial install"),
             InstallOutcome::Installed
+        );
+        let secret =
+            fs::read_to_string(config_dir.join(super::BRIDGE_SECRET_FILE)).expect("pairing secret");
+        assert!(
+            acknowledge_runtime_build_at(
+                &config_dir,
+                super::BROWSER_BRIDGE_RUNTIME_BUILD,
+                secret.trim(),
+            )
+            .expect("loaded runtime acknowledgement")
         );
         fs::remove_file(destination.join(MANAGED_SENTINEL)).expect("remove modern sentinel");
         fs::write(
@@ -2632,52 +4326,297 @@ mod tests {
     #[test]
     fn force_is_a_noop_when_the_generated_bundle_is_current() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let destination = temp.path().join("browser-extension");
         let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
         assert_eq!(
             install_bundle(&destination, &config_dir, false).expect("initial install"),
             InstallOutcome::Installed
+        );
+        let secret =
+            fs::read_to_string(config_dir.join(super::BRIDGE_SECRET_FILE)).expect("pairing secret");
+        assert!(
+            acknowledge_runtime_build_at(
+                &config_dir,
+                super::BROWSER_BRIDGE_RUNTIME_BUILD,
+                secret.trim(),
+            )
+            .expect("loaded runtime acknowledgement")
         );
 
         let outcome = install_bundle(&destination, &config_dir, true).expect("idempotent update");
 
         assert_eq!(outcome, InstallOutcome::AlreadyCurrent);
+        let runtime_state = outcome.runtime_state(
+            reload_pending_at(&config_dir)
+                .expect("reload state")
+                .map(|marker| marker.activation),
+        );
+        assert_eq!(runtime_state.reload_required, Some(false));
+        assert!(!runtime_state.runtime_ack_pending);
         assert!(
-            !outcome.reload_required(
-                reload_pending_at(&config_dir)
-                    .expect("reload state")
-                    .is_some()
+            super::runtime_ack_matches_at(
+                &config_dir,
+                super::BROWSER_BRIDGE_RUNTIME_BUILD,
+                secret.trim(),
             )
+            .expect("durable acknowledgement")
+        );
+    }
+
+    #[test]
+    fn current_files_without_pending_or_positive_ack_return_to_unknown() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
+        install_bundle(&destination, &config_dir, false).expect("initial install");
+        super::remove_private_state_file(
+            &config_dir.join(super::RELOAD_PENDING_FILE),
+            "test pending marker",
+        )
+        .expect("simulate a lost pending marker");
+        assert!(
+            super::runtime_ack_at(&config_dir)
+                .expect("ack state")
+                .is_none()
+        );
+
+        let outcome =
+            install_bundle(&destination, &config_dir, true).expect("conservative recheck");
+        let pending = reload_pending_at(&config_dir)
+            .expect("pending state")
+            .expect("missing acknowledgement must recreate pending");
+
+        assert_eq!(outcome, InstallOutcome::AlreadyCurrent);
+        assert_eq!(pending.activation, PendingActivation::Restore);
+        let state = outcome.runtime_state(Some(pending.activation));
+        assert_eq!(state.reload_required, None);
+        assert!(state.runtime_ack_pending);
+    }
+
+    #[test]
+    fn exact_positive_ack_survives_a_missing_pending_marker() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
+        install_bundle(&destination, &config_dir, false).expect("initial install");
+        let secret =
+            fs::read_to_string(config_dir.join(super::BRIDGE_SECRET_FILE)).expect("secret");
+        assert!(
+            acknowledge_runtime_build_at(
+                &config_dir,
+                super::BROWSER_BRIDGE_RUNTIME_BUILD,
+                secret.trim(),
+            )
+            .expect("authenticated runtime")
+        );
+        assert!(
+            reload_pending_at(&config_dir)
+                .expect("pending state")
+                .is_none()
+        );
+
+        let outcome = install_bundle(&destination, &config_dir, true).expect("idempotent check");
+        let state = outcome.runtime_state(
+            reload_pending_at(&config_dir)
+                .expect("pending state")
+                .map(|marker| marker.activation),
+        );
+
+        assert_eq!(outcome, InstallOutcome::AlreadyCurrent);
+        assert_eq!(state.reload_required, Some(false));
+        assert!(!state.runtime_ack_pending);
+    }
+
+    #[test]
+    fn stale_or_wrong_build_ack_cannot_make_current_files_ready() {
+        for (build_id, fingerprint) in [
+            ("0.0.1".to_string(), "a".repeat(64)),
+            (
+                super::BROWSER_BRIDGE_RUNTIME_BUILD.to_string(),
+                "b".repeat(64),
+            ),
+        ] {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let config_dir = temp.path().join("config");
+            let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
+            install_bundle(&destination, &config_dir, false).expect("initial install");
+            super::remove_private_state_file(
+                &config_dir.join(super::RELOAD_PENDING_FILE),
+                "test pending marker",
+            )
+            .expect("remove pending");
+            super::atomic_write_private_file(
+                &config_dir.join(super::RUNTIME_ACK_FILE),
+                format!("schema=1\nruntime_build={build_id}\nsecret_fingerprint={fingerprint}\n")
+                    .as_bytes(),
+                "test runtime acknowledgement",
+            )
+            .expect("stale ack fixture");
+
+            let outcome =
+                install_bundle(&destination, &config_dir, true).expect("reject stale ack");
+
+            assert_eq!(outcome, InstallOutcome::AlreadyCurrent);
+            assert!(
+                reload_pending_at(&config_dir)
+                    .expect("pending state")
+                    .is_some(),
+                "stale ACK must be replaced by conservative pending evidence"
+            );
+            assert!(
+                super::runtime_ack_at(&config_dir)
+                    .expect("ack state")
+                    .is_none(),
+                "pending write must invalidate stale positive evidence"
+            );
+        }
+    }
+
+    #[test]
+    fn no_pending_wrong_build_runtime_cannot_create_positive_ack() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
+        install_bundle(&destination, &config_dir, false).expect("initial install");
+        let secret =
+            fs::read_to_string(config_dir.join(super::BRIDGE_SECRET_FILE)).expect("secret");
+        super::remove_private_state_file(
+            &config_dir.join(super::RELOAD_PENDING_FILE),
+            "test pending marker",
+        )
+        .expect("remove pending");
+
+        assert!(
+            !acknowledge_runtime_build_at(&config_dir, "0.0.1", secret.trim())
+                .expect("wrong runtime result")
+        );
+        assert!(
+            super::runtime_ack_at(&config_dir)
+                .expect("ack state")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn acknowledged_install_updates_through_the_reload_pending_path() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
+        install_bundle(&destination, &config_dir, false).expect("initial install");
+        let secret =
+            fs::read_to_string(config_dir.join(super::BRIDGE_SECRET_FILE)).expect("pairing secret");
+        assert!(
+            acknowledge_runtime_build_at(
+                &config_dir,
+                super::BROWSER_BRIDGE_RUNTIME_BUILD,
+                secret.trim(),
+            )
+            .expect("initial runtime acknowledgement")
+        );
+        fs::write(
+            destination.join("service-worker.js"),
+            format!("{SERVICE_WORKER}\n// next runtime"),
+        )
+        .expect("stale runtime fixture");
+
+        let outcome = install_bundle(&destination, &config_dir, true).expect("runtime update");
+        let pending = reload_pending_at(&config_dir).expect("reload marker");
+        let runtime_state = outcome.runtime_state(pending.map(|marker| marker.activation));
+
+        assert_eq!(outcome, InstallOutcome::Updated);
+        assert_eq!(
+            runtime_state.pending_origin,
+            Some(PendingActivation::Reload)
+        );
+        assert_eq!(runtime_state.reload_required, Some(true));
+        assert_eq!(outcome.status(runtime_state), "reload_pending");
+        assert_eq!(
+            activation_guidance(outcome, runtime_state),
+            (Some("reload"), vec!["reload"])
+        );
+    }
+
+    #[test]
+    fn exact_known_dev_manifest_is_a_noop_but_reserialized_json_is_an_update() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
+        install_bundle(&destination, &config_dir, false).expect("initial install");
+        fs::write(
+            destination.join("manifest.json"),
+            render_manifest_with_version_name("0.2.0"),
+        )
+        .expect("known development manifest");
+
+        let outcome =
+            install_bundle(&destination, &config_dir, true).expect("known manifest recheck");
+        assert_eq!(outcome, InstallOutcome::AlreadyCurrent);
+        assert_eq!(
+            fs::read_to_string(destination.join("manifest.json")).expect("preserved manifest"),
+            render_manifest_with_version_name("0.2.0")
+        );
+
+        let manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(destination.join("manifest.json")).expect("development manifest"),
+        )
+        .expect("valid manifest");
+        fs::write(
+            destination.join("manifest.json"),
+            serde_json::to_vec(&manifest).expect("reserialized manifest"),
+        )
+        .expect("write reserialized manifest");
+
+        let outcome =
+            install_bundle(&destination, &config_dir, true).expect("reserialized manifest update");
+        assert_eq!(outcome, InstallOutcome::Updated);
+        assert!(
+            reload_pending_at(&config_dir)
+                .expect("reload marker")
+                .is_some()
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("manifest.json")).expect("normalized manifest"),
+            render_manifest()
         );
     }
 
     #[test]
     fn a_current_legacy_bundle_only_gains_the_sentinel_and_needs_no_reload() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let destination = temp.path().join("browser-extension");
         let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
         install_bundle(&destination, &config_dir, false).expect("initial install");
+        let secret =
+            fs::read_to_string(config_dir.join(super::BRIDGE_SECRET_FILE)).expect("pairing secret");
+        assert!(
+            acknowledge_runtime_build_at(
+                &config_dir,
+                super::BROWSER_BRIDGE_RUNTIME_BUILD,
+                secret.trim(),
+            )
+            .expect("loaded runtime acknowledgement")
+        );
         fs::remove_file(destination.join(MANAGED_SENTINEL)).expect("remove modern sentinel");
 
         let outcome =
             install_bundle(&destination, &config_dir, true).expect("adopt current legacy bundle");
 
         assert_eq!(outcome, InstallOutcome::AlreadyCurrent);
-        assert!(
-            !outcome.reload_required(
-                reload_pending_at(&config_dir)
-                    .expect("reload state")
-                    .is_some()
-            )
+        let runtime_state = outcome.runtime_state(
+            reload_pending_at(&config_dir)
+                .expect("reload state")
+                .map(|marker| marker.activation),
         );
+        assert_eq!(runtime_state.reload_required, Some(false));
+        assert!(!runtime_state.runtime_ack_pending);
         assert!(destination.join(MANAGED_SENTINEL).is_file());
     }
 
     #[test]
     fn update_rotates_secret_and_only_the_matching_runtime_pairing_clears_reload_pending() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let destination = temp.path().join("browser-extension");
         let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
         install_bundle(&destination, &config_dir, false).expect("initial install");
         let original_secret = fs::read_to_string(config_dir.join("browser-extension-secret"))
             .expect("original secret");
@@ -2686,7 +4625,7 @@ mod tests {
             format!("{SERVICE_WORKER}\n// trigger update"),
         )
         .expect("stale bundle");
-        install_bundle(&destination, &config_dir, true).expect("update bundle");
+        let outcome = install_bundle(&destination, &config_dir, true).expect("update bundle");
         let rotated_secret = fs::read_to_string(config_dir.join("browser-extension-secret"))
             .expect("rotated secret");
         let generated_config =
@@ -2695,11 +4634,27 @@ mod tests {
         assert_ne!(rotated_secret, original_secret);
         assert!(generated_config.contains(rotated_secret.trim()));
         assert!(!generated_config.contains(original_secret.trim()));
+        let runtime_state = outcome.runtime_state(
+            reload_pending_at(&config_dir)
+                .expect("pending state")
+                .map(|marker| marker.activation),
+        );
+        assert_eq!(outcome, InstallOutcome::Updated);
+        assert_eq!(outcome.status(runtime_state), "activation_pending");
+        assert_eq!(runtime_state.reload_required, None);
+        assert_eq!(
+            activation_guidance(outcome, runtime_state),
+            (
+                Some("ensure_loaded"),
+                vec!["load_unpacked_if_missing", "enable_and_reload_if_present"]
+            )
+        );
         assert_eq!(
             reload_pending_at(&config_dir).expect("pending marker"),
             Some(super::ReloadPendingMarker {
                 runtime_build: super::BROWSER_BRIDGE_RUNTIME_BUILD.to_string(),
                 secret_fingerprint: Some(secret_fingerprint(rotated_secret.trim())),
+                activation: PendingActivation::LoadUnpacked,
             })
         );
         assert!(
@@ -2737,20 +4692,20 @@ mod tests {
             None
         );
         assert!(
-            !acknowledge_runtime_build_at(
+            acknowledge_runtime_build_at(
                 &config_dir,
                 super::BROWSER_BRIDGE_RUNTIME_BUILD,
                 rotated_secret.trim()
             )
-            .expect("idempotent acknowledgement")
+            .expect("idempotent acknowledgement remains valid")
         );
     }
 
     #[test]
     fn already_current_install_advances_a_stale_pending_build_identity() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let destination = temp.path().join("browser-extension");
         let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
         install_bundle(&destination, &config_dir, false).expect("initial install");
         let secret = fs::read_to_string(config_dir.join("browser-extension-secret"))
             .expect("pairing secret");
@@ -2766,6 +4721,7 @@ mod tests {
             Some(super::ReloadPendingMarker {
                 runtime_build: super::BROWSER_BRIDGE_RUNTIME_BUILD.to_string(),
                 secret_fingerprint: Some(secret_fingerprint(secret.trim())),
+                activation: PendingActivation::Reload,
             })
         );
     }
@@ -2774,10 +4730,14 @@ mod tests {
     fn legacy_one_line_reload_marker_remains_acknowledgeable() {
         let temp = tempfile::tempdir().expect("temp dir");
         let config_dir = temp.path().join("config");
-        fs::create_dir(&config_dir).expect("config dir");
-        fs::write(
-            config_dir.join(super::RELOAD_PENDING_FILE),
-            format!("{}\n", super::BROWSER_BRIDGE_RUNTIME_BUILD),
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
+        install_bundle(&destination, &config_dir, false).expect("initial install");
+        let secret =
+            fs::read_to_string(config_dir.join(super::BRIDGE_SECRET_FILE)).expect("secret");
+        super::atomic_write_private_file(
+            &config_dir.join(super::RELOAD_PENDING_FILE),
+            format!("{}\n", super::BROWSER_BRIDGE_RUNTIME_BUILD).as_bytes(),
+            "legacy pending marker",
         )
         .expect("legacy marker");
 
@@ -2785,7 +4745,7 @@ mod tests {
             acknowledge_runtime_build_at(
                 &config_dir,
                 super::BROWSER_BRIDGE_RUNTIME_BUILD,
-                &"a".repeat(64)
+                secret.trim()
             )
             .expect("legacy acknowledgement")
         );
@@ -2796,10 +4756,36 @@ mod tests {
     }
 
     #[test]
+    fn schema_one_pending_marker_migrates_as_reload_origin() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        fs::create_dir(&config_dir).expect("config dir");
+        let secret = "a".repeat(64);
+        super::atomic_write_private_file(
+            &config_dir.join(super::RELOAD_PENDING_FILE),
+            format!(
+                "schema=1\nruntime_build={}\nsecret_fingerprint={}\n",
+                super::BROWSER_BRIDGE_RUNTIME_BUILD,
+                secret_fingerprint(&secret)
+            )
+            .as_bytes(),
+            "schema-one pending marker",
+        )
+        .expect("schema one marker");
+
+        assert_eq!(
+            reload_pending_at(&config_dir)
+                .expect("legacy marker")
+                .map(|marker| marker.activation),
+            Some(PendingActivation::Reload)
+        );
+    }
+
+    #[test]
     fn failed_bundle_swap_conservatively_keeps_reload_pending() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let destination = temp.path().join("browser-extension");
         let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
         fs::create_dir(&config_dir).expect("config dir");
         fs::create_dir(&destination).expect("destination");
         fs::write(destination.join("old"), "old").expect("old bundle");
@@ -2835,6 +4821,7 @@ mod tests {
             Some(super::ReloadPendingMarker {
                 runtime_build: super::BROWSER_BRIDGE_RUNTIME_BUILD.to_string(),
                 secret_fingerprint: Some(secret_fingerprint(&secret)),
+                activation: PendingActivation::Reload,
             })
         );
     }
@@ -2855,6 +4842,74 @@ mod tests {
         let not_a_file = temp.path().join("secret-directory");
         fs::create_dir(&not_a_file).expect("secret directory fixture");
         assert!(read_bridge_secret(&not_a_file).is_err());
+    }
+
+    #[test]
+    fn pairing_status_distinguishes_repairable_values_from_unsafe_entries() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        fs::create_dir(&config_dir).expect("config dir");
+        let secret_path = config_dir.join(super::BRIDGE_SECRET_FILE);
+
+        assert_eq!(
+            bridge_pairing_status_at(&config_dir),
+            BridgePairingStatus::Missing
+        );
+        super::atomic_write_private_file(&secret_path, b"short", "repairable corrupt secret")
+            .expect("repairable corrupt secret");
+        assert_eq!(
+            bridge_pairing_status_at(&config_dir),
+            BridgePairingStatus::Corrupt
+        );
+        super::atomic_write_private_file(&secret_path, &[0xff, 0xfe], "non-UTF8 secret")
+            .expect("non-UTF8 secret");
+        assert_eq!(
+            bridge_pairing_status_at(&config_dir),
+            BridgePairingStatus::UnsafeOrInaccessible
+        );
+        super::atomic_write_private_file(&secret_path, "a".repeat(64).as_bytes(), "valid secret")
+            .expect("valid secret");
+        assert_eq!(
+            bridge_pairing_status_at(&config_dir),
+            BridgePairingStatus::BundleMissing
+        );
+        fs::remove_file(&secret_path).expect("remove secret");
+        fs::create_dir(&secret_path).expect("directory placeholder");
+        assert_eq!(
+            bridge_pairing_status_at(&config_dir),
+            BridgePairingStatus::UnsafeOrInaccessible
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pairing_status_rejects_symlinked_and_unreadable_secret_entries() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        fs::create_dir(&config_dir).expect("config dir");
+        let secret_path = config_dir.join(super::BRIDGE_SECRET_FILE);
+        let outside = temp.path().join("outside-secret");
+        fs::write(&outside, "a".repeat(64)).expect("outside secret");
+        symlink(&outside, &secret_path).expect("secret symlink");
+        assert_eq!(
+            bridge_pairing_status_at(&config_dir),
+            BridgePairingStatus::UnsafeOrInaccessible
+        );
+
+        fs::remove_file(&secret_path).expect("remove symlink");
+        fs::write(&secret_path, "a".repeat(64)).expect("secret");
+        fs::set_permissions(&secret_path, fs::Permissions::from_mode(0o000))
+            .expect("make secret unreadable");
+        if unsafe { libc::geteuid() } != 0 {
+            assert_eq!(
+                bridge_pairing_status_at(&config_dir),
+                BridgePairingStatus::UnsafeOrInaccessible
+            );
+        }
+        fs::set_permissions(&secret_path, fs::Permissions::from_mode(0o600))
+            .expect("restore secret permissions");
     }
 
     #[test]
@@ -2885,18 +4940,213 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_installation_evidence_fails_closed() {
+    fn corrupt_owned_installation_marker_is_conservative_and_force_rebuilds_it() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
+        fs::create_dir(&config_dir).expect("config dir");
+        super::atomic_write_private_file(
+            &config_dir.join(super::INSTALLATION_MARKER_FILE),
+            b"corrupt",
+            "corrupt installation marker",
+        )
+        .expect("corrupt marker");
+
+        assert!(
+            installation_evidence_at(&config_dir)
+                .expect("owned regular marker remains historical evidence")
+        );
+        assert_eq!(
+            bridge_pairing_status_at(&config_dir),
+            BridgePairingStatus::PairingMissing
+        );
+
+        assert_eq!(
+            install_bundle(&destination, &config_dir, true).expect("force rebuild marker"),
+            InstallOutcome::Restored
+        );
+        assert_eq!(
+            fs::read_to_string(config_dir.join(super::INSTALLATION_MARKER_FILE))
+                .expect("rebuilt installation marker"),
+            super::INSTALLATION_MARKER_CONTENT
+        );
+    }
+
+    #[test]
+    fn corrupt_runtime_ack_marker_fails_closed_without_false_force_promise() {
         let temp = tempfile::tempdir().expect("temp dir");
         let config_dir = temp.path().join("config");
         fs::create_dir(&config_dir).expect("config dir");
-        fs::write(config_dir.join(super::INSTALLATION_MARKER_FILE), "corrupt")
-            .expect("corrupt marker");
+        super::atomic_write_private_file(
+            &config_dir.join(super::RELOAD_PENDING_FILE),
+            b"schema=broken",
+            "corrupt runtime marker",
+        )
+        .expect("corrupt runtime marker");
 
-        let error =
-            installation_evidence_at(&config_dir).expect_err("corrupt marker must fail closed");
+        let error = reload_pending_at(&config_dir).expect_err("corrupt marker must fail closed");
 
-        assert!(error.to_string().contains("installation marker"));
-        assert!(error.to_string().contains("corrupt"));
+        assert!(error.to_string().contains("runtime-ack marker"));
+        assert!(error.to_string().contains("will not"));
+        assert!(error.to_string().contains("only after verifying"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exposed_state_markers_never_create_positive_readiness() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
+        install_bundle(&destination, &config_dir, false).expect("initial install");
+        let secret =
+            fs::read_to_string(config_dir.join(super::BRIDGE_SECRET_FILE)).expect("secret");
+
+        let pending_path = config_dir.join(super::RELOAD_PENDING_FILE);
+        fs::set_permissions(&pending_path, fs::Permissions::from_mode(0o644))
+            .expect("expose pending marker");
+        assert_eq!(
+            super::reload_pending_state_at(&config_dir).expect("pending security state"),
+            super::ReloadPendingState::Exposed
+        );
+        assert_eq!(
+            reload_pending_at(&config_dir)
+                .expect("conservative pending")
+                .map(|marker| marker.activation),
+            Some(PendingActivation::Restore)
+        );
+        assert!(
+            !acknowledge_runtime_build_at(
+                &config_dir,
+                super::BROWSER_BRIDGE_RUNTIME_BUILD,
+                secret.trim(),
+            )
+            .expect("exposed pending must reject ACK")
+        );
+        install_bundle(&destination, &config_dir, true).expect("rewrite pending safely");
+        assert_eq!(
+            fs::metadata(&pending_path)
+                .expect("pending metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert!(
+            super::runtime_ack_at(&config_dir)
+                .expect("ACK state")
+                .is_none()
+        );
+
+        let installation_marker = config_dir.join(super::INSTALLATION_MARKER_FILE);
+        fs::set_permissions(&installation_marker, fs::Permissions::from_mode(0o644))
+            .expect("expose installation marker");
+        assert!(
+            !super::installation_marker_recorded_at(&config_dir)
+                .expect("exposed installation evidence is ignored")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exposed_positive_ack_is_treated_as_absent_and_replaced_by_pending() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
+        install_bundle(&destination, &config_dir, false).expect("initial install");
+        let secret =
+            fs::read_to_string(config_dir.join(super::BRIDGE_SECRET_FILE)).expect("secret");
+        assert!(
+            acknowledge_runtime_build_at(
+                &config_dir,
+                super::BROWSER_BRIDGE_RUNTIME_BUILD,
+                secret.trim(),
+            )
+            .expect("initial ACK")
+        );
+        let ack_path = config_dir.join(super::RUNTIME_ACK_FILE);
+        fs::set_permissions(&ack_path, fs::Permissions::from_mode(0o644))
+            .expect("expose positive ACK");
+
+        let outcome = install_bundle(&destination, &config_dir, true).expect("safe recheck");
+
+        assert_eq!(outcome, InstallOutcome::AlreadyCurrent);
+        assert!(
+            super::runtime_ack_at(&config_dir)
+                .expect("ACK state")
+                .is_none()
+        );
+        assert_eq!(
+            reload_pending_at(&config_dir)
+                .expect("pending state")
+                .map(|marker| marker.activation),
+            Some(PendingActivation::Restore)
+        );
+    }
+
+    #[test]
+    fn missing_or_modified_generated_assets_block_ack_and_are_force_repaired() {
+        for mutation in ["missing_service_worker", "modified_manifest"] {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let config_dir = temp.path().join("config");
+            let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
+            install_bundle(&destination, &config_dir, false).expect("initial install");
+            let original_secret =
+                fs::read_to_string(config_dir.join(super::BRIDGE_SECRET_FILE)).expect("secret");
+            assert!(
+                acknowledge_runtime_build_at(
+                    &config_dir,
+                    super::BROWSER_BRIDGE_RUNTIME_BUILD,
+                    original_secret.trim(),
+                )
+                .expect("initial ACK")
+            );
+            match mutation {
+                "missing_service_worker" => {
+                    fs::remove_file(destination.join("service-worker.js"))
+                        .expect("remove generated asset");
+                }
+                "modified_manifest" => {
+                    fs::write(destination.join("manifest.json"), b"{}")
+                        .expect("modify generated manifest");
+                }
+                _ => unreachable!(),
+            }
+
+            assert_eq!(
+                bridge_pairing_status_at(&config_dir),
+                BridgePairingStatus::BundleCorrupt
+            );
+            assert!(super::trusted_bridge_secret_at(&config_dir).is_err());
+            assert!(
+                !acknowledge_runtime_build_at(
+                    &config_dir,
+                    super::BROWSER_BRIDGE_RUNTIME_BUILD,
+                    original_secret.trim(),
+                )
+                .expect("corrupt bundle must not ACK")
+            );
+
+            assert_eq!(
+                install_bundle(&destination, &config_dir, true).expect("repair generated bundle"),
+                InstallOutcome::Updated
+            );
+            assert_eq!(
+                bridge_pairing_status_at(&config_dir),
+                BridgePairingStatus::Present
+            );
+            let rotated =
+                fs::read_to_string(config_dir.join(super::BRIDGE_SECRET_FILE)).expect("rotated");
+            assert_ne!(rotated.trim(), original_secret.trim());
+            assert!(
+                reload_pending_at(&config_dir)
+                    .expect("pending state")
+                    .is_some()
+            );
+        }
     }
 
     #[test]
@@ -2922,8 +5172,8 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let temp = tempfile::tempdir().expect("temp dir");
-        let destination = temp.path().join("browser-extension");
         let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
         let target = temp.path().join("sensitive");
         fs::create_dir(&config_dir).expect("config dir");
         fs::write(&target, "a".repeat(64)).expect("symlink target");
@@ -2965,20 +5215,33 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("temp dir");
         let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
         let target = temp.path().join("sensitive");
-        fs::create_dir(&config_dir).expect("config dir");
+        install_bundle(&destination, &config_dir, false).expect("initial install");
+        let secret =
+            fs::read_to_string(config_dir.join(super::BRIDGE_SECRET_FILE)).expect("secret");
+        super::remove_private_state_file(
+            &config_dir.join(super::RELOAD_PENDING_FILE),
+            "test pending marker",
+        )
+        .expect("remove original pending");
         fs::write(&target, super::BROWSER_BRIDGE_RUNTIME_BUILD).expect("symlink target");
         symlink(&target, config_dir.join(super::RELOAD_PENDING_FILE)).expect("pending symlink");
 
         let error = reload_pending_at(&config_dir).expect_err("symlink must not be read");
         assert!(error.to_string().contains("symbolic link"));
-        let error = acknowledge_runtime_build_at(
-            &config_dir,
-            super::BROWSER_BRIDGE_RUNTIME_BUILD,
-            &"a".repeat(64),
-        )
-        .expect_err("symlink must not be acknowledged");
-        assert!(error.to_string().contains("symbolic link"));
+        assert!(
+            !acknowledge_runtime_build_at(
+                &config_dir,
+                super::BROWSER_BRIDGE_RUNTIME_BUILD,
+                secret.trim(),
+            )
+            .expect("unsafe pending state must reject acknowledgement")
+        );
+        assert_eq!(
+            bridge_pairing_status_at(&config_dir),
+            BridgePairingStatus::UnsafeOrInaccessible
+        );
         assert_eq!(
             fs::read_to_string(&target).expect("target remains"),
             super::BROWSER_BRIDGE_RUNTIME_BUILD
@@ -3016,8 +5279,8 @@ mod tests {
     #[test]
     fn concurrent_process_installs_keep_secret_and_bundle_config_consistent() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let destination = temp.path().join("browser-extension");
         let config_dir = temp.path().join("config");
+        let destination = config_dir.join(super::DEFAULT_EXTENSION_DIRECTORY);
         let go = temp.path().join("go");
         let ready_one = temp.path().join("ready-one");
         let ready_two = temp.path().join("ready-two");

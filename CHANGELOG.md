@@ -11,7 +11,63 @@ backward-compatible features, upstream protocol adaptations, and fixes.
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-07-28
+## [0.2.0] - 2026-07-29
+
+### Security
+
+- Made challenge browsers discover Suno's current clean same-origin route from its stable root
+  instead of treating one pathname as permanent. Redirects are allowed only during credentialless
+  discovery; every managed navigation is bound to a fresh network-visible query nonce plus the
+  matching document nonce, and any later redirect fails closed.
+- Replaced the stopped host response at isolated-world `document_start` with an empty
+  extension-owned credentialless document. Provider-specific CSP rules allow only the packaged
+  runner and current hCaptcha or Turnstile origins. The isolated controller reuses the parser's
+  existing document root before injecting the packaged MAIN-world runner, avoiding the
+  `HierarchyRequestError` raised when a second root is inserted at `document_start`. Request and
+  response rules remove credentials, conditional cache headers, storage writes, redirects,
+  preloads, reports, and other side-effect-bearing headers.
+- Added final request/response lifecycle verification before the managed frame Port can connect.
+  The Bridge now rejects cached, redirected, non-HTML, multiply rewritten, credential-bearing, or
+  otherwise non-controlled documents, while retaining its single bounded cold-start retry and
+  fail-closed cleanup on every terminal path.
+- Made offscreen frame identity follow Chrome's real extension contracts: the service worker
+  obtains the hidden owner's `documentId` from `runtime.getContexts`, then binds the exact nonce
+  navigation to that `parentDocumentId` through a verified request/response lifecycle. This avoids
+  requiring the frame and document fields Chrome omits from no-tab content-script senders, while
+  still treating either optional field as a conflict check when a browser version supplies it.
+  The offscreen document now identifies its lifecycle with a random per-instance client ID, while
+  only the service worker calls privileged `runtime.getContexts` and binds that client to the
+  current hidden owner `documentId`. Binding requires the same client to answer both sides of two
+  stable owner lookups, rejecting replacement in either handshake window. Lifecycle messages
+  cannot choose their own owner, and a
+  replacement client is rejected until the worker rebinds it and cleans the prior environment.
+  A lifecycle message that wakes a suspended Manifest V3 worker can re-establish the same
+  ping-verified binding before preparation, so the live offscreen poller cannot lose a challenge
+  during the worker's asynchronous bootstrap window.
+  Owner lookup is registered before its first await and rechecked around rule commits, so a
+  replaced hidden document cannot install or mutate a stale nonce. Terminal release prioritizes
+  that registered replacement transaction over any stale active owner, ensuring a timed-out
+  prepare is still awaited and cleaned instead of leaving an orphaned environment.
+  Cold-start retry no longer depends on the iframe `load` event that the deliberate
+  `window.stop()` suppresses, and explicitly retires the first network
+  reservation before removing its iframe so Chrome's delayed cancellation cannot poison the
+  replacement. Environment preparation and rotation are bounded by the same readiness budget,
+  while explicit frame network failures deterministically fail closed instead of racing a retry.
+  A prepare waiting behind stale-rule cleanup is now registered before the wait, so a timed-out
+  request still owns eventual cleanup and cannot install an orphaned nonce. While a prepare is
+  pending, releases from rejected foreign nonces cannot mutate its retired predecessor or race
+  the rule rotation. Sanitized startup-stage diagnostics remain read-only and cannot trigger
+  execution. The controller now keeps polling while its asynchronously loaded MAIN-world runner
+  marks the document ready, closing a race that could otherwise lose the only Port connection
+  attempt. Trusted request and response milestones distinguish network, injection, and sender
+  validation failures without exposing request data.
+- Kept the invisible context free of tabs, popups, top-navigation, downloads, persistent Suno
+  storage, and separate browser processes; failed controlled challenges never fall back to a
+  credentialed Suno page.
+- Matched Suno Web's Turnstile retry lifecycle while preserving a bounded, allowlisted failure
+  family across the managed frame boundary. Error and timeout callbacks can recover silently before
+  a 30-second cap; unsupported browsers, interaction requirements, and the silent callback deadline
+  remain distinguishable without forwarding raw provider text, page data, or tokens.
 
 ### Changed
 
@@ -56,6 +112,15 @@ backward-compatible features, upstream protocol adaptations, and fixes.
   lock with owner-only Unix modes and protected per-user Windows DACLs.
 - Accepted Chrome offscreen-frame connections when the optional runtime `documentId` is absent,
   while retaining extension identity, no-tab, frame, origin, URL, and one-time nonce validation.
+- Decoupled the Browser Bridge manifest identity from the CLI package version, so CLI-only releases
+  do not rotate the pairing secret or require a Chrome reload. Installer output now separates a
+  first Load-unpacked activation, an acknowledged update that needs one Reload, restored or
+  uncertain Chrome state that must be conditionally ensured, and an already-current bundle whose
+  exact runtime acknowledgement is still pending. It preserves that origin across upgrades,
+  actively probes idempotent and restored installs, and reports one machine-readable activation
+  decision with condition-labelled alternatives. Doctor now distinguishes missing, repairably
+  corrupt, and unsafe or inaccessible pairing state without exposing secret material or promising
+  an unsafe repair.
 
 ### Removed
 

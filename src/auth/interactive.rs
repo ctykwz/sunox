@@ -28,7 +28,7 @@ use crate::core::CliError;
 use crate::net::http;
 
 const CDP_HOST: &str = "127.0.0.1";
-const LOGIN_URL: &str = "https://suno.com/create";
+const LOGIN_URL: &str = "https://suno.com/home/advanced";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 const EXISTING_SESSION_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);

@@ -154,11 +154,13 @@ sunox update                       更新到最新 GitHub Release
 在用户日常使用的 Chrome Profile 中执行不可见的验证组件。扩展空闲时只保留本地监听器；需要
 验证时，它会在 Chrome 不可见的 offscreen document 中创建一个绑定随机 nonce 的 `suno.com`
 iframe。iframe 保留正常布局尺寸，供对可见性敏感的验证代码计算，但 Chrome 不会创建标签页、
-弹窗、最小化窗口或独立浏览器进程。只有扩展拥有的一级 iframe 且 nonce 完全匹配时才能连接；
-标准页面必须加载完成并保持稳定，Bridge 才执行一次静默 Challenge。异常跳转、重载、断连、
-协议漂移或身份不匹配都会删除 iframe 并失败退出；得到 Token 或终态错误后也会立即删除 iframe，
-且绝不降级到任何可见窗口。页面原始错误不会越过 Bridge 边界，也不会写入存储或日志。该流程
-同时支持 macOS 和 Windows。
+弹窗、最小化窗口或独立浏览器进程。该 iframe 使用临时隔离存储，无法读取用户的 Suno Cookie
+和浏览器持久化数据。Bridge 会在 `document_start` 阶段停止宿主响应，并将其替换为只允许当前
+验证服务运行的最小文档。只有扩展拥有的一级 iframe，且网络请求 nonce、文档 nonce、最终请求头
+和受控响应头全部一致时才能连接。异常跳转、缓存命中、重载、断连、协议漂移或身份不匹配都会
+删除 iframe 并失败退出；得到 Token 或终态错误后也会立即删除 iframe，且绝不降级到任何可见或
+带登录态的窗口。页面原始错误不会越过 Bridge 边界，也不会写入存储或日志。该流程同时支持
+macOS 和 Windows。
 
 默认的 `auto` 模式只会在尚未记录 Bridge 安装状态时，才使用本机匹配的 Chromium 系浏览器
 兜底。一旦安装并配对了 Bridge，`auto` 会在 Bridge 不可用时直接报错，不会悄悄启动独立浏览器。
@@ -187,18 +189,33 @@ sunox install-browser-extension
 sunox doctor --browser-bridge
 ```
 
-扩展安装后，重启 Chrome 仍会保留。Sunox 升级并包含新版 Bridge 时，先刷新本地扩展文件：
+扩展安装后，重启 Chrome 仍会保留。扩展清单使用独立的 Bridge runtime build，因此只更新 CLI、
+没有修改 Bridge 的版本不会改变扩展包，也不需要 Chrome 重新加载。Sunox 升级并确实包含新版
+Bridge 时，刷新本地扩展文件：
 
 ```bash
 sunox install-browser-extension --force
 ```
 
-命令会先比较生成的扩展包与已解压文件，并以 `reload_required` 作为是否重新加载的唯一依据：
-只要它为 `true`，就在 Sunox Browser Bridge 的扩展卡片上点击“重新加载”；即使磁盘文件显示
-`already_current`，也可能表示 Chrome 尚未确认当前运行时。只有 `reload_required=false` 才无需
-在 Chrome 中重新加载。仅重启电脑或 Chrome 绝不需要重新安装或重新加载 Bridge，也无需刷新
-Suno 页面。Sunox 会在 macOS 和 Windows 上自动选择当前用户的应用配置目录；Chrome 使用这个
-未打包扩展期间，不要移动或删除该目录。
+命令会持续记录激活状态，直到 Chrome 认证了完全一致的运行时与配对。首次解压返回
+`status=installed`、`reload_required=null`、`runtime_ack_pending=true`、
+`pending_origin=load_unpacked` 和 `activation_required=load_unpacked`；完成“加载已解压的扩展程序”
+后再运行 `sunox doctor --browser-bridge`。仅有磁盘文件并不会被误报为 Bridge 已就绪。
+
+已认证安装发生更新时，返回 `reload_required=true`、`runtime_ack_pending=true` 和
+`activation_required=reload`：只点击一次“重新加载”，然后运行 doctor。从未完成认证或刚恢复的
+安装，其 Chrome 状态可能不确定，此时 `activation_required=ensure_loaded`；
+`activation_options` 会给出带条件的替代分支，例如 `load_unpacked_if_missing` 或
+`enable_and_reload_if_present`。这些分支互斥，不是需要依次执行的步骤。对已经是最新的扩展包，命令
+会主动探测 Chrome；精确认证成功后会清除 marker，并返回 `reload_required=false`、
+`runtime_ack_pending=false`，且不再要求激活。如果仍无法确认，则返回 `reload_required=null` 和
+`runtime_ack_pending=true`；应遵循唯一的 `activation_required` 决策，不要反复点击“重新加载”。
+
+doctor 会区分配对 secret 缺失和可修复的内容损坏，并明确要求执行一次受管的
+`install-browser-extension --force` 修复。符号链接、非 UTF-8 数据、不可读路径等不安全或无法访问的
+条目会 fail closed，Sunox 不会承诺 `--force` 或“重新加载”可以修复。只更新 CLI、重启电脑或重启
+Chrome 本身都不需要重新安装或重新加载 Bridge，也无需刷新 Suno 页面。Sunox 会在 macOS 和
+Windows 上自动选择当前用户的应用配置目录；Chrome 使用这个未打包扩展期间，不要移动或删除该目录。
 
 相关覆盖参数如下：
 

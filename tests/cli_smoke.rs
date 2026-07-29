@@ -67,6 +67,24 @@ fn browser_extension_installer_extracts_a_paired_unpacked_extension() {
     let response: serde_json::Value =
         serde_json::from_slice(stdout).expect("structured installer output");
     assert_eq!(response["data"]["installed"], true);
+    assert_eq!(response["data"]["status"], "installed");
+    assert_eq!(response["data"]["reload_required"], serde_json::Value::Null);
+    assert_eq!(response["data"]["runtime_ack_pending"], true);
+    assert_eq!(response["data"]["pending_origin"], "load_unpacked");
+    assert_eq!(response["data"]["activation_required"], "load_unpacked");
+    assert_eq!(
+        response["data"]["activation_options"],
+        serde_json::json!(["load_unpacked"])
+    );
+    assert!(
+        response["data"]["next_steps"]
+            .as_array()
+            .expect("installer next steps")
+            .iter()
+            .any(|step| step
+                .as_str()
+                .is_some_and(|step| step.contains("Load unpacked")))
+    );
     assert_eq!(
         response["data"]["path"],
         extension_path.display().to_string()
@@ -87,8 +105,8 @@ fn browser_extension_installer_extracts_a_paired_unpacked_extension() {
         &std::fs::read_to_string(extension_path.join("manifest.json")).expect("extension manifest"),
     )
     .expect("valid extension manifest");
-    assert_eq!(manifest["version_name"], env!("CARGO_PKG_VERSION"));
-    assert!(!manifest.to_string().contains("__SUNOX_VERSION__"));
+    assert_eq!(manifest["version_name"], manifest["version"]);
+    assert!(!manifest.to_string().contains("__SUNOX_BRIDGE_"));
     let config =
         std::fs::read_to_string(extension_path.join("config.js")).expect("extension config");
     assert!(!config.contains("__SUNOX_BRIDGE_SECRET__"));
@@ -1309,6 +1327,24 @@ fn agent_info_uses_the_offscreen_browser_bridge_contract_everywhere() {
                 "{path} still contains obsolete contract text {obsolete:?}: {description}"
             );
         }
+    }
+
+    let bridge_update = info["config"]["browser_bridge_update"]
+        .as_str()
+        .expect("config.browser_bridge_update must be a string");
+    for required in [
+        "independent Browser Bridge runtime",
+        "pending_origin=load_unpacked",
+        "activation_required=ensure_loaded",
+        "activation_options",
+        "mutually exclusive",
+        "unsafe or inaccessible",
+        "doctor",
+    ] {
+        assert!(
+            bridge_update.contains(required),
+            "config.browser_bridge_update must contain {required:?}: {bridge_update}"
+        );
     }
 }
 

@@ -6,7 +6,7 @@ use crate::api::challenge::ChallengeProvider;
 use super::clip::Clip;
 use super::prompts::PromptUpsampleResponse;
 
-const WEB_CLIENT_PATHNAME: &str = "/create";
+const WEB_CLIENT_PATHNAME: &str = "/home/advanced";
 const GENERATION_TYPE_TEXT: &str = "TEXT";
 const TAG_UPSAMPLE_PERSONALIZATION_ENABLED: bool = true;
 
@@ -274,7 +274,7 @@ mod tests {
         let body = serde_json::to_value(request).expect("request json");
 
         assert_eq!(body["generation_type"], "TEXT");
-        assert_eq!(body["metadata"]["web_client_pathname"], "/create");
+        assert_eq!(body["metadata"]["web_client_pathname"], "/home/advanced");
         assert_eq!(body["metadata"]["user_tier"], "tier-pro");
         assert!(body["metadata"]["create_session_token"].as_str().is_some());
         assert!(body["transaction_uuid"].as_str().is_some());

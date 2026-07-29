@@ -864,9 +864,7 @@ fn valid_extension_origin(origin: &str) -> bool {
 }
 
 fn is_suno_page(page_url: &str) -> bool {
-    reqwest::Url::parse(page_url).is_ok_and(|url| {
-        url.scheme() == "https" && url.host_str() == Some("suno.com") && url.username().is_empty()
-    })
+    reqwest::Url::parse(page_url).is_ok_and(|url| url.as_str() == "https://suno.com/")
 }
 
 async fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, CliError> {
@@ -1040,10 +1038,17 @@ mod tests {
         let sdk_ready_timeout = javascript_number(page, "CHALLENGE_SDK_READY_TIMEOUT_MS");
         let hcaptcha_silent_timeout = javascript_number(page, "HCAPTCHA_SILENT_TIMEOUT_MS");
         let page_timeout = javascript_number(bridge, "challengePageTimeoutMs");
+        let managed_frame_warmup_grace = javascript_number(offscreen, "managedFrameWarmupGraceMs");
+        let managed_frame_prepare_timeout =
+            javascript_number(offscreen, "managedFramePrepareTimeoutMs");
         let managed_frame_ready_timeout =
             javascript_number(offscreen, "managedFrameReadyTimeoutMs");
+        let managed_frame_release_timeout =
+            javascript_number(offscreen, "managedFrameReleaseTimeoutMs");
         let managed_frame_result_timeout =
             javascript_number(offscreen, "managedFrameResultTimeoutMs");
+        let initial_rule_fetch_timeout =
+            javascript_number(service_worker, "INITIAL_RULE_FETCH_TIMEOUT_MS");
         let offscreen_busy_max_age = javascript_number(service_worker, "OFFSCREEN_BUSY_MAX_AGE_MS");
         let transport_request_timeout = javascript_number(transport, "requestTimeoutMs");
         let worst_case_transport_budget = transport_request_timeout * (u64::from(PORT_COUNT) + 3);
@@ -1051,21 +1056,29 @@ mod tests {
         assert_eq!(sdk_ready_timeout, SUNO_CHALLENGE_SDK_READY_TIMEOUT_MS);
         assert_eq!(hcaptcha_silent_timeout, SUNO_HCAPTCHA_SILENT_TIMEOUT_MS);
         assert_eq!(page_timeout, 50_000);
+        assert_eq!(managed_frame_warmup_grace, 3_000);
+        assert_eq!(managed_frame_prepare_timeout, 9_000);
         assert_eq!(managed_frame_ready_timeout, 45_000);
+        assert_eq!(managed_frame_release_timeout, 500);
         assert_eq!(managed_frame_result_timeout, 65_000);
+        assert_eq!(initial_rule_fetch_timeout, 8_000);
         assert_eq!(offscreen_busy_max_age, 125_000);
         assert_eq!(COMPLETION_TIMEOUT_MS, 130_000);
         assert!(
             page_timeout
                 > sdk_ready_timeout + SUNO_TURNSTILE_IDLE_TIMEOUT_MS + hcaptcha_silent_timeout
         );
+        assert!(managed_frame_prepare_timeout > initial_rule_fetch_timeout);
         assert!(managed_frame_result_timeout > page_timeout);
+        let managed_lifecycle_budget = managed_frame_prepare_timeout
+            + managed_frame_ready_timeout
+            + managed_frame_result_timeout
+            + managed_frame_release_timeout
+            + worst_case_transport_budget;
+        assert_eq!(managed_lifecycle_budget, 123_350);
         assert!(
-            offscreen_busy_max_age
-                > managed_frame_ready_timeout
-                    + managed_frame_result_timeout
-                    + worst_case_transport_budget,
-            "busy recovery must preserve the full claim, hidden frame, and result transport budget"
+            offscreen_busy_max_age > managed_lifecycle_budget,
+            "busy recovery must preserve prepare, hidden frame, result, release, and transport budgets"
         );
         assert!(
             COMPLETION_TIMEOUT_MS > offscreen_busy_max_age,
@@ -1226,11 +1239,17 @@ mod tests {
     }
 
     #[test]
-    fn suno_claim_requires_the_exact_https_origin() {
-        assert!(is_suno_page("https://suno.com/create"));
-        assert!(!is_suno_page("http://suno.com/create"));
-        assert!(!is_suno_page("https://evil.suno.com/create"));
-        assert!(!is_suno_page("https://suno.com.evil.example/create"));
+    fn suno_claim_requires_the_clean_discovery_url() {
+        assert!(is_suno_page("https://suno.com/"));
+        assert!(is_suno_page("https://suno.com"));
+        assert!(!is_suno_page("https://suno.com/home/advanced"));
+        assert!(!is_suno_page("https://suno.com/?unexpected=1"));
+        assert!(!is_suno_page("https://suno.com/#unexpected"));
+        assert!(!is_suno_page("https://user:password@suno.com/"));
+        assert!(!is_suno_page("https://suno.com:8443/"));
+        assert!(!is_suno_page("http://suno.com/"));
+        assert!(!is_suno_page("https://evil.suno.com/"));
+        assert!(!is_suno_page("https://suno.com.evil.example/"));
     }
 
     #[test]
@@ -1287,7 +1306,7 @@ mod tests {
     #[test]
     fn first_valid_suno_tab_claims_the_challenge() {
         let (state, _receiver) = state("secret-value");
-        let claim = claim_request("secret-value", "https://suno.com/create");
+        let claim = claim_request("secret-value", "https://suno.com/");
 
         let first = route_request(&claim, &state).expect("first response");
         let second = route_request(&claim, &state).expect("second response");
@@ -1303,7 +1322,7 @@ mod tests {
             (ChallengeProvider::Turnstile, "turnstile"),
         ] {
             let (state, _receiver) = state_with_provider("secret-value", provider);
-            let claim = claim_request("secret-value", "https://suno.com/create");
+            let claim = claim_request("secret-value", "https://suno.com/");
             let response = route_request(&claim, &state).expect("claim response");
             let body: serde_json::Value =
                 serde_json::from_slice(&response.body).expect("claim response json");
@@ -1316,7 +1335,7 @@ mod tests {
     #[test]
     fn probe_claim_requires_a_signed_runtime_ack_without_a_provider() {
         let state = probe_state("secret-value");
-        let claim = claim_request("secret-value", "https://suno.com/create");
+        let claim = claim_request("secret-value", "https://suno.com/");
 
         let response = route_request(&claim, &state).expect("probe response");
         let body: serde_json::Value =
@@ -1348,7 +1367,7 @@ mod tests {
         state
             .claim_state
             .store(CLAIM_CLOSED, std::sync::atomic::Ordering::Release);
-        let claim = claim_request("secret-value", "https://suno.com/create");
+        let claim = claim_request("secret-value", "https://suno.com/");
 
         assert_eq!(route_request(&claim, &state).expect("response").status, 409);
     }
@@ -1356,7 +1375,7 @@ mod tests {
     #[tokio::test]
     async fn matching_result_returns_the_one_time_token() {
         let (state, receiver) = state("secret-value");
-        let claim = claim_request("secret-value", "https://suno.com/create");
+        let claim = claim_request("secret-value", "https://suno.com/");
         assert_eq!(route_request(&claim, &state).expect("claim").status, 200);
         let result = result_request("secret-value", "abcdefghijklmnopqrstuvwxyz");
 
@@ -1372,11 +1391,11 @@ mod tests {
     #[test]
     fn invalid_origin_or_secret_cannot_claim() {
         let (state, _receiver) = state("secret-value");
-        let mut bad_origin = claim_request("secret-value", "https://suno.com/create");
+        let mut bad_origin = claim_request("secret-value", "https://suno.com/");
         bad_origin
             .headers
             .insert("origin".into(), "https://evil.example".into());
-        let bad_secret = claim_request("wrong-secret", "https://suno.com/create");
+        let bad_secret = claim_request("wrong-secret", "https://suno.com/");
 
         assert_eq!(
             route_request(&bad_origin, &state).expect("response").status,
@@ -1414,7 +1433,7 @@ mod tests {
         assert!(hello_response.starts_with("HTTP/1.1 200 OK"));
         assert!(!hello_response.contains("secret-value"));
 
-        let claim = claim_request("secret-value", "https://suno.com/create");
+        let claim = claim_request("secret-value", "https://suno.com/");
         let claim_body = String::from_utf8(claim.body).expect("claim body");
         let claim_response = raw_request(address, "/v3/challenge/claim", &claim_body).await;
         assert!(claim_response.starts_with("HTTP/1.1 200 OK"));
@@ -1460,7 +1479,7 @@ mod tests {
         let hello_response = raw_request(address, "/v3/challenge/hello", &hello_body).await;
         assert!(hello_response.starts_with("HTTP/1.1 200 OK"));
 
-        let claim = claim_request("secret-value", "https://suno.com/create");
+        let claim = claim_request("secret-value", "https://suno.com/");
         let claim_body = String::from_utf8(claim.body).expect("claim body");
         let claim_response = raw_request(address, "/v3/challenge/claim", &claim_body).await;
 

@@ -163,11 +163,14 @@ inside the user's regular Chrome profile. The extension keeps only its local lis
 idle. For a required challenge, it creates one nonce-bound `suno.com` iframe inside Chrome's
 invisible offscreen document. The frame keeps a normal layout viewport for visibility-sensitive
 provider code, but Chrome creates no tab, popup, minimized window, or separate browser process.
-Only the first-level extension-owned frame with the exact nonce may connect; the clean canonical
-page must finish loading and remain stable before one silent challenge is executed. Unexpected
-navigation, reload, disconnect, protocol drift, or identity mismatch removes the frame and fails
-closed. The frame is also removed immediately after a token or terminal error, and there is no
-visible fallback. Raw provider errors never cross the Bridge boundary or enter storage or logs.
+The frame is credentialless, so it cannot read the user's Suno cookies or persistent browser
+storage. At `document_start`, the Bridge stops the host response and replaces it with a minimal
+provider-only challenge document. Only the first-level extension-owned frame whose network-visible
+query nonce, document nonce, final request headers, and controlled response headers all agree may
+connect. Unexpected navigation, caching, reload, disconnect, protocol drift, or identity mismatch
+removes the frame and fails closed. The frame is also removed immediately after a token or terminal
+error, and there is no visible or credentialed fallback. Raw provider errors never cross the Bridge
+boundary or enter storage or logs.
 This flow is supported on macOS and Windows. If the Bridge does not
 respond, the default `auto` mode falls back to the matching installed Chromium-family browser only
 when no Bridge installation has been recorded. Once the Bridge has been installed, `auto` fails closed
@@ -198,21 +201,38 @@ Verify the Bridge transport without creating a song, running a challenge, or con
 sunox doctor --browser-bridge
 ```
 
-The extension stays installed across browser restarts. After a Sunox update that changes the
-bridge, refresh its files and reload it in Chrome:
+The extension stays installed across browser restarts. Its manifest uses the independent Bridge
+runtime build, so a CLI-only release does not change the extracted bundle or require a Chrome
+reload. After a Sunox update that actually changes the Bridge, refresh its files:
 
 ```bash
 sunox install-browser-extension --force
 ```
 
-The command compares the generated bundle with the extracted files first. Use its
-`reload_required` field as the only reload decision: click **Reload** on the Sunox Browser Bridge
-card when it is `true`, including the rare case where the files are `already_current` but Chrome
-has not yet acknowledged that runtime. When `reload_required=false`, no Chrome reload is needed.
-A computer or Chrome restart by itself never requires reinstalling or reloading the Bridge. No
-Suno page reload is needed. The command chooses the correct per-user application directory on both
-macOS and Windows; do not move or delete that directory while Chrome is using the unpacked
-extension.
+The command records activation until Chrome authenticates the exact runtime and pairing. A first
+extraction returns `status=installed`, `reload_required=null`, `runtime_ack_pending=true`,
+`pending_origin=load_unpacked`, and `activation_required=load_unpacked`: complete **Load unpacked**
+and then run `sunox doctor --browser-bridge`. It does not claim the Bridge is ready merely because
+the files exist.
+
+When an acknowledged installation changes, the result is `reload_required=true`,
+`runtime_ack_pending=true`, and `activation_required=reload`: click **Reload** exactly once and run
+doctor. If a never-acknowledged or restored installation has uncertain Chrome state,
+`activation_required=ensure_loaded`; `activation_options` contains condition-labelled alternatives
+such as `load_unpacked_if_missing` or `enable_and_reload_if_present`. These are mutually exclusive
+branches, not steps to run in sequence. An already-current bundle is actively probed; exact
+authentication clears the marker and returns `reload_required=false`,
+`runtime_ack_pending=false`, and no activation requirement. If it remains unknown, the result is
+`reload_required=null` and `runtime_ack_pending=true`; follow its single activation decision rather
+than repeatedly clicking Reload.
+
+Doctor distinguishes a missing or repairably corrupt pairing secret and directs one managed
+`install-browser-extension --force` repair. Unsafe or inaccessible entries, including symlinks,
+non-UTF-8 data, and unreadable paths, fail closed and are not promised to be repairable by force or
+Reload. A CLI-only update, computer restart, or Chrome restart never by itself requires
+reinstalling or reloading the Bridge. No Suno page reload is needed. The command chooses the
+correct per-user application directory on both macOS and Windows; do not move or delete that
+directory while Chrome is using the unpacked extension.
 
 The relevant overrides are:
 

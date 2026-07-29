@@ -1,8 +1,10 @@
 (() => {
+  const MANAGED_PAGE_QUERY_PARAMETER = "__sunox_bridge";
   const MANAGED_PAGE_HASH_PREFIX = "#sunox-browser-bridge=";
-  const CLERK_RETURN_PARAMETER = "__clerk_handshake";
   const MANAGED_NONCE_PATTERN =
     /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  const CONTROLLED_DOCUMENT_ATTRIBUTE = "data-sunox-managed-nonce";
+  const PAGE_READY_ATTRIBUTE = "data-sunox-page-ready";
 
   const managedPageDetails = () => {
     if (
@@ -14,24 +16,22 @@
       const url = new URL(location.href);
       if (
         url.origin !== "https://suno.com"
-        || !["/create", "/create/"].includes(url.pathname)
         || url.username
         || url.password
-        || !url.hash.startsWith(MANAGED_PAGE_HASH_PREFIX)
       ) return null;
-      const nonce = url.hash.slice(MANAGED_PAGE_HASH_PREFIX.length);
-      if (!MANAGED_NONCE_PATTERN.test(nonce)) return null;
-      if (!url.search) return { clerkReturn: false, nonce };
       const keys = [...url.searchParams.keys()];
-      const values = url.searchParams.getAll(CLERK_RETURN_PARAMETER);
+      const values = url.searchParams.getAll(MANAGED_PAGE_QUERY_PARAMETER);
       if (
         keys.length !== 1
-        || keys[0] !== CLERK_RETURN_PARAMETER
+        || keys[0] !== MANAGED_PAGE_QUERY_PARAMETER
         || values.length !== 1
-        || values[0].length === 0
-        || values[0].length > 65_536
+        || !MANAGED_NONCE_PATTERN.test(values[0])
       ) return null;
-      return { clerkReturn: true, nonce };
+      const nonce = values[0];
+      if (url.hash !== `${MANAGED_PAGE_HASH_PREFIX}${nonce}`) return null;
+      url.search = "";
+      url.hash = "";
+      return { nonce, pageUrl: url.href };
     } catch {
       return null;
     }
@@ -39,8 +39,78 @@
 
   const initialPage = managedPageDetails();
   if (!initialPage || globalThis.__sunoxBridgeContentLoaded) return;
+  const reportStage = (stage) => {
+    chrome.runtime.sendMessage({
+      type: "sunox-managed-frame-stage-report-v1",
+      nonce: initialPage.nonce,
+      stage
+    }).catch(() => {});
+  };
+  const installControlledDocument = (nonce) => {
+    if (typeof window.stop !== "function") return false;
+    // ISOLATED document_start scripts are not subject to the host page's CSP.
+    // Stop before host DOM construction or host script execution, then replace
+    // the response with an empty credentialless challenge document.
+    window.stop();
+    if (
+      typeof document.createElement !== "function"
+    ) return false;
+    try {
+      let html = document.documentElement;
+      if (!html) {
+        html = document.createElement("html");
+        document.appendChild(html);
+      }
+      if (typeof html.replaceChildren !== "function") return false;
+      const head = document.createElement("head");
+      const meta = document.createElement("meta");
+      const title = document.createElement("title");
+      const body = document.createElement("body");
+      meta.setAttribute("charset", "utf-8");
+      title.textContent = "Sunox Challenge";
+      head.append(meta, title);
+      for (const attribute of [...html.attributes]) {
+        html.removeAttribute(attribute.name);
+      }
+      html.replaceChildren(head, body);
+      if (window.credentialless === true) {
+        html.setAttribute(CONTROLLED_DOCUMENT_ATTRIBUTE, nonce);
+      }
+    } catch {
+      return false;
+    }
+    return window.credentialless === true
+      && document.documentElement?.getAttribute(
+      CONTROLLED_DOCUMENT_ATTRIBUTE
+      ) === nonce;
+  };
+  if (!installControlledDocument(initialPage.nonce)) {
+    reportStage("controlled_document_install_failed");
+    return;
+  }
+  reportStage("controlled_document");
+  const mainRunner = document.createElement("script");
+  mainRunner.addEventListener("load", () => reportStage("runner_loaded"), {
+    once: true
+  });
+  mainRunner.addEventListener("error", () => reportStage("runner_error"), {
+    once: true
+  });
+  mainRunner.src = chrome.runtime.getURL("page.js");
+  mainRunner.dataset.sunoxManagedRunner = initialPage.nonce;
+  document.head.appendChild(mainRunner);
+  reportStage("runner_injected");
   globalThis.__sunoxBridgeContentLoaded = true;
   const managedNonce = initialPage.nonce;
+  const managedPageUrl = initialPage.pageUrl;
+  const controlledDocumentReady = () =>
+    window.credentialless === true
+    && document.documentElement?.getAttribute(
+      CONTROLLED_DOCUMENT_ATTRIBUTE
+    ) === managedNonce
+    && document.documentElement?.getAttribute(
+      PAGE_READY_ATTRIBUTE
+    ) === managedNonce;
   const maxTokenLength = 16_384;
   const readinessPollMs = 100;
   const readinessStableMs = 500;
@@ -56,6 +126,15 @@
     "page_not_ready",
     "page_unavailable",
     "silent_challenge_unavailable",
+    "turnstile_error_100",
+    "turnstile_error_110",
+    "turnstile_error_200",
+    "turnstile_error_300",
+    "turnstile_error_400",
+    "turnstile_error_600",
+    "turnstile_error_unknown",
+    "turnstile_interaction_timeout",
+    "turnstile_no_callback",
     "unsupported_browser"
   ]);
   let busy = false;
@@ -67,13 +146,15 @@
 
   const currentManagedPage = () => {
     const details = managedPageDetails();
-    return details?.nonce === managedNonce ? details : null;
+    return details?.nonce === managedNonce
+      && details.pageUrl === managedPageUrl
+      && controlledDocumentReady()
+      ? details
+      : null;
   };
 
   const isExecutionReadyPage = () => {
-    const details = currentManagedPage();
-    return details?.clerkReturn === false
-      && globalThis.document?.readyState === "complete";
+    return currentManagedPage() !== null;
   };
 
   function executeInPage(challenge) {
@@ -102,6 +183,10 @@
           errorCode: token
             ? null
             : allowedErrorCodes.has(result.errorCode)
+              && (
+                challenge.provider === "turnstile"
+                || !result.errorCode.startsWith("turnstile_")
+              )
               ? result.errorCode
               : "challenge_failed"
         });
@@ -122,7 +207,10 @@
     }
     busy = true;
     try {
-      return await executeInPage(challenge);
+      const result = await executeInPage(challenge);
+      return isExecutionReadyPage()
+        ? result
+        : { token: null, errorCode: "page_not_ready" };
     } catch {
       return { token: null, errorCode: "challenge_failed" };
     } finally {
@@ -134,7 +222,16 @@
     if (readinessTimer || port || executionReceived) return;
     readinessTimer = setTimeout(() => {
       readinessTimer = null;
-      if (!currentManagedPage()) return;
+      // The packaged MAIN-world runner is loaded asynchronously. A zero-delay
+      // document_start poll can therefore run before page.js has marked the
+      // controlled document ready. Keep polling that bounded iframe instead
+      // of permanently losing the only Port connection attempt.
+      if (!currentManagedPage()) {
+        readinessHref = null;
+        readinessSince = 0;
+        scheduleReadinessPolling();
+        return;
+      }
       if (!isExecutionReadyPage()) {
         readinessHref = null;
         readinessSince = 0;
@@ -146,6 +243,7 @@
         readinessSince = Date.now();
       }
       if (Date.now() - readinessSince >= readinessStableMs) {
+        reportStage("page_ready");
         connect();
         return;
       }

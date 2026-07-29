@@ -3,8 +3,8 @@
   "name": "Sunox Browser Bridge",
   "description": "Runs Suno generation challenges invisibly for the Sunox CLI.",
   "version": "__SUNOX_BRIDGE_RUNTIME_BUILD__",
-  "version_name": "__SUNOX_VERSION__",
-  "minimum_chrome_version": "120",
+  "version_name": "__SUNOX_BRIDGE_RUNTIME_BUILD__",
+  "minimum_chrome_version": "128",
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",
@@ -14,29 +14,29 @@
   "permissions": [
     "alarms",
     "declarativeNetRequestWithHostAccess",
-    "offscreen"
+    "offscreen",
+    "webRequest"
   ],
   "host_permissions": [
     "http://127.0.0.1/*",
-    "https://auth.suno.com/*",
     "https://suno.com/*"
   ],
   "background": {
     "service_worker": "service-worker.js"
   },
+  "web_accessible_resources": [
+    {
+      "resources": ["page.js"],
+      "matches": ["https://suno.com/*"]
+    }
+  ],
   "content_scripts": [
     {
-      "matches": ["https://suno.com/create*"],
-      "js": ["page.js"],
-      "run_at": "document_start",
-      "all_frames": true,
-      "world": "MAIN"
-    },
-    {
-      "matches": ["https://suno.com/create*"],
+      "matches": ["https://suno.com/*"],
       "js": ["bridge.js"],
       "run_at": "document_start",
-      "all_frames": true
+      "all_frames": true,
+      "world": "ISOLATED"
     }
   ]
 }

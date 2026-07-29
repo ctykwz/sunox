@@ -13,6 +13,8 @@ use crate::auth::AuthState;
 use crate::core::{ChallengeBrowserMode, CliError};
 
 pub(super) const SUNO_HCAPTCHA_SITEKEY: &str = "d65453de-3f1a-4aac-9366-a0f06e52b2ce";
+pub(super) const SUNO_HCAPTCHA_SCRIPT_URL: &str =
+    "https://hcaptcha-endpoint-prod.suno.com/1/api.js?render=explicit";
 #[cfg(test)]
 pub(super) const SUNO_TURNSTILE_SITEKEY: &str = "0x4AAAAAADI7xDNyj-3LcIbi";
 pub(super) const SUNO_TURNSTILE_SCRIPT_URL: &str =
@@ -116,8 +118,9 @@ mod tests {
     use super::{
         BRIDGE_UNAVAILABLE_GUIDANCE, SUNO_CHALLENGE_SDK_READY_TIMEOUT_MS, SUNO_HCAPTCHA_ASSET_HOST,
         SUNO_HCAPTCHA_ENDPOINT, SUNO_HCAPTCHA_IMAGE_HOST, SUNO_HCAPTCHA_REPORT_API,
-        SUNO_HCAPTCHA_SILENT_TIMEOUT_MS, SUNO_HCAPTCHA_SITEKEY, SUNO_TURNSTILE_IDLE_TIMEOUT_MS,
-        SUNO_TURNSTILE_SCRIPT_URL, SUNO_TURNSTILE_SITEKEY, bridge_failure_is_terminal,
+        SUNO_HCAPTCHA_SCRIPT_URL, SUNO_HCAPTCHA_SILENT_TIMEOUT_MS, SUNO_HCAPTCHA_SITEKEY,
+        SUNO_TURNSTILE_IDLE_TIMEOUT_MS, SUNO_TURNSTILE_SCRIPT_URL, SUNO_TURNSTILE_SITEKEY,
+        bridge_failure_is_terminal,
     };
     use crate::api::challenge::ChallengeProvider;
     use crate::core::ChallengeBrowserMode;
@@ -153,6 +156,7 @@ mod tests {
             ("HCAPTCHA_SITEKEY", SUNO_HCAPTCHA_SITEKEY),
             ("TURNSTILE_SITEKEY", SUNO_TURNSTILE_SITEKEY),
             ("TURNSTILE_SCRIPT", SUNO_TURNSTILE_SCRIPT_URL),
+            ("HCAPTCHA_SCRIPT", SUNO_HCAPTCHA_SCRIPT_URL),
             ("HCAPTCHA_ENDPOINT", SUNO_HCAPTCHA_ENDPOINT),
             ("HCAPTCHA_ASSET_HOST", SUNO_HCAPTCHA_ASSET_HOST),
             ("HCAPTCHA_IMAGE_HOST", SUNO_HCAPTCHA_IMAGE_HOST),
