@@ -7,10 +7,10 @@ use futures_util::{StreamExt, future::join_all};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2_10::Sha256;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, oneshot};
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
 use crate::api::challenge::ChallengeProvider;
@@ -27,7 +27,9 @@ const BACKGROUND_TAB_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(27);
 const BRIDGE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const COMPLETION_TIMEOUT_MS: u64 = 130_000;
 const COMPLETION_TIMEOUT: Duration = Duration::from_millis(COMPLETION_TIMEOUT_MS);
-const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
+const RESULT_REPLAY_GRACE: Duration = Duration::from_millis(1_500);
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(1);
+const RESULT_WRITE_TIMEOUT: Duration = Duration::from_millis(250);
 const OCCUPIED_PORT_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_OCCUPIED_PORT_HELLO_RESPONSE_BYTES: usize = 4 * 1024;
 const MAX_REQUEST_BYTES: usize = 24 * 1024;
@@ -68,7 +70,7 @@ struct BridgeState {
     claimed_notify: Notify,
     probe_acknowledged: AtomicBool,
     probe_acknowledged_notify: Notify,
-    result_sender: Mutex<Option<oneshot::Sender<BridgeResult>>>,
+    result_delivery: Arc<ResultDeliveryState>,
     claim_session: Mutex<Option<ClaimSession>>,
 }
 
@@ -155,6 +157,99 @@ struct HttpResponse {
     reason: &'static str,
     content_type: Option<&'static str>,
     body: Vec<u8>,
+    result_delivery: Option<ResultDelivery>,
+}
+
+enum ResultSlot {
+    Pending {
+        sender: oneshot::Sender<BridgeResult>,
+        fingerprint: Option<String>,
+    },
+    Writing {
+        fingerprint: String,
+    },
+    Committed {
+        fingerprint: String,
+    },
+    Closed,
+}
+
+struct ResultDeliveryState {
+    slot: Mutex<ResultSlot>,
+    changed: Notify,
+}
+
+struct ResultDelivery {
+    state: Arc<ResultDeliveryState>,
+    fingerprint: String,
+    sender: Option<oneshot::Sender<BridgeResult>>,
+    result: Option<BridgeResult>,
+}
+
+impl ResultDelivery {
+    fn acknowledge(mut self) {
+        let Some(sender) = self.sender.take() else {
+            return;
+        };
+        let Some(result) = self.result.take() else {
+            return;
+        };
+        let mut state = self
+            .state
+            .slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = std::mem::replace(&mut *state, ResultSlot::Closed);
+        match current {
+            ResultSlot::Writing { fingerprint } if fingerprint == self.fingerprint => {
+                *state = if sender.send(result).is_ok() {
+                    ResultSlot::Committed { fingerprint }
+                } else {
+                    ResultSlot::Closed
+                };
+            }
+            other => {
+                debug_assert!(
+                    false,
+                    "a Browser Bridge result delivery must exclusively own the writing state"
+                );
+                *state = other;
+            }
+        }
+        drop(state);
+        self.state.changed.notify_one();
+    }
+}
+
+impl Drop for ResultDelivery {
+    fn drop(&mut self) {
+        let Some(sender) = self.sender.take() else {
+            return;
+        };
+        let mut state = self
+            .state
+            .slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = std::mem::replace(&mut *state, ResultSlot::Closed);
+        match current {
+            ResultSlot::Writing { fingerprint } if fingerprint == self.fingerprint => {
+                *state = ResultSlot::Pending {
+                    sender,
+                    fingerprint: Some(fingerprint),
+                };
+            }
+            other => {
+                debug_assert!(
+                    false,
+                    "an abandoned Browser Bridge result must still own the writing state"
+                );
+                *state = other;
+            }
+        }
+        drop(state);
+        self.state.changed.notify_one();
+    }
 }
 
 impl HttpResponse {
@@ -164,6 +259,7 @@ impl HttpResponse {
             reason,
             content_type: Some("application/json"),
             body: serde_json::to_vec(&value)?,
+            result_delivery: None,
         })
     }
 
@@ -173,6 +269,29 @@ impl HttpResponse {
             reason,
             content_type: None,
             body: Vec::new(),
+            result_delivery: None,
+        }
+    }
+
+    fn with_result_delivery(
+        mut self,
+        state: Arc<ResultDeliveryState>,
+        fingerprint: String,
+        sender: oneshot::Sender<BridgeResult>,
+        result: BridgeResult,
+    ) -> Self {
+        self.result_delivery = Some(ResultDelivery {
+            state,
+            fingerprint,
+            sender: Some(sender),
+            result: Some(result),
+        });
+        self
+    }
+
+    fn acknowledge_result_delivery(&mut self) {
+        if let Some(delivery) = self.result_delivery.take() {
+            delivery.acknowledge();
         }
     }
 }
@@ -195,7 +314,13 @@ pub(super) async fn try_solve(provider: ChallengeProvider) -> Result<Option<Stri
         claimed_notify: Notify::new(),
         probe_acknowledged: AtomicBool::new(false),
         probe_acknowledged_notify: Notify::new(),
-        result_sender: Mutex::new(Some(result_sender)),
+        result_delivery: Arc::new(ResultDeliveryState {
+            slot: Mutex::new(ResultSlot::Pending {
+                sender: result_sender,
+                fingerprint: None,
+            }),
+            changed: Notify::new(),
+        }),
         claim_session: Mutex::new(None),
     });
     let cancellation = CancellationToken::new();
@@ -212,22 +337,63 @@ pub(super) async fn try_solve(provider: ChallengeProvider) -> Result<Option<Stri
     eprintln!(
         "Using the Browser Bridge managed Chrome context for silent challenge verification (bridge port {port})..."
     );
-    let result = timeout(COMPLETION_TIMEOUT, result_receiver).await;
+    let mut result_receiver = result_receiver;
+    let result = match timeout(COMPLETION_TIMEOUT, &mut result_receiver).await {
+        Ok(result) => Some(result),
+        Err(_) => finish_or_close_timed_out_result(&state, &mut result_receiver).await,
+    };
+    if matches!(&result, Some(Ok(_))) {
+        // Keep the authenticated listener alive long enough for the extension
+        // to replay an identical terminal result if the flushed 204 response
+        // was lost at the fetch boundary.
+        sleep(RESULT_REPLAY_GRACE).await;
+    }
     cancellation.cancel();
     let _ = server.await;
 
     match result {
-        Ok(Ok(BridgeResult::Token(token))) => Ok(Some(token)),
-        Ok(Ok(BridgeResult::Error(error))) => Err(CliError::Config(format!(
+        Some(Ok(BridgeResult::Token(token))) => Ok(Some(token)),
+        Some(Ok(BridgeResult::Error(error))) => Err(CliError::Config(format!(
             "Browser Bridge challenge failed: {error}"
         ))),
-        Ok(Err(_)) => Err(CliError::Config(
+        Some(Err(_)) => Err(CliError::Config(
             "Browser Bridge closed before returning a challenge result".into(),
         )),
-        Err(_) => Err(CliError::Config(format!(
+        None => Err(CliError::Config(format!(
             "Browser Bridge challenge timed out after {} seconds",
             COMPLETION_TIMEOUT.as_secs()
         ))),
+    }
+}
+
+async fn finish_or_close_timed_out_result(
+    state: &BridgeState,
+    receiver: &mut oneshot::Receiver<BridgeResult>,
+) -> Option<Result<BridgeResult, oneshot::error::RecvError>> {
+    loop {
+        let changed = state.result_delivery.changed.notified();
+        let wait_for_writer = {
+            let mut slot = state
+                .result_delivery
+                .slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match &*slot {
+                ResultSlot::Writing { .. } | ResultSlot::Committed { .. } => true,
+                ResultSlot::Pending { .. } => {
+                    *slot = ResultSlot::Closed;
+                    false
+                }
+                ResultSlot::Closed => false,
+            }
+        };
+        if !wait_for_writer {
+            return None;
+        }
+        tokio::select! {
+            result = &mut *receiver => return Some(result),
+            _ = changed => {}
+        }
     }
 }
 
@@ -304,7 +470,10 @@ async fn probe_with_secret_in_range(
         claimed_notify: Notify::new(),
         probe_acknowledged: AtomicBool::new(false),
         probe_acknowledged_notify: Notify::new(),
-        result_sender: Mutex::new(None),
+        result_delivery: Arc::new(ResultDeliveryState {
+            slot: Mutex::new(ResultSlot::Closed),
+            changed: Notify::new(),
+        }),
         claim_session: Mutex::new(None),
     });
     let cancellation = CancellationToken::new();
@@ -576,13 +745,20 @@ async fn serve(listener: TcpListener, state: Arc<BridgeState>, cancellation: Can
 async fn handle_connection(mut stream: TcpStream, state: Arc<BridgeState>) -> Result<(), CliError> {
     let request = read_request(&mut stream).await?;
     let origin = request.headers.get("origin").cloned().unwrap_or_default();
-    let response = route_request(&request, &state)?;
-    write_response(
+    let mut response = route_request(&request, &state)?;
+    let carries_result_delivery = response.result_delivery.is_some();
+    let write = write_response(
         &mut stream,
-        response,
+        &mut response,
         valid_extension_origin(&origin).then_some(origin.as_str()),
-    )
-    .await
+    );
+    if carries_result_delivery {
+        timeout(RESULT_WRITE_TIMEOUT, write).await.map_err(|_| {
+            CliError::Config("browser bridge result acknowledgement write timed out".into())
+        })?
+    } else {
+        write.await
+    }
 }
 
 fn route_request(request: &HttpRequest, state: &BridgeState) -> Result<HttpResponse, CliError> {
@@ -803,16 +979,75 @@ fn receive_result(request: &HttpRequest, state: &BridgeState) -> Result<HttpResp
     if !constant_time_eq(result.proof.as_bytes(), expected_proof.as_bytes()) {
         return Ok(HttpResponse::empty(403, "Forbidden"));
     }
-    let Some(sender) = state
-        .result_sender
+    let fingerprint = result.proof;
+    let mut slot = state
+        .result_delivery
+        .slot
         .lock()
-        .expect("bridge result mutex poisoned")
-        .take()
-    else {
-        return Ok(HttpResponse::empty(409, "Conflict"));
+        .expect("bridge result delivery mutex poisoned");
+    let current = std::mem::replace(&mut *slot, ResultSlot::Closed);
+    let sender = match current {
+        ResultSlot::Pending {
+            sender,
+            fingerprint: expected,
+        } => {
+            if sender.is_closed() {
+                *slot = ResultSlot::Closed;
+                return Ok(HttpResponse::empty(410, "Gone"));
+            }
+            if expected
+                .as_deref()
+                .is_some_and(|value| value != fingerprint)
+            {
+                *slot = ResultSlot::Pending {
+                    sender,
+                    fingerprint: expected,
+                };
+                return Ok(HttpResponse::empty(409, "Conflict"));
+            }
+            sender
+        }
+        ResultSlot::Writing {
+            fingerprint: expected,
+        } => {
+            let is_replay = expected == fingerprint;
+            *slot = ResultSlot::Writing {
+                fingerprint: expected,
+            };
+            return Ok(if is_replay {
+                HttpResponse::empty(425, "Too Early")
+            } else {
+                HttpResponse::empty(409, "Conflict")
+            });
+        }
+        ResultSlot::Committed {
+            fingerprint: expected,
+        } => {
+            let is_replay = expected == fingerprint;
+            *slot = ResultSlot::Committed {
+                fingerprint: expected,
+            };
+            return Ok(if is_replay {
+                HttpResponse::empty(204, "No Content")
+            } else {
+                HttpResponse::empty(409, "Conflict")
+            });
+        }
+        ResultSlot::Closed => {
+            *slot = ResultSlot::Closed;
+            return Ok(HttpResponse::empty(410, "Gone"));
+        }
     };
-    let _ = sender.send(bridge_result);
-    Ok(HttpResponse::empty(204, "No Content"))
+    *slot = ResultSlot::Writing {
+        fingerprint: fingerprint.clone(),
+    };
+    drop(slot);
+    Ok(HttpResponse::empty(204, "No Content").with_result_delivery(
+        Arc::clone(&state.result_delivery),
+        fingerprint,
+        sender,
+        bridge_result,
+    ))
 }
 
 fn valid_nonce(nonce: &str) -> bool {
@@ -940,11 +1175,14 @@ async fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, CliError> {
     })
 }
 
-async fn write_response(
-    stream: &mut TcpStream,
-    response: HttpResponse,
+async fn write_response<W>(
+    stream: &mut W,
+    response: &mut HttpResponse,
     extension_origin: Option<&str>,
-) -> Result<(), CliError> {
+) -> Result<(), CliError>
+where
+    W: AsyncWrite + Unpin,
+{
     let mut headers = format!(
         "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n",
         response.status,
@@ -962,6 +1200,12 @@ async fn write_response(
     headers.push_str("\r\n");
     stream.write_all(headers.as_bytes()).await?;
     stream.write_all(&response.body).await?;
+    stream.flush().await?;
+    // Do not wake the challenge caller until its authenticated result response
+    // has been flushed. If the write is cancelled or fails before this point,
+    // dropping ResultDelivery restores the one-shot sender so the extension
+    // can retry the same signed result.
+    response.acknowledge_result_delivery();
     stream.shutdown().await?;
     Ok(())
 }
@@ -984,16 +1228,18 @@ mod tests {
 
     use super::{
         BridgeOperation, BridgeResult, BridgeState, CLAIM_CLOSED, CLAIM_PENDING,
-        COMPLETION_TIMEOUT_MS, HttpRequest, MAX_OCCUPIED_PORT_HELLO_RESPONSE_BYTES, PORT_COUNT,
-        PROTOCOL_VERSION, acknowledge_probe, authentication_proof, constant_time_eq, is_suno_page,
+        COMPLETION_TIMEOUT_MS, CONNECTION_TIMEOUT, HttpRequest,
+        MAX_OCCUPIED_PORT_HELLO_RESPONSE_BYTES, PORT_COUNT, PROTOCOL_VERSION, RESULT_REPLAY_GRACE,
+        RESULT_WRITE_TIMEOUT, ResultDeliveryState, ResultSlot, acknowledge_probe,
+        authentication_proof, constant_time_eq, finish_or_close_timed_out_result, is_suno_page,
         missing_secret_probe_status, occupied_port_is_current_bridge, occupied_port_probe_client,
         probe_with_secret_in_range, route_request, serve, valid_extension_origin,
-        wait_for_probe_ack_signal,
+        wait_for_probe_ack_signal, write_response,
     };
     use crate::api::challenge::ChallengeProvider;
     use crate::captcha::{
         BridgeProbeStatus, SUNO_CHALLENGE_SDK_READY_TIMEOUT_MS, SUNO_HCAPTCHA_SILENT_TIMEOUT_MS,
-        SUNO_TURNSTILE_IDLE_TIMEOUT_MS, bridge_contract::BROWSER_BRIDGE_RUNTIME_BUILD,
+        bridge_contract::BROWSER_BRIDGE_RUNTIME_BUILD,
     };
 
     static PROBE_PORT_TEST_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());
@@ -1036,6 +1282,8 @@ mod tests {
 
         let sdk_ready_timeout = javascript_number(page, "CHALLENGE_SDK_READY_TIMEOUT_MS");
         let hcaptcha_silent_timeout = javascript_number(page, "HCAPTCHA_SILENT_TIMEOUT_MS");
+        let turnstile_shared_attempt_budget =
+            javascript_number(page, "TURNSTILE_SHARED_ATTEMPT_BUDGET_MS");
         let page_timeout = javascript_number(bridge, "challengePageTimeoutMs");
         let managed_frame_warmup_grace = javascript_number(offscreen, "managedFrameWarmupGraceMs");
         let managed_frame_prepare_timeout =
@@ -1046,35 +1294,49 @@ mod tests {
             javascript_number(offscreen, "managedFrameReleaseTimeoutMs");
         let managed_frame_result_timeout =
             javascript_number(offscreen, "managedFrameResultTimeoutMs");
-        let initial_rule_fetch_timeout =
-            javascript_number(service_worker, "INITIAL_RULE_FETCH_TIMEOUT_MS");
         let offscreen_busy_max_age = javascript_number(service_worker, "OFFSCREEN_BUSY_MAX_AGE_MS");
         let transport_request_timeout = javascript_number(transport, "requestTimeoutMs");
-        let worst_case_transport_budget = transport_request_timeout * (u64::from(PORT_COUNT) + 3);
+        let result_delivery_deadline = javascript_number(transport, "resultDeliveryDeadlineMs");
+        let result_retry_initial_delay = javascript_number(transport, "resultRetryInitialDelayMs");
+        let result_retry_max_delay = javascript_number(transport, "resultRetryMaxDelayMs");
+        let worst_case_transport_budget =
+            transport_request_timeout * (u64::from(PORT_COUNT) + 3) + result_delivery_deadline;
 
         assert_eq!(sdk_ready_timeout, SUNO_CHALLENGE_SDK_READY_TIMEOUT_MS);
         assert_eq!(hcaptcha_silent_timeout, SUNO_HCAPTCHA_SILENT_TIMEOUT_MS);
+        assert_eq!(turnstile_shared_attempt_budget, 30_000);
+        assert_eq!(result_delivery_deadline, 1_350);
+        assert_eq!(result_retry_initial_delay, 25);
+        assert_eq!(result_retry_max_delay, 200);
+        assert!(
+            transport_request_timeout > RESULT_WRITE_TIMEOUT.as_millis() as u64,
+            "the browser fetch must outlive the result writer"
+        );
+        assert!(
+            result_delivery_deadline > CONNECTION_TIMEOUT.as_millis() as u64,
+            "the exact-result retry deadline must outlive the server writer"
+        );
+        assert!(
+            RESULT_REPLAY_GRACE.as_millis() as u64 >= result_delivery_deadline,
+            "the CLI listener must outlive every bounded terminal-result replay"
+        );
         assert_eq!(page_timeout, 50_000);
         assert_eq!(managed_frame_warmup_grace, 3_000);
         assert_eq!(managed_frame_prepare_timeout, 9_000);
         assert_eq!(managed_frame_ready_timeout, 45_000);
         assert_eq!(managed_frame_release_timeout, 500);
         assert_eq!(managed_frame_result_timeout, 65_000);
-        assert_eq!(initial_rule_fetch_timeout, 8_000);
-        assert_eq!(offscreen_busy_max_age, 125_000);
+        assert_eq!(offscreen_busy_max_age, 127_000);
         assert_eq!(COMPLETION_TIMEOUT_MS, 130_000);
-        assert!(
-            page_timeout
-                > sdk_ready_timeout + SUNO_TURNSTILE_IDLE_TIMEOUT_MS + hcaptcha_silent_timeout
-        );
-        assert!(managed_frame_prepare_timeout > initial_rule_fetch_timeout);
+        assert!(page_timeout > sdk_ready_timeout + turnstile_shared_attempt_budget);
+        assert!(page_timeout > sdk_ready_timeout + hcaptcha_silent_timeout);
         assert!(managed_frame_result_timeout > page_timeout);
         let managed_lifecycle_budget = managed_frame_prepare_timeout
             + managed_frame_ready_timeout
             + managed_frame_result_timeout
             + managed_frame_release_timeout
             + worst_case_transport_budget;
-        assert_eq!(managed_lifecycle_budget, 123_350);
+        assert_eq!(managed_lifecycle_budget, 124_700);
         assert!(
             offscreen_busy_max_age > managed_lifecycle_budget,
             "busy recovery must preserve prepare, hidden frame, result, release, and transport budgets"
@@ -1102,7 +1364,13 @@ mod tests {
                 claimed_notify: Notify::new(),
                 probe_acknowledged: false.into(),
                 probe_acknowledged_notify: Notify::new(),
-                result_sender: Mutex::new(Some(sender)),
+                result_delivery: Arc::new(ResultDeliveryState {
+                    slot: Mutex::new(ResultSlot::Pending {
+                        sender,
+                        fingerprint: None,
+                    }),
+                    changed: Notify::new(),
+                }),
                 claim_session: Mutex::new(None),
             },
             receiver,
@@ -1116,7 +1384,10 @@ mod tests {
     fn probe_state(secret: &str) -> BridgeState {
         let (mut state, _receiver) = state(secret);
         state.operation = BridgeOperation::Probe;
-        state.result_sender = Mutex::new(None);
+        state.result_delivery = Arc::new(ResultDeliveryState {
+            slot: Mutex::new(ResultSlot::Closed),
+            changed: Notify::new(),
+        });
         state
     }
 
@@ -1372,19 +1643,209 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn matching_result_returns_the_one_time_token() {
-        let (state, receiver) = state("secret-value");
+    async fn matching_result_is_not_released_before_the_http_acknowledgement() {
+        let (state, mut receiver) = state("secret-value");
         let claim = claim_request("secret-value", "https://suno.com/");
         assert_eq!(route_request(&claim, &state).expect("claim").status, 200);
         let result = result_request("secret-value", "abcdefghijklmnopqrstuvwxyz");
 
-        let response = route_request(&result, &state).expect("result response");
+        let mut response = route_request(&result, &state).expect("result response");
+        assert!(
+            matches!(
+                receiver.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "the CLI must not consume the result before the extension receives its HTTP acknowledgement"
+        );
+        let (mut response_writer, mut response_reader) = tokio::io::duplex(64);
+        let write = tokio::spawn(async move {
+            write_response(
+                &mut response_writer,
+                &mut response,
+                Some("chrome-extension://abcdefghijklmnopabcdefghijklmnop"),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            matches!(
+                receiver.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "backpressure before the HTTP response flush must keep the result pending"
+        );
+        assert_eq!(
+            route_request(&result, &state)
+                .expect("in-flight replay")
+                .status,
+            425,
+            "an identical replay must wait for the first response to commit"
+        );
+        assert_eq!(
+            route_request(
+                &result_request("secret-value", "zyxwvutsrqponmlkjihgfedcba"),
+                &state,
+            )
+            .expect("conflicting in-flight result")
+            .status,
+            409,
+            "a different terminal result cannot replace an in-flight result"
+        );
+        let mut response_bytes = Vec::new();
+        response_reader
+            .read_to_end(&mut response_bytes)
+            .await
+            .expect("read result response");
+        write
+            .await
+            .expect("response writer task")
+            .expect("write result");
         let BridgeResult::Token(token) = receiver.await.expect("bridge result") else {
             panic!("expected token");
         };
 
-        assert_eq!(response.status, 204);
+        assert!(
+            response_bytes.starts_with(b"HTTP/1.1 204 No Content"),
+            "the acknowledged response must be the successful one-time result"
+        );
         assert_eq!(token, "abcdefghijklmnopqrstuvwxyz");
+        let committed_replay = route_request(&result, &state).expect("committed replay");
+        assert_eq!(committed_replay.status, 204);
+        assert!(
+            committed_replay.result_delivery.is_none(),
+            "an identical committed replay is idempotent and must not deliver twice"
+        );
+        assert_eq!(
+            route_request(
+                &result_request("secret-value", "zyxwvutsrqponmlkjihgfedcba"),
+                &state,
+            )
+            .expect("conflicting committed result")
+            .status,
+            409,
+            "a different terminal result cannot replace a committed result"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unwritten_result_response_can_be_retried() {
+        let (state, mut receiver) = state("secret-value");
+        let claim = claim_request("secret-value", "https://suno.com/");
+        assert_eq!(route_request(&claim, &state).expect("claim").status, 200);
+        let result = result_request("secret-value", "abcdefghijklmnopqrstuvwxyz");
+
+        let abandoned = route_request(&result, &state).expect("first result response");
+        assert_eq!(abandoned.status, 204);
+        drop(abandoned);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            route_request(
+                &result_request("secret-value", "zyxwvutsrqponmlkjihgfedcba"),
+                &state,
+            )
+            .expect("conflicting retry")
+            .status,
+            409,
+            "a write failure may restore the sender but must keep the original terminal fingerprint"
+        );
+
+        let mut retry = route_request(&result, &state).expect("retried result response");
+        assert_eq!(retry.status, 204);
+        retry.acknowledge_result_delivery();
+        let BridgeResult::Token(token) = receiver.await.expect("bridge result") else {
+            panic!("expected token");
+        };
+        assert_eq!(token, "abcdefghijklmnopqrstuvwxyz");
+    }
+
+    #[test]
+    fn a_closed_result_receiver_is_never_acknowledged() {
+        let (state, receiver) = state("secret-value");
+        let claim = claim_request("secret-value", "https://suno.com/");
+        assert_eq!(route_request(&claim, &state).expect("claim").status, 200);
+        drop(receiver);
+
+        let response = route_request(
+            &result_request("secret-value", "abcdefghijklmnopqrstuvwxyz"),
+            &state,
+        )
+        .expect("closed result response");
+        assert_eq!(response.status, 410);
+        assert!(
+            response.result_delivery.is_none(),
+            "a closed CLI receiver must not be represented as an accepted result"
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_timeout_waits_for_an_in_flight_result_commit() {
+        let (state, mut receiver) = state("secret-value");
+        let claim = claim_request("secret-value", "https://suno.com/");
+        assert_eq!(route_request(&claim, &state).expect("claim").status, 200);
+        let result = result_request("secret-value", "abcdefghijklmnopqrstuvwxyz");
+        let mut response = route_request(&result, &state).expect("result response");
+
+        let finish = finish_or_close_timed_out_result(&state, &mut receiver);
+        let acknowledge = async {
+            tokio::task::yield_now().await;
+            response.acknowledge_result_delivery();
+        };
+        let (finished, ()) = tokio::join!(finish, acknowledge);
+        let BridgeResult::Token(token) = finished
+            .expect("in-flight result must finish")
+            .expect("result receiver")
+        else {
+            panic!("expected token");
+        };
+        assert_eq!(token, "abcdefghijklmnopqrstuvwxyz");
+    }
+
+    #[tokio::test]
+    async fn result_transition_before_notify_poll_preserves_a_wakeup() {
+        let (state, receiver) = state("secret-value");
+        let claim = claim_request("secret-value", "https://suno.com/");
+        assert_eq!(route_request(&claim, &state).expect("claim").status, 200);
+        let result = result_request("secret-value", "abcdefghijklmnopqrstuvwxyz");
+        let mut response = route_request(&result, &state).expect("result response");
+        let changed = state.result_delivery.changed.notified();
+
+        response.acknowledge_result_delivery();
+        tokio::time::timeout(Duration::from_millis(10), changed)
+            .await
+            .expect("a transition before the first poll must leave a notify permit");
+        let BridgeResult::Token(token) = receiver.await.expect("result receiver") else {
+            panic!("expected token");
+        };
+        assert_eq!(token, "abcdefghijklmnopqrstuvwxyz");
+    }
+
+    #[tokio::test]
+    async fn completion_timeout_closes_a_restored_pending_result() {
+        let (state, mut receiver) = state("secret-value");
+        let claim = claim_request("secret-value", "https://suno.com/");
+        assert_eq!(route_request(&claim, &state).expect("claim").status, 200);
+        let result = result_request("secret-value", "abcdefghijklmnopqrstuvwxyz");
+        let response = route_request(&result, &state).expect("result response");
+
+        let finish = finish_or_close_timed_out_result(&state, &mut receiver);
+        let abandon = async {
+            tokio::task::yield_now().await;
+            drop(response);
+        };
+        let (finished, ()) = tokio::join!(finish, abandon);
+        assert!(
+            finished.is_none(),
+            "an unwritten result restored after the completion deadline must be closed"
+        );
+        assert_eq!(
+            route_request(&result, &state)
+                .expect("post-timeout result")
+                .status,
+            410
+        );
     }
 
     #[test]

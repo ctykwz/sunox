@@ -11,6 +11,46 @@ backward-compatible features, upstream protocol adaptations, and fixes.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-30
+
+### Fixed
+
+- Replace credentialed route discovery and redirect following with one fixed `https://suno.com/`
+  origin carrier. Browser Bridge rules are installed before navigation and remove `Location`,
+  `Set-Cookie`, and other side effects. Location-suppressed 301, 302, 303, 307, and 308 responses
+  can host the controlled challenge document; any redirect Chrome actually begins to follow,
+  cross-origin escape, unsupported redirect status, cache hit, or invalid response contract fails
+  closed.
+- On an MV3 service-worker cold start, close and confirm destruction of any unknown old offscreen
+  document before removing its surviving session rules. This keeps an in-flight old frame from
+  regaining redirect or storage side effects while the Bridge rebuilds its ownership state.
+- Keep response-scrubbing rules installed when offscreen shutdown disconnects a managed frame,
+  and remove them only after Chrome confirms that the hidden owner is gone. This closes the
+  alarm-recovery ordering gap where a failed shutdown could otherwise leave a live frame without
+  its fail-closed response policy.
+- Bind the service worker and offscreen document to the same rendered Bridge runtime build before
+  polling or acknowledging activation. A stale worker can no longer recreate a newer offscreen
+  document and falsely clear the installer's reload-pending state.
+- Retry only the exact authenticated terminal challenge result when an HTTP acknowledgement is
+  ambiguous. Identical replays are idempotent, conflicting replays are rejected, the CLI is
+  notified only after its 204 response is flushed, and the offscreen controller never replaces a
+  valid token or provider error with a later generic failure.
+- Pin the extension-page frame policy to `https://suno.com` and require the exact controlled
+  `Permissions-Policy` before accepting a managed document, preventing a wider upstream policy or
+  cross-origin redirect target from silently weakening the hidden-frame boundary.
+- When Turnstile emits no callback during its first 15-second silent attempt, the Browser Bridge
+  now removes that widget and performs exactly one fresh silent attempt. Classified provider
+  callbacks never start another fresh widget, while Turnstile may still perform its bounded
+  same-widget recovery; requests for visible interaction fail immediately. The flow never creates
+  a tab, window, or separate browser process.
+- Run the invisible challenge in the current Chrome profile's Suno context instead of a
+  credentialless storage partition. The Bridge still stops and replaces the host document before
+  host scripts run, removes response storage side effects, and keeps the nonce, network, CSP, and
+  no-window boundaries intact.
+- Accept document-bearing upstream 4xx/5xx challenge responses after applying the controlled
+  document policy. Empty responses, unsupported redirects, cache hits, and invalid response
+  contracts still fail closed.
+
 ## [0.2.0] - 2026-07-29
 
 ### Security

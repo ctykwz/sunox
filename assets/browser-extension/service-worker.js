@@ -1,15 +1,45 @@
 const POLL_ALARM = "sunox-bridge-poll";
 const OFFSCREEN_PATH = "offscreen.html";
+const SERVICE_WORKER_RUNTIME_BUILD = "__SUNOX_BRIDGE_RUNTIME_BUILD__";
 const SUNO_FRAME_RULE_ID = 29_764;
-const SUNO_COOKIE_RULE_ID = 29_765;
-const FRAME_RULE_IDS = [SUNO_FRAME_RULE_ID, SUNO_COOKIE_RULE_ID];
-// This is only a redirect-following discovery entrypoint. The final clean
-// same-origin URL returned by Suno is the route used for DNR and iframe
-// navigation; the seed pathname is never an authorization boundary.
-const MANAGED_PAGE_DISCOVERY_URL = "https://suno.com/";
+const SUNO_REQUEST_RULE_ID = 29_765;
+const FRAME_RULE_IDS = [SUNO_FRAME_RULE_ID, SUNO_REQUEST_RULE_ID];
+// The root is only an origin carrier. The host response is stopped and
+// replaced before its scripts run, so the Bridge never depends on an app
+// pathname or follows the carrier's redirects.
+const MANAGED_PAGE_URL = "https://suno.com/";
 const MANAGED_PAGE_ORIGIN = "https://suno.com";
-const MANAGED_PAGE_QUERY_PARAMETER = "__sunox_bridge";
 const MANAGED_PAGE_HASH_PREFIX = "#sunox-browser-bridge=";
+const MANAGED_REQUEST_NONCE_HEADER = "x-sunox-bridge-nonce";
+// The initial carrier must be the root URL. Keeping the DNR scrubber on every
+// same-origin path is deliberate defense in depth: if Chrome ever exposes a
+// redirect despite Location removal, the escaped response is still stripped
+// of side effects while the webRequest state machine rejects the navigation.
+const MANAGED_SUNO_REGEX_FILTER = "^https://suno\\.com/.*$";
+const CONTROLLED_PERMISSIONS_POLICY =
+  "accelerometer=(), autoplay=(), camera=(), display-capture=(), "
+  + "encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), "
+  + "magnetometer=(), microphone=(), midi=(), payment=(), "
+  + "picture-in-picture=(), publickey-credentials-get=(), "
+  + "screen-wake-lock=(), serial=(), usb=(), web-share=(), "
+  + "xr-spatial-tracking=()";
+const MANAGED_RESPONSE_SIDE_EFFECT_HEADERS = [
+  "clear-site-data",
+  "content-disposition",
+  "content-security-policy-report-only",
+  "cross-origin-embedder-policy",
+  "cross-origin-opener-policy",
+  "cross-origin-resource-policy",
+  "link",
+  "nel",
+  "proxy-authenticate",
+  "refresh",
+  "report-to",
+  "reporting-endpoints",
+  "set-cookie",
+  "www-authenticate",
+  "x-frame-options"
+];
 const SUNO_FRAME_INITIATORS = [chrome.runtime.id];
 const CHALLENGE_PROVIDERS = new Set(["hcaptcha", "turnstile"]);
 const OFFSCREEN_LIFECYCLE_MESSAGE_TYPES = new Set([
@@ -22,11 +52,12 @@ const MANAGED_NONCE_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const OFFSCREEN_CLIENT_ID_PATTERN =
   /^offscreen-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const INITIAL_RULE_FETCH_TIMEOUT_MS = 8_000;
 const OFFSCREEN_PING_TIMEOUT_MS = 1_500;
 const OFFSCREEN_POLL_MAX_AGE_MS = 5_000;
-const OFFSCREEN_BUSY_MAX_AGE_MS = 125_000;
+const OFFSCREEN_BUSY_MAX_AGE_MS = 127_000;
 const MAX_TOKEN_LENGTH = 16_384;
+const MANAGED_FRAME_RESULT_DELIVERY_ATTEMPTS = 2;
+const MANAGED_FRAME_RESULT_ACK_TYPE = "sunox-managed-frame-result-ack-v1";
 const MANAGED_CHALLENGE_ERROR_MESSAGES = Object.freeze({
   challenge_expired:
     "silent_challenge_unavailable: the challenge token expired",
@@ -63,7 +94,7 @@ const MANAGED_CHALLENGE_ERROR_MESSAGES = Object.freeze({
   turnstile_interaction_timeout:
     "interactive_browser_required: the Turnstile interaction timed out",
   turnstile_no_callback:
-    "silent_challenge_unavailable: Turnstile produced no callback before the silent deadline",
+    "silent_challenge_unavailable: Turnstile produced no callback across two fresh widget attempts",
   unsupported_browser:
     "silent_challenge_unavailable: the challenge provider is unsupported in this browser"
 });
@@ -76,9 +107,11 @@ let frameRuleCleanupPromise = null;
 let pendingEnvironmentNonce = null;
 let pendingEnvironmentOwnerDocumentId = null;
 let activeFrameEnvironment = null;
+const retiredManagedRequestIdTombstones = [];
 let offscreenOwnerBinding = null;
 let offscreenOwnerBindingPromise = null;
 let staleFrameRulesCleared = false;
+let coldBootstrapResetting = true;
 let managedFrame;
 
 function challengeDocumentCsp(provider) {
@@ -155,39 +188,7 @@ function challengeDocumentCsp(provider) {
   ].join("; ") + ";";
 }
 
-function exactManagedPageFilter(value, nonce) {
-  if (!MANAGED_NONCE_PATTERN.test(nonce)) {
-    throw new Error("A valid managed frame nonce is required");
-  }
-  const managedUrl = new URL(value);
-  managedUrl.searchParams.set(MANAGED_PAGE_QUERY_PARAMETER, nonce);
-  const escaped = managedUrl.href.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const escapedFragment = `${MANAGED_PAGE_HASH_PREFIX}${nonce}`
-    .replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  // The query nonce is part of the network request/cache key. The matching
-  // fragment is optional here because URL fragments are not sent over HTTP;
-  // both content-script worlds require it before they can connect.
-  return `^${escaped}(?:${escapedFragment})?$`;
-}
-
-function cleanManagedPageUrl(value) {
-  if (typeof value !== "string" || value.length > 2_048) return null;
-  try {
-    const url = new URL(value);
-    if (
-      url.origin !== MANAGED_PAGE_ORIGIN
-      || url.username
-      || url.password
-      || url.search
-      || url.hash
-    ) return null;
-    return url.href;
-  } catch {
-    return null;
-  }
-}
-
-function managedNetworkCandidateDetails(value) {
+function managedNetworkPageUrl(value, nonce) {
   if (typeof value !== "string" || value.length > 131_072) return null;
   try {
     const url = new URL(value);
@@ -196,34 +197,31 @@ function managedNetworkCandidateDetails(value) {
       || url.username
       || url.password
     ) return null;
-    const keys = [...url.searchParams.keys()];
-    const values = url.searchParams.getAll(MANAGED_PAGE_QUERY_PARAMETER);
-    if (
-      keys.length !== 1
-      || keys[0] !== MANAGED_PAGE_QUERY_PARAMETER
-      || values.length !== 1
-      || !MANAGED_NONCE_PATTERN.test(values[0])
-    ) return null;
-    const nonce = values[0];
-    if (
-      url.hash
-      && url.hash !== `${MANAGED_PAGE_HASH_PREFIX}${nonce}`
-    ) return null;
-    url.search = "";
+    if (url.hash && url.hash !== `${MANAGED_PAGE_HASH_PREFIX}${nonce}`) {
+      return null;
+    }
     url.hash = "";
-    return { nonce, pageUrl: url.href };
+    return url.href;
   } catch {
     return null;
   }
 }
 
 function managedPageCandidateDetails(value) {
-  const details = managedNetworkCandidateDetails(value);
-  if (!details) return null;
+  if (typeof value !== "string" || value.length > 131_072) return null;
   try {
-    return new URL(value).hash === `${MANAGED_PAGE_HASH_PREFIX}${details.nonce}`
-      ? details
-      : null;
+    const url = new URL(value);
+    if (
+      url.origin !== MANAGED_PAGE_ORIGIN
+      || url.username
+      || url.password
+      || !url.hash.startsWith(MANAGED_PAGE_HASH_PREFIX)
+    ) return null;
+    const nonce = url.hash.slice(MANAGED_PAGE_HASH_PREFIX.length);
+    if (!MANAGED_NONCE_PATTERN.test(nonce)) return null;
+    url.hash = "";
+    if (url.href !== MANAGED_PAGE_URL) return null;
+    return { nonce, pageUrl: url.href };
   } catch {
     return null;
   }
@@ -232,60 +230,16 @@ function managedPageCandidateDetails(value) {
 function managedPageDetails(value) {
   const details = managedPageCandidateDetails(value);
   return details
-    && details.pageUrl === activeFrameEnvironment?.pageUrl
+    && details.pageUrl === activeFrameEnvironment?.network.documentUrl
     && details.nonce === activeFrameEnvironment?.nonce
     ? details
     : null;
 }
 
-async function currentEmbeddingEnvironment(signal) {
-  const response = await fetch(MANAGED_PAGE_DISCOVERY_URL, {
-    method: "GET",
-    cache: "no-store",
-    credentials: "omit",
-    redirect: "follow",
-    signal
-  });
-  try {
-    if (!response.ok) {
-      throw new Error(
-        `Could not inspect the Suno embedding policy (HTTP ${response.status})`
-      );
-    }
-    const pageUrl = cleanManagedPageUrl(response.url);
-    if (!pageUrl) {
-      throw new Error(
-        "Suno redirected the managed challenge page away from a clean same-origin URL"
-      );
-    }
-    const contentType = response.headers.get("content-type") || "";
-    if (!/^text\/html(?:\s*;|$)/i.test(contentType)) {
-      throw new Error(
-        "Suno returned a non-HTML managed challenge route"
-      );
-    }
-    return { pageUrl };
-  } finally {
-    await response.body?.cancel().catch(() => {});
-  }
-}
-
-async function embeddingEnvironmentWithTimeout(timeoutMs) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await currentEmbeddingEnvironment(controller.signal);
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-function frameRules(environment, nonce, provider) {
-  const { pageUrl } = environment;
-  const regexFilter = exactManagedPageFilter(pageUrl, nonce);
+function frameRules(nonce, provider) {
   const controlledCsp = challengeDocumentCsp(provider);
-  if (typeof regexFilter !== "string" || regexFilter.length === 0) {
-    throw new Error("An exact managed Suno page filter is required");
+  if (!MANAGED_NONCE_PATTERN.test(nonce)) {
+    throw new Error("A valid managed frame nonce is required");
   }
   const sunoHeaders = [
     {
@@ -330,13 +284,7 @@ function frameRules(environment, nonce, provider) {
     {
       header: "permissions-policy",
       operation: "set",
-      value:
-        "accelerometer=(), autoplay=(), camera=(), display-capture=(), "
-        + "encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), "
-        + "magnetometer=(), microphone=(), midi=(), payment=(), "
-        + "picture-in-picture=(), publickey-credentials-get=(), "
-        + "screen-wake-lock=(), serial=(), usb=(), web-share=(), "
-        + "xr-spatial-tracking=()"
+      value: CONTROLLED_PERMISSIONS_POLICY
     },
     {
       header: "cache-control",
@@ -354,7 +302,7 @@ function frameRules(environment, nonce, provider) {
       responseHeaders: sunoHeaders
     },
     condition: {
-      regexFilter,
+      regexFilter: MANAGED_SUNO_REGEX_FILTER,
       isUrlFilterCaseSensitive: true,
       initiatorDomains: SUNO_FRAME_INITIATORS,
       requestMethods: ["get"],
@@ -362,12 +310,16 @@ function frameRules(environment, nonce, provider) {
       tabIds: [chrome.tabs.TAB_ID_NONE]
     }
   }, {
-    id: SUNO_COOKIE_RULE_ID,
+    id: SUNO_REQUEST_RULE_ID,
     priority: 1_000,
     action: {
       type: "modifyHeaders",
       requestHeaders: [
-        { header: "cookie", operation: "remove" },
+        {
+          header: MANAGED_REQUEST_NONCE_HEADER,
+          operation: "set",
+          value: nonce
+        },
         { header: "authorization", operation: "remove" },
         { header: "if-modified-since", operation: "remove" },
         { header: "if-none-match", operation: "remove" },
@@ -380,7 +332,7 @@ function frameRules(environment, nonce, provider) {
       ]
     },
     condition: {
-      regexFilter,
+      regexFilter: MANAGED_SUNO_REGEX_FILTER,
       isUrlFilterCaseSensitive: true,
       initiatorDomains: SUNO_FRAME_INITIATORS,
       requestMethods: ["get"],
@@ -390,40 +342,68 @@ function frameRules(environment, nonce, provider) {
   }];
 }
 
-async function replaceSessionFrameRules(environment, nonce, provider) {
+async function replaceSessionFrameRules(nonce, provider) {
   await chrome.declarativeNetRequest.updateSessionRules({
     removeRuleIds: FRAME_RULE_IDS,
-    addRules: frameRules(environment, nonce, provider)
+    addRules: frameRules(nonce, provider)
   });
 }
 
 function managedNetworkObservation(details) {
-  const candidate = managedNetworkCandidateDetails(details.url);
-  if (
-    !candidate
-    || !activeFrameEnvironment
-    || candidate.nonce !== activeFrameEnvironment.nonce
-    || candidate.pageUrl !== activeFrameEnvironment.pageUrl
-  ) return null;
+  if (!activeFrameEnvironment) return null;
   if (activeFrameEnvironment.network.retiring) return null;
   const extensionOrigin = `chrome-extension://${chrome.runtime.id}`;
-  if (details?.tabId !== chrome.tabs.TAB_ID_NONE) {
-    invalidateManagedNetwork("managed_tab_context_mismatch");
+  const network = activeFrameEnvironment.network;
+  // A retired iframe can deliver one final webRequest event after its nonce
+  // reservation has already rotated. Its requestId belongs to the prior
+  // lifecycle and must not bind or poison the fresh environment.
+  if (
+    typeof details?.requestId === "string"
+    && network.retiredRequestIds.has(details.requestId)
+  ) return null;
+  // The webRequest listener sees every Suno navigation in Chrome, while the
+  // temporary DNR rules only affect this extension's no-tab child frame.
+  // Ignore unrelated visible/browser traffic instead of letting it poison the
+  // active reservation.
+  if (
+    details?.tabId !== chrome.tabs.TAB_ID_NONE
+    || details.type !== "sub_frame"
+    || details.parentFrameId !== 0
+    || details.initiator !== extensionOrigin
+  ) {
+    if (network.requestId && details?.requestId === network.requestId) {
+      invalidateManagedNetwork("managed_request_context_mismatch");
+    }
     return null;
   }
-  if (details.type !== "sub_frame") {
-    invalidateManagedNetwork("managed_resource_type_mismatch");
+  const pageUrl = managedNetworkPageUrl(
+    details.url,
+    activeFrameEnvironment.nonce
+  );
+  if (!pageUrl) {
+    invalidateManagedNetwork("managed_network_url_invalid");
     return null;
   }
-  if (details.parentFrameId !== 0) {
-    invalidateManagedNetwork("managed_parent_frame_mismatch");
-    return null;
-  }
-  if (details.initiator !== extensionOrigin) {
-    invalidateManagedNetwork("managed_initiator_mismatch");
-    return null;
-  }
-  return { candidate, network: activeFrameEnvironment.network };
+  return { network, pageUrl };
+}
+
+function managedNetworkIdentityRejection(details, network) {
+  if (
+    !network.requestId
+    || network.requestId !== details.requestId
+  ) return "managed_request_identity_mismatch";
+  if (
+    !Number.isInteger(network.frameId)
+    || network.frameId <= 0
+    || network.frameId !== details.frameId
+  ) return "managed_frame_identity_mismatch";
+  if (
+    typeof network.parentDocumentId !== "string"
+    || typeof details.parentDocumentId !== "string"
+    || network.parentDocumentId !== details.parentDocumentId
+    || details.parentDocumentId !== activeFrameEnvironment?.ownerDocumentId
+  ) return "managed_parent_document_mismatch";
+  return null;
 }
 
 function normalizedHeaders(headers) {
@@ -447,6 +427,30 @@ function normalizedHeaders(headers) {
 function singletonHeader(headers, name) {
   const values = headers?.get(name);
   return values?.length === 1 ? values[0] : null;
+}
+
+function managedResponseStatusRejection(statusCode) {
+  if (!Number.isInteger(statusCode)) {
+    return "managed_response_status_invalid";
+  }
+  if (statusCode === 204 || statusCode === 205) {
+    return "managed_response_empty_status";
+  }
+  if (statusCode >= 300 && statusCode < 400) {
+    return [301, 302, 303, 307, 308].includes(statusCode)
+      ? null
+      : "managed_response_redirect_status";
+  }
+  // The host body is stopped and replaced at document_start. Cloudflare and
+  // authentication intermediaries may therefore return a document-bearing
+  // 4xx/5xx status without changing the controlled challenge document.
+  if (
+    (statusCode >= 200 && statusCode <= 203)
+    || (statusCode >= 400 && statusCode <= 599)
+  ) {
+    return null;
+  }
+  return "managed_response_status_invalid";
 }
 
 function invalidateManagedNetwork(reason) {
@@ -480,7 +484,7 @@ function reportManagedNetworkStage(stage) {
 function bindManagedNetworkRequest(details) {
   const observation = managedNetworkObservation(details);
   if (!observation) return;
-  const { network } = observation;
+  const { network, pageUrl } = observation;
   if (network.invalid) return;
   if (
     typeof activeFrameEnvironment.ownerDocumentId !== "string"
@@ -490,41 +494,54 @@ function bindManagedNetworkRequest(details) {
     invalidateManagedNetwork("managed_parent_document_mismatch");
     return;
   }
-  if (network.requestId && network.requestId !== details.requestId) {
-    invalidateManagedNetwork("multiple_managed_requests");
+  if (!network.requestId) {
+    if (pageUrl !== activeFrameEnvironment.pageUrl) {
+      invalidateManagedNetwork("managed_initial_url_mismatch");
+      return;
+    }
+    network.requestId = details.requestId;
+    network.frameId = details.frameId;
+    network.parentDocumentId = details.parentDocumentId;
+    network.currentUrl = pageUrl;
+    reportManagedNetworkStage("network_request_bound");
     return;
   }
-  network.requestId = details.requestId;
-  network.frameId = details.frameId;
-  network.parentDocumentId = typeof details.parentDocumentId === "string"
-    ? details.parentDocumentId
-    : null;
-  reportManagedNetworkStage("network_request_bound");
+  const identityRejection = managedNetworkIdentityRejection(details, network);
+  if (identityRejection) {
+    invalidateManagedNetwork(
+      details.requestId === network.requestId
+        ? identityRejection
+        : "multiple_managed_requests"
+    );
+    return;
+  }
+  invalidateManagedNetwork("managed_redirect_not_suppressed");
 }
 
 function verifyManagedRequestHeaders(details) {
   const observation = managedNetworkObservation(details);
   if (!observation) return;
-  const { network } = observation;
-  if (
-    network.invalid
-    || !network.requestId
-    || network.requestId !== details.requestId
-    || network.frameId !== details.frameId
-  ) {
-    invalidateManagedNetwork("managed_request_identity_mismatch");
+  const { network, pageUrl } = observation;
+  const identityRejection = managedNetworkIdentityRejection(details, network);
+  if (network.invalid) return;
+  if (identityRejection) {
+    invalidateManagedNetwork(identityRejection);
+    return;
+  }
+  if (!network.currentUrl || pageUrl !== network.currentUrl) {
+    invalidateManagedNetwork("managed_request_url_mismatch");
     return;
   }
   const headers = normalizedHeaders(details.requestHeaders);
   const cacheControl = singletonHeader(headers, "cache-control");
   const pragma = singletonHeader(headers, "pragma");
+  const marker = singletonHeader(headers, MANAGED_REQUEST_NONCE_HEADER);
   let unsafeReason = null;
   if (!headers) {
     unsafeReason = "managed_request_headers_invalid";
-  } else if (
-    headers.has("cookie")
-    || headers.has("authorization")
-  ) {
+  } else if (marker !== activeFrameEnvironment.nonce) {
+    unsafeReason = "managed_request_nonce_invalid";
+  } else if (headers.has("authorization")) {
     unsafeReason = "managed_request_credentials_present";
   } else if (
     headers.has("if-none-match")
@@ -543,55 +560,54 @@ function verifyManagedRequestHeaders(details) {
 }
 
 function rejectManagedRedirect(details) {
-  if (managedNetworkObservation(details)) {
-    invalidateManagedNetwork("managed_redirect_rejected");
+  const observation = managedNetworkObservation(details);
+  if (!observation) return;
+  const { network, pageUrl } = observation;
+  if (network.invalid) return;
+  const identityRejection = managedNetworkIdentityRejection(details, network);
+  if (identityRejection) {
+    invalidateManagedNetwork(identityRejection);
+    return;
   }
+  if (
+    !network.requestHeadersVerified
+    || pageUrl !== network.currentUrl
+  ) {
+    invalidateManagedNetwork("managed_redirect_state_invalid");
+    return;
+  }
+  invalidateManagedNetwork("managed_redirect_not_suppressed");
 }
 
 function verifyManagedResponse(details) {
   const observation = managedNetworkObservation(details);
   if (!observation) return;
-  const { network } = observation;
+  const { network, pageUrl } = observation;
+  const identityRejection = managedNetworkIdentityRejection(details, network);
   if (
     network.invalid
     || !network.requestHeadersVerified
-    || network.requestId !== details.requestId
-    || network.frameId !== details.frameId
+    || pageUrl !== network.currentUrl
+    || identityRejection
   ) {
-    invalidateManagedNetwork("managed_response_identity_mismatch");
+    invalidateManagedNetwork(
+      identityRejection || "managed_response_identity_mismatch"
+    );
     return;
   }
   const headers = normalizedHeaders(details.responseHeaders);
-  const forbidden = [
-    "clear-site-data",
-    "content-disposition",
-    "content-security-policy-report-only",
-    "cross-origin-embedder-policy",
-    "cross-origin-opener-policy",
-    "cross-origin-resource-policy",
-    "link",
-    "location",
-    "nel",
-    "proxy-authenticate",
-    "refresh",
-    "report-to",
-    "reporting-endpoints",
-    "set-cookie",
-    "www-authenticate",
-    "x-frame-options"
-  ];
+  const statusRejection = managedResponseStatusRejection(details.statusCode);
   let unsafeReason = null;
   if (!headers) {
     unsafeReason = "managed_response_headers_invalid";
-  } else if (
-    !Number.isInteger(details.statusCode)
-    || details.statusCode < 200
-    || details.statusCode >= 300
-  ) {
-    unsafeReason = "managed_response_status_invalid";
+  } else if (statusRejection) {
+    unsafeReason = statusRejection;
   } else if (details.fromCache !== false) {
     unsafeReason = "managed_response_cache_unsafe";
-  } else if (forbidden.some((name) => headers.has(name))) {
+  } else if (
+    headers.has("location")
+    || MANAGED_RESPONSE_SIDE_EFFECT_HEADERS.some((name) => headers.has(name))
+  ) {
     unsafeReason = "managed_response_side_effect_header";
   } else if (
     singletonHeader(headers, "content-security-policy")
@@ -608,7 +624,8 @@ function verifyManagedResponse(details) {
   } else if (
     singletonHeader(headers, "referrer-policy")
       ?.toLowerCase() !== "strict-origin-when-cross-origin"
-    || singletonHeader(headers, "permissions-policy") === null
+    || singletonHeader(headers, "permissions-policy")
+      !== CONTROLLED_PERMISSIONS_POLICY
   ) {
     unsafeReason = "managed_response_policy_invalid";
   } else if (
@@ -623,6 +640,7 @@ function verifyManagedResponse(details) {
     invalidateManagedNetwork(unsafeReason);
     return;
   }
+  network.documentUrl = pageUrl;
   network.responseVerified = true;
   reportManagedNetworkStage("network_response_verified");
 }
@@ -630,14 +648,22 @@ function verifyManagedResponse(details) {
 function captureManagedNetworkError(details) {
   const observation = managedNetworkObservation(details);
   if (!observation || observation.network.responseVerified) return;
+  const identityRejection = managedNetworkIdentityRejection(
+    details,
+    observation.network
+  );
+  if (identityRejection) {
+    invalidateManagedNetwork(identityRejection);
+    return;
+  }
   invalidateManagedNetwork("managed_network_error");
 }
 
-async function installFreshFrameRules(environment, nonce, provider) {
+async function installFreshFrameRules(nonce, provider) {
   await chrome.declarativeNetRequest.updateDynamicRules({
     removeRuleIds: FRAME_RULE_IDS
   });
-  await replaceSessionFrameRules(environment, nonce, provider);
+  await replaceSessionFrameRules(nonce, provider);
 }
 
 async function removeFrameRules() {
@@ -663,6 +689,9 @@ function beginFrameRuleCleanup(nonce = null) {
   frameRuleCleanupOwnerDocumentId =
     activeFrameEnvironment?.ownerDocumentId
     ?? pendingEnvironmentOwnerDocumentId;
+  if (activeFrameEnvironment) {
+    retiredManagedRequestIds(activeFrameEnvironment.network);
+  }
   activeFrameEnvironment = null;
   frameRuleCleanupNonce = nonce;
   frameRuleCleanupPromise = removeFrameRules().finally(() => {
@@ -817,31 +846,60 @@ async function rotateFrameEnvironment(
   }
   let rulesReplaced = false;
   try {
-    await replaceSessionFrameRules(environment, nonce, provider);
+    await replaceSessionFrameRules(nonce, provider);
     rulesReplaced = true;
     await requireCurrentOffscreenOwner(ownerDocumentId);
     activeFrameEnvironment = {
       nonce,
-      network: createManagedNetworkState(),
+      network: createManagedNetworkState(retiredManagedRequestIds(
+        environment.network
+      )),
       ownerDocumentId,
-      pageUrl: environment.pageUrl,
+      pageUrl: MANAGED_PAGE_URL,
       provider
     };
-    return environment.pageUrl;
+    return MANAGED_PAGE_URL;
   } catch (error) {
     if (rulesReplaced) await beginFrameRuleCleanup(environment.nonce);
     throw error;
   }
 }
 
-function createManagedNetworkState() {
+function retiredManagedRequestIds(network) {
+  if (network) {
+    for (const requestId of [
+      ...network.retiredRequestIds,
+      network.requestId
+    ]) {
+      if (
+        typeof requestId === "string"
+        && requestId
+        && !retiredManagedRequestIdTombstones.includes(requestId)
+      ) {
+        retiredManagedRequestIdTombstones.push(requestId);
+      }
+    }
+    retiredManagedRequestIdTombstones.splice(
+      0,
+      Math.max(0, retiredManagedRequestIdTombstones.length - 8)
+    );
+  }
+  return [...retiredManagedRequestIdTombstones];
+}
+
+function createManagedNetworkState(
+  retiredRequestIds = retiredManagedRequestIds()
+) {
   return {
     contentDocumentId: null,
+    currentUrl: null,
+    documentUrl: null,
     frameId: null,
     invalid: false,
     invalidReason: null,
     lastStage: "environment_prepared",
     parentDocumentId: null,
+    retiredRequestIds: new Set(retiredRequestIds),
     requestHeadersVerified: false,
     requestId: null,
     responseVerified: false,
@@ -851,27 +909,24 @@ function createManagedNetworkState() {
 
 async function installFreshFrameEnvironment(nonce, provider, ownerDocumentId) {
   try {
-    const environment = await embeddingEnvironmentWithTimeout(
-      INITIAL_RULE_FETCH_TIMEOUT_MS
-    );
-    await installFreshFrameRules(environment, nonce, provider);
+    await installFreshFrameRules(nonce, provider);
     await requireCurrentOffscreenOwner(ownerDocumentId);
     activeFrameEnvironment = {
       nonce,
       network: createManagedNetworkState(),
       ownerDocumentId,
-      pageUrl: environment.pageUrl,
+      pageUrl: MANAGED_PAGE_URL,
       provider
     };
     staleFrameRulesCleared = true;
-    return environment.pageUrl;
+    return MANAGED_PAGE_URL;
   } catch (error) {
     try {
       await beginFrameRuleCleanup();
     } catch (cleanupError) {
       throw new AggregateError(
         [error, cleanupError],
-        "Suno frame policy refresh and fail-closed cleanup both failed"
+        "Suno frame policy installation and fail-closed cleanup both failed"
       );
     }
     throw error;
@@ -1017,6 +1072,14 @@ async function lifecycleOwnerDocumentId(message, sender) {
 }
 
 async function handleOffscreenLifecycleMessage(message, sender) {
+  if (coldBootstrapResetting) {
+    return {
+      accepted: false,
+      ...(message.type === "sunox-frame-environment-prepare-v1"
+        ? { error: "challenge_environment_unavailable" }
+        : {})
+    };
+  }
   const ownerDocumentId = await lifecycleOwnerDocumentId(message, sender);
   if (!ownerDocumentId) {
     return {
@@ -1112,14 +1175,15 @@ function managedFrameSenderRejectionReason(sender) {
   if (candidate.nonce !== activeFrameEnvironment.nonce) {
     return "managed_nonce_mismatch";
   }
-  if (candidate.pageUrl !== activeFrameEnvironment.pageUrl) {
-    return "managed_route_mismatch";
-  }
   const network = activeFrameEnvironment.network;
   if (network.invalid) return network.invalidReason || "managed_network_invalid";
   if (network.retiring) return "managed_environment_retired";
   if (!network.requestHeadersVerified) return "managed_request_unverified";
   if (!network.responseVerified) return "managed_response_unverified";
+  if (
+    !network.documentUrl
+    || candidate.pageUrl !== network.documentUrl
+  ) return "managed_route_mismatch";
   if (
     typeof network.contentDocumentId === "string"
     && sender.documentId !== network.contentDocumentId
@@ -1140,6 +1204,31 @@ function managedFrameSenderRejectionReason(sender) {
 
 function notifyOffscreen(message) {
   chrome.runtime.sendMessage(message).catch(() => {});
+}
+
+async function deliverManagedFrameResult(state, message) {
+  for (
+    let attempt = 1;
+    attempt <= MANAGED_FRAME_RESULT_DELIVERY_ATTEMPTS;
+    attempt += 1
+  ) {
+    try {
+      const acknowledgement = await chrome.runtime.sendMessage(message);
+      if (
+        acknowledgement?.accepted === true
+        && acknowledgement.type === MANAGED_FRAME_RESULT_ACK_TYPE
+        && acknowledgement.nonce === state.nonce
+        && acknowledgement.requestId === state.requestId
+      ) {
+        state.completed = true;
+        return true;
+      }
+    } catch {
+      // A waking offscreen document can transiently have no message receiver.
+      // Retry the same bounded, sanitized terminal result once.
+    }
+  }
+  return false;
 }
 
 function rejectManagedFramePort(
@@ -1194,24 +1283,25 @@ function bindManagedFramePort(port) {
     nonce: details.nonce,
     port,
     provider: activeFrameEnvironment.provider,
-    requestId: null
+    requestId: null,
+    terminalDelivery: null
   };
   managedFrame = state;
   port.onMessage.addListener((message) => {
     if (
       managedFrame !== state
       || state.completed
+      || state.terminalDelivery
       || !state.executing
       || message?.type !== "sunox-managed-frame-result-v2"
       || message.requestId !== state.requestId
     ) return;
-    state.completed = true;
     const token = typeof message.token === "string"
       && message.token.length > 0
       && message.token.length <= MAX_TOKEN_LENGTH
       ? message.token
       : null;
-    notifyOffscreen({
+    const result = {
       type: "sunox-managed-frame-result-v2",
       nonce: state.nonce,
       requestId: state.requestId,
@@ -1219,7 +1309,18 @@ function bindManagedFramePort(port) {
       error: token
         ? null
         : managedChallengeErrorMessage(message.errorCode)
-    });
+    };
+    state.terminalDelivery = deliverManagedFrameResult(state, result)
+      .then((acknowledged) => {
+        if (acknowledged || managedFrame !== state) return;
+        // The result was never acknowledged. Disconnecting rejects the
+        // challenge, releases the frame environment, and lets the offscreen
+        // controller report the existing explicit disconnect failure.
+        rejectManagedFramePort(state.port, false);
+      })
+      .finally(() => {
+        state.terminalDelivery = null;
+      });
   });
   port.onDisconnect.addListener(() => {
     if (managedFrame !== state) return;
@@ -1230,7 +1331,13 @@ function bindManagedFramePort(port) {
         nonce: state.nonce
       });
     }
-    releaseFrameEnvironment(state.nonce).catch(() => {});
+    // Closing an unhealthy offscreen document disconnects its managed frame
+    // before getContexts() confirms that the owner is actually gone. Keep the
+    // response scrubber installed until that confirmation; the reset path
+    // revokes the orphaned environment after close succeeds.
+    if (!coldBootstrapResetting) {
+      releaseFrameEnvironment(state.nonce).catch(() => {});
+    }
   });
   notifyOffscreen({
     type: "sunox-managed-frame-ready-v2",
@@ -1252,6 +1359,7 @@ async function offscreenStatus() {
     ]);
     return response?.type === "sunox-offscreen-pong-v1"
       && OFFSCREEN_CLIENT_ID_PATTERN.test(response.clientId)
+      && response.runtimeBuild === SERVICE_WORKER_RUNTIME_BUILD
       ? response
       : null;
   } catch {
@@ -1391,8 +1499,9 @@ async function ensureOffscreenDocument() {
       }
       return;
     }
+    coldBootstrapResetting = true;
     offscreenOwnerBinding = null;
-    await chrome.offscreen.closeDocument().catch(() => {});
+    await closeOffscreenDocumentAndConfirm(documentUrl);
     ownerWasLost = true;
   } else {
     offscreenOwnerBinding = null;
@@ -1426,23 +1535,56 @@ async function ensurePollAlarm() {
   });
 }
 
+async function closeOffscreenDocumentAndConfirm(documentUrl) {
+  await chrome.offscreen.closeDocument();
+  const remaining = await chrome.runtime.getContexts({
+    contextTypes: ["OFFSCREEN_DOCUMENT"],
+    documentUrls: [documentUrl]
+  });
+  if (remaining.length !== 0) {
+    throw new Error(
+      "The previous Browser Bridge offscreen document did not close"
+    );
+  }
+}
+
+async function closeUnknownOffscreenBeforeRuleCleanup() {
+  const documentUrl = chrome.runtime.getURL(OFFSCREEN_PATH);
+  const contexts = await chrome.runtime.getContexts({
+    contextTypes: ["OFFSCREEN_DOCUMENT"],
+    documentUrls: [documentUrl]
+  });
+  if (contexts.length === 0) return;
+  offscreenOwnerBinding = null;
+  await closeOffscreenDocumentAndConfirm(documentUrl);
+}
+
 async function bootstrap() {
   if (frameRuleCleanupPromise) await frameRuleCleanupPromise;
-  if (
+  const needsColdReset =
     !staleFrameRulesCleared
     && !activeFrameEnvironment
-    && !frameEnvironmentPromise
-  ) {
+    && !frameEnvironmentPromise;
+  if (needsColdReset) {
+    coldBootstrapResetting = true;
+    // Session DNR survives an MV3 worker restart, while all in-memory request
+    // ownership does not. Destroy the unknown old iframe before removing its
+    // response scrubber; otherwise a late response could regain Location or
+    // Set-Cookie between cleanup and offscreen recovery.
+    await closeUnknownOffscreenBeforeRuleCleanup();
     await beginFrameRuleCleanup();
   }
   await ensurePollAlarm();
   await ensureOffscreenDocument();
+  coldBootstrapResetting = false;
   const response = await chrome.runtime.sendMessage({
-    type: "sunox-offscreen-start-v1"
+    type: "sunox-offscreen-start-v1",
+    runtimeBuild: SERVICE_WORKER_RUNTIME_BUILD
   });
   if (
     response?.accepted !== true
     || response.clientId !== offscreenOwnerBinding?.clientId
+    || response.runtimeBuild !== SERVICE_WORKER_RUNTIME_BUILD
   ) {
     throw new Error("Offscreen Browser Bridge did not acknowledge polling startup");
   }
@@ -1489,7 +1631,8 @@ chrome.webRequest.onSendHeaders.addListener(
 );
 chrome.webRequest.onBeforeRedirect.addListener(
   rejectManagedRedirect,
-  managedWebRequestFilter
+  managedWebRequestFilter,
+  ["responseHeaders", "extraHeaders"]
 );
 chrome.webRequest.onResponseStarted.addListener(
   verifyManagedResponse,

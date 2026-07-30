@@ -21,6 +21,9 @@
     "http://127.0.0.1/*",
     "https://suno.com/*"
   ],
+  "content_security_policy": {
+    "extension_pages": "default-src 'none'; script-src 'self'; object-src 'none'; frame-src https://suno.com; connect-src http://127.0.0.1:*; worker-src 'self';"
+  },
   "background": {
     "service_worker": "service-worker.js"
   },

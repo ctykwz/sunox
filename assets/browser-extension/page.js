@@ -1,5 +1,4 @@
 (() => {
-  const MANAGED_PAGE_QUERY_PARAMETER = "__sunox_bridge";
   const MANAGED_PAGE_HASH_PREFIX = "#sunox-browser-bridge=";
   const MANAGED_NONCE_PATTERN =
     /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -18,18 +17,11 @@
         || url.username
         || url.password
       ) return null;
-      const keys = [...url.searchParams.keys()];
-      const values = url.searchParams.getAll(MANAGED_PAGE_QUERY_PARAMETER);
-      if (
-        keys.length !== 1
-        || keys[0] !== MANAGED_PAGE_QUERY_PARAMETER
-        || values.length !== 1
-        || !MANAGED_NONCE_PATTERN.test(values[0])
-      ) return null;
-      const nonce = values[0];
-      if (url.hash !== `${MANAGED_PAGE_HASH_PREFIX}${nonce}`) return null;
-      url.search = "";
+      if (!url.hash.startsWith(MANAGED_PAGE_HASH_PREFIX)) return null;
+      const nonce = url.hash.slice(MANAGED_PAGE_HASH_PREFIX.length);
+      if (!MANAGED_NONCE_PATTERN.test(nonce)) return null;
       url.hash = "";
+      if (url.href !== "https://suno.com/") return null;
       return { nonce, pageUrl: url.href };
     } catch {
       return null;
@@ -40,8 +32,7 @@
   const managedNonce = initialPage.nonce;
   const managedPageUrl = initialPage.pageUrl;
   const controlledDocumentReady = () =>
-    window.credentialless === true
-    && document.documentElement?.getAttribute(
+    document.documentElement?.getAttribute(
       CONTROLLED_DOCUMENT_ATTRIBUTE
     ) === managedNonce;
   const currentManagedPage = () => {
@@ -68,7 +59,8 @@
   const CHALLENGE_SDK_READY_TIMEOUT_MS = 15000;
   const HCAPTCHA_SILENT_TIMEOUT_MS = 15000;
   const TURNSTILE_IDLE_TIMEOUT_MS = 15000;
-  const TURNSTILE_RECOVERY_TIMEOUT_MS = 30000;
+  const TURNSTILE_SHARED_ATTEMPT_BUDGET_MS = 30000;
+  const TURNSTILE_NO_CALLBACK_ATTEMPTS = 2;
   const TURNSTILE_HIDDEN_STYLE = "position:fixed;z-index:-50;opacity:0;pointer-events:none";
   const HCAPTCHA_ENDPOINT = "https://hcaptcha-endpoint-prod.suno.com";
   const HCAPTCHA_ASSET_HOST = "https://hcaptcha-assets-prod.suno.com";
@@ -220,9 +212,10 @@
     }
   }
 
-  async function solveTurnstile() {
-    const body = await managedBody();
-    const turnstile = await loadSdk(TURNSTILE_PROVIDER);
+  async function solveTurnstileAttempt(body, turnstile, recoveryDeadline) {
+    if (Date.now() >= recoveryDeadline) {
+      throw new Error("turnstile_no_callback");
+    }
     const container = document.createElement("div");
     // Match Suno's current generation widget for the silent attempt. Moving
     // the container outside the viewport can prevent the managed challenge
@@ -235,7 +228,6 @@
         let settled = false;
         let terminalErrorCode = "turnstile_no_callback";
         let timeout;
-        const recoveryDeadline = Date.now() + TURNSTILE_RECOVERY_TIMEOUT_MS;
         const settle = (callback) => {
           if (settled) return;
           settled = true;
@@ -243,9 +235,15 @@
           callback();
         };
         const fail = (message) => settle(() => reject(new Error(message)));
-        const finish = (token) => token
-          ? settle(() => resolve(token))
-          : fail("Turnstile returned an empty token");
+        const finish = (token) => {
+          if (Date.now() > recoveryDeadline) {
+            fail(terminalErrorCode);
+          } else if (token) {
+            settle(() => resolve(token));
+          } else {
+            fail("Turnstile returned an empty token");
+          }
+        };
         const scheduleDeadline = (timeoutMs) => {
           clearTimeout(timeout);
           const remainingMs = Math.max(0, recoveryDeadline - Date.now());
@@ -287,11 +285,58 @@
         }
       });
     } finally {
+      let cleanupFailed = false;
       if (widgetId !== undefined) {
-        try { turnstile.remove(widgetId); } catch {}
+        try {
+          turnstile.remove(widgetId);
+        } catch {
+          cleanupFailed = true;
+        }
       }
-      container.remove();
+      try {
+        container.remove();
+      } catch {
+        cleanupFailed = true;
+      }
+      if (cleanupFailed) {
+        throw new Error("Turnstile widget cleanup failed");
+      }
     }
+  }
+
+  async function solveTurnstile() {
+    const body = await managedBody();
+    const turnstile = await loadSdk(TURNSTILE_PROVIDER);
+    // The content bridge owns a 50-second page deadline. A cold SDK load may
+    // consume 15 seconds, so both fresh widgets share one absolute 30-second
+    // budget after the SDK is ready. The second widget keeps the remaining
+    // time for either a token or the provider's bounded same-widget recovery.
+    const recoveryDeadline =
+      Date.now() + TURNSTILE_SHARED_ATTEMPT_BUDGET_MS;
+    for (
+      let attempt = 1;
+      attempt <= TURNSTILE_NO_CALLBACK_ATTEMPTS;
+      attempt += 1
+    ) {
+      try {
+        return await solveTurnstileAttempt(
+          body,
+          turnstile,
+          recoveryDeadline
+        );
+      } catch (error) {
+        if (
+          !(error instanceof Error)
+          || error.message !== "turnstile_no_callback"
+          || attempt === TURNSTILE_NO_CALLBACK_ATTEMPTS
+        ) throw error;
+        // Suno Web removes the prior generation widget before each queued
+        // verification. Recreate it once for the CLI when the provider emits
+        // no callback at all; never create a fresh widget for interactive or
+        // classified failures.
+      }
+    }
+    throw new Error("turnstile_no_callback");
   }
 
   window.addEventListener("message", async (event) => {

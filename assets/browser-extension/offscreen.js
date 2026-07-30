@@ -5,8 +5,11 @@
   const bridgeConfig = globalThis.SUNOX_BRIDGE_CONFIG;
   const { errorMessage } = globalThis.SUNOX_BRIDGE_SHARED || {};
   const transport = globalThis.SUNOX_BRIDGE_TRANSPORTS?.[bridgeConfig?.transport];
+  const runtimeBuild = bridgeConfig?.loopback?.runtimeBuild;
   if (
     bridgeConfig?.schemaVersion !== 1
+    || typeof runtimeBuild !== "string"
+    || !/^\d+\.\d+\.\d+$/.test(runtimeBuild)
     || typeof errorMessage !== "function"
     || transport?.contractVersion !== 1
     || typeof transport.claimChallenge !== "function"
@@ -18,21 +21,19 @@
   const clientId = `offscreen-${crypto.randomUUID()}`;
   const claimPageUrl = "https://suno.com/";
   const managedPageOrigin = "https://suno.com";
-  // A first hidden navigation can initialize Suno/Clerk browser state without
-  // ever reaching the canonical content-script handshake. Once that frame has
-  // loaded, allow a short grace period and rebuild it once if no ready port
-  // appears. Both attempts share one absolute readiness deadline, and a retry
-  // is forbidden after provider execution starts.
+  // The fixed root carrier may need one fresh retry before its controlled
+  // content-script handshake appears. Both attempts share one absolute
+  // readiness deadline, and a retry is forbidden after provider execution.
   const managedFrameWarmupGraceMs = 3_000;
   const managedFramePrepareTimeoutMs = 9_000;
   const managedFrameReadyTimeoutMs = 45_000;
   const managedFrameReleaseTimeoutMs = 500;
   const managedFrameResultTimeoutMs = 65_000;
   const managedFrameReadyAttempts = 2;
-  const managedPageQueryParameter = "__sunox_bridge";
   const managedPageHashPrefix = "#sunox-browser-bridge=";
   const managedNoncePattern =
     /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  const managedFrameResultAckType = "sunox-managed-frame-result-ack-v1";
   const pollWorkerStaleMs = 5_000;
   const maxTokenLength = 16_384;
   let busy = false;
@@ -77,7 +78,7 @@
         || url.search
         || url.hash
       ) return null;
-      return url.href;
+      return url.href === claimPageUrl ? url.href : null;
     } catch {
       return null;
     }
@@ -92,8 +93,16 @@
       || sender.tab
     ) return false;
     if (message.type === "sunox-offscreen-start-v1") {
+      if (message.runtimeBuild !== runtimeBuild) {
+        sendResponse({
+          accepted: false,
+          clientId,
+          runtimeBuild
+        });
+        return false;
+      }
       pollingReady = true;
-      sendResponse({ accepted: true, clientId });
+      sendResponse({ accepted: true, clientId, runtimeBuild });
       poll();
       return false;
     }
@@ -104,6 +113,7 @@
       busy: busySince > 0,
       busySince: busySince > 0 ? busySince : null,
       clientId,
+      runtimeBuild,
       type: "sunox-offscreen-pong-v1",
       pollWorkerAgeMs,
       pollWorkerHealthy: pollWorkerAgeMs !== null
@@ -218,14 +228,12 @@
     let timeout = null;
 
     managedFrame.title = "Sunox managed challenge context";
-    // Keep the managed origin in an ephemeral storage partition. The hidden
-    // challenge needs Suno's hostname for provider attestation, not the
-    // user's Suno cookies, local storage, autofill, or password-manager data.
-    managedFrame.credentialless = true;
+    // Use the current Chrome profile's Suno context so the provider observes
+    // the same browser state as Suno Web. The extension still stops and
+    // replaces the host response before its scripts run.
     managedFrame.referrerPolicy = "strict-origin-when-cross-origin";
     managedFrame.sandbox.add("allow-forms", "allow-same-origin", "allow-scripts");
     const managedFrameUrl = new URL(pageUrl);
-    managedFrameUrl.searchParams.set(managedPageQueryParameter, nonce);
     managedFrameUrl.hash = `${managedPageHashPrefix.slice(1)}${nonce}`;
     // The offscreen document itself has no browser surface. Keep a normal
     // layout viewport so visibility-sensitive provider code can measure the
@@ -319,7 +327,7 @@
         });
       }
 
-      function onFrameMessage(message, sender) {
+      function onFrameMessage(message, sender, sendResponse) {
         if (sender.id !== chrome.runtime.id || sender.tab) return false;
         if (
           message?.type === "sunox-managed-frame-stage-v1"
@@ -431,6 +439,12 @@
               ? message.error.slice(0, 900)
               : "Managed Suno frame returned an invalid challenge token"
         });
+        sendResponse({
+          accepted: true,
+          type: managedFrameResultAckType,
+          nonce,
+          requestId: challenge.requestId
+        });
         return false;
       }
 
@@ -457,6 +471,7 @@
     // the complete claim/window/result operation across service-worker wakes.
     busySince = Date.now();
     let challenge;
+    let terminalSubmissionStarted = false;
     try {
       challenge = await transport.claimChallenge({
         clientId,
@@ -468,19 +483,23 @@
 
       const result = await executeInManagedFrame(challenge);
       const token = result.token;
-      const submitted = await transport.submitResult({
+      const terminalResult = {
         transportReceipt: challenge.transportReceipt,
         requestId: challenge.requestId,
         token,
         error: token
           ? null
           : result.error || "Managed Browser Bridge returned no challenge result"
-      });
+      };
+      terminalSubmissionStarted = true;
+      const submitted = await transport.submitResult(terminalResult);
       if (!submitted?.accepted) {
-        throw new Error("Sunox CLI rejected the Browser Bridge result");
+        return;
       }
     } catch (error) {
-      if (challenge) await submitFailure(challenge, error).catch(() => {});
+      if (challenge && !terminalSubmissionStarted) {
+        await submitFailure(challenge, error).catch(() => {});
+      }
     } finally {
       busy = false;
       busySince = 0;
