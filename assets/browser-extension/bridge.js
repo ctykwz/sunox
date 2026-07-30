@@ -1,5 +1,4 @@
 (() => {
-  const MANAGED_PAGE_QUERY_PARAMETER = "__sunox_bridge";
   const MANAGED_PAGE_HASH_PREFIX = "#sunox-browser-bridge=";
   const MANAGED_NONCE_PATTERN =
     /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -19,18 +18,11 @@
         || url.username
         || url.password
       ) return null;
-      const keys = [...url.searchParams.keys()];
-      const values = url.searchParams.getAll(MANAGED_PAGE_QUERY_PARAMETER);
-      if (
-        keys.length !== 1
-        || keys[0] !== MANAGED_PAGE_QUERY_PARAMETER
-        || values.length !== 1
-        || !MANAGED_NONCE_PATTERN.test(values[0])
-      ) return null;
-      const nonce = values[0];
-      if (url.hash !== `${MANAGED_PAGE_HASH_PREFIX}${nonce}`) return null;
-      url.search = "";
+      if (!url.hash.startsWith(MANAGED_PAGE_HASH_PREFIX)) return null;
+      const nonce = url.hash.slice(MANAGED_PAGE_HASH_PREFIX.length);
+      if (!MANAGED_NONCE_PATTERN.test(nonce)) return null;
       url.hash = "";
+      if (url.href !== "https://suno.com/") return null;
       return { nonce, pageUrl: url.href };
     } catch {
       return null;
@@ -50,7 +42,7 @@
     if (typeof window.stop !== "function") return false;
     // ISOLATED document_start scripts are not subject to the host page's CSP.
     // Stop before host DOM construction or host script execution, then replace
-    // the response with an empty credentialless challenge document.
+    // the response with an empty extension-controlled challenge document.
     window.stop();
     if (
       typeof document.createElement !== "function"
@@ -73,16 +65,13 @@
         html.removeAttribute(attribute.name);
       }
       html.replaceChildren(head, body);
-      if (window.credentialless === true) {
-        html.setAttribute(CONTROLLED_DOCUMENT_ATTRIBUTE, nonce);
-      }
+      html.setAttribute(CONTROLLED_DOCUMENT_ATTRIBUTE, nonce);
     } catch {
       return false;
     }
-    return window.credentialless === true
-      && document.documentElement?.getAttribute(
+    return document.documentElement?.getAttribute(
       CONTROLLED_DOCUMENT_ATTRIBUTE
-      ) === nonce;
+    ) === nonce;
   };
   if (!installControlledDocument(initialPage.nonce)) {
     reportStage("controlled_document_install_failed");
@@ -104,8 +93,7 @@
   const managedNonce = initialPage.nonce;
   const managedPageUrl = initialPage.pageUrl;
   const controlledDocumentReady = () =>
-    window.credentialless === true
-    && document.documentElement?.getAttribute(
+    document.documentElement?.getAttribute(
       CONTROLLED_DOCUMENT_ATTRIBUTE
     ) === managedNonce
     && document.documentElement?.getAttribute(

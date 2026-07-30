@@ -163,14 +163,24 @@ inside the user's regular Chrome profile. The extension keeps only its local lis
 idle. For a required challenge, it creates one nonce-bound `suno.com` iframe inside Chrome's
 invisible offscreen document. The frame keeps a normal layout viewport for visibility-sensitive
 provider code, but Chrome creates no tab, popup, minimized window, or separate browser process.
-The frame is credentialless, so it cannot read the user's Suno cookies or persistent browser
-storage. At `document_start`, the Bridge stops the host response and replaces it with a minimal
-provider-only challenge document. Only the first-level extension-owned frame whose network-visible
-query nonce, document nonce, final request headers, and controlled response headers all agree may
-connect. Unexpected navigation, caching, reload, disconnect, protocol drift, or identity mismatch
-removes the frame and fails closed. The frame is also removed immediately after a token or terminal
-error, and there is no visible or credentialed fallback. Raw provider errors never cross the Bridge
-boundary or enter storage or logs.
+The frame uses the current Chrome profile's Suno context so the provider sees the same browser
+state as Suno Web. At `document_start`, the Bridge stops the host response and replaces it with a
+minimal provider-only challenge document before host scripts run. Response rules remove
+`Location`, `Set-Cookie`, and other navigation or storage side effects. The rules are installed
+before navigation, and the fixed `https://suno.com/` root is used only as an origin carrier; the
+Bridge neither discovers nor follows an application route. A standard redirect response whose
+`Location` was successfully removed remains a controlled document, while any redirect Chrome
+actually begins to follow fails closed. Only the first-level extension-owned frame whose one-time
+carrier request marker, document nonce, request headers, and controlled response headers all agree
+may connect. Unexpected navigation, caching, reload, disconnect, protocol drift, or identity
+mismatch removes the frame and fails closed. The frame is also removed immediately after a token
+or terminal error, and there is no visible or isolated-browser fallback. Raw provider errors never
+cross the Bridge boundary or enter storage or logs.
+If Turnstile produces no callback during its first 15-second silent attempt, the Bridge removes that
+widget and performs exactly one fresh silent attempt. Both widgets share one absolute 30-second
+budget starting after the SDK is ready. A classified provider callback never starts another fresh
+widget, although Turnstile's bounded same-widget recovery remains enabled within that shared budget.
+Any challenge that asks for visible interaction fails immediately.
 This flow is supported on macOS and Windows. If the Bridge does not
 respond, the default `auto` mode falls back to the matching installed Chromium-family browser only
 when no Bridge installation has been recorded. Once the Bridge has been installed, `auto` fails closed
@@ -247,8 +257,9 @@ separate browser process), or `isolated` (always use the temporary browser). A o
 looks like `-c challenge_browser=existing`. The `existing` name is retained for configuration
 compatibility; it now means “use the installed Bridge in the existing Chrome profile.” The Bridge
 automatically creates and removes its nonce-bound offscreen iframe, so no user-opened or retained
-Suno tab or browser window is created. It accepts only the currently supported Suno/Clerk redirect
-shape and does not execute until the return URL has been cleaned and stabilized. A configured
+Suno tab or browser window is created. Before loading the fixed Suno root carrier, it installs the
+controlled request and response rules. `Location`-suppressed standard redirect responses are
+accepted as controlled documents; an actual navigation away from the carrier is rejected. A configured
 Bridge that is missing, stale, or protocol-drifted is reported as an error instead of opening another browser. In `auto` mode, Sunox may open
 the isolated fallback only when no Bridge installation has been recorded. An installed Bridge that is
 disabled, stale, or unreachable fails closed; use `isolated` explicitly to allow a separate browser

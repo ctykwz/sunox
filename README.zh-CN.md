@@ -154,13 +154,20 @@ sunox update                       更新到最新 GitHub Release
 在用户日常使用的 Chrome Profile 中执行不可见的验证组件。扩展空闲时只保留本地监听器；需要
 验证时，它会在 Chrome 不可见的 offscreen document 中创建一个绑定随机 nonce 的 `suno.com`
 iframe。iframe 保留正常布局尺寸，供对可见性敏感的验证代码计算，但 Chrome 不会创建标签页、
-弹窗、最小化窗口或独立浏览器进程。该 iframe 使用临时隔离存储，无法读取用户的 Suno Cookie
-和浏览器持久化数据。Bridge 会在 `document_start` 阶段停止宿主响应，并将其替换为只允许当前
-验证服务运行的最小文档。只有扩展拥有的一级 iframe，且网络请求 nonce、文档 nonce、最终请求头
-和受控响应头全部一致时才能连接。异常跳转、缓存命中、重载、断连、协议漂移或身份不匹配都会
-删除 iframe 并失败退出；得到 Token 或终态错误后也会立即删除 iframe，且绝不降级到任何可见或
-带登录态的窗口。页面原始错误不会越过 Bridge 边界，也不会写入存储或日志。该流程同时支持
-macOS 和 Windows。
+弹窗、最小化窗口或独立浏览器进程。该 iframe 使用当前 Chrome Profile 的 Suno 上下文，让验证
+服务看到与 Suno Web 一致的浏览器状态。Bridge 会在 `document_start` 阶段、宿主脚本运行前停止
+宿主响应，并将其替换为只允许当前验证服务运行的最小文档；响应规则会移除 `Set-Cookie` 等存储
+副作用，同时移除 `Location` 等导航副作用。规则会在导航前安装，固定的
+`https://suno.com/` 根地址只用来承载同源文档；Bridge 不再探测或跟随应用路由。标准 3xx 响应
+在 `Location` 已被成功移除时仍可作为受控文档使用；Chrome 一旦真的开始跳转，就立即失败退出。
+只有扩展拥有的一级 iframe，且一次性承载请求标记、文档 nonce、请求头和受控响应头全部一致时
+才能连接。异常跳转、缓存命中、重载、断连、协议漂移或身份不匹配都会删除 iframe 并失败退出；
+得到 Token 或终态错误后也会立即删除 iframe，且绝不降级到任何可见窗口或独立浏览器。页面原始
+错误不会越过 Bridge 边界，也不会写入存储或日志。该流程同时支持 macOS 和 Windows。
+如果 Turnstile 第一次静默执行 15 秒后完全没有回调，Bridge 会删除旧组件，并且只重建一次
+全新的静默组件。两个组件从 SDK 就绪开始共用一个 30 秒绝对预算。收到已经分类的 Provider
+错误回调后，Bridge 不会再重建新组件，但 Turnstile 仍可在该公共预算内完成同一组件上的有界恢复；
+一旦要求用户进行可见交互，则立即失败退出。
 
 默认的 `auto` 模式只会在尚未记录 Bridge 安装状态时，才使用本机匹配的 Chromium 系浏览器
 兜底。一旦安装并配对了 Bridge，`auto` 会在 Bridge 不可用时直接报错，不会悄悄启动独立浏览器。
@@ -229,7 +236,8 @@ Windows 上自动选择当前用户的应用配置目录；Chrome 使用这个�
 和 `isolated`（始终使用临时浏览器）。单次命令可使用 `-c challenge_browser=existing`。
 `existing` 这个名称是为了兼容原有配置，现在表示“使用现有 Chrome Profile 中已安装的 Bridge”。
 Bridge 会自动创建并删除绑定 nonce 的 offscreen iframe，不会创建用户标签页或浏览器窗口；
-它只接受当前支持的 Suno/Clerk 跳转格式，并且只会在返回 URL 已清理且稳定后执行。
+加载固定的 Suno 根地址前，它会先安装受控请求和响应规则。`Location` 已被移除的标准 3xx 响应
+可以作为受控文档继续执行；一旦真的离开该承载地址，就会直接失败。
 已经安装或配对的扩展缺失、版本过旧、协议漂移或无法连接时，命令会直接报错。`auto` 只有在
 尚未记录 Bridge 安装信息时才可能启动独立浏览器；已经安装的 Bridge 一旦被禁用、版本过旧、
 无法访问或丢失配对密钥，`auto` 同样会直接停止。只有明确允许独立浏览器时才使用 `isolated`。

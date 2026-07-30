@@ -45,13 +45,14 @@ const DEFAULT_EXTENSION_DIRECTORY: &str = "browser-extension";
 // package version as manifest.version_name. Accept only these exact rendered
 // manifests while migrating to the stable Bridge runtime identity.
 const LEGACY_CURRENT_VERSION_NAMES: &[&str] = &["0.2.0"];
-const INSTALL_BEHAVIOR_GUIDANCE: &str = "No Suno tab or browser window is opened. For a required challenge, the bridge creates one credentialless, nonce-bound Suno iframe inside Chrome's invisible offscreen document, stops and replaces the host response with a provider-only challenge document, executes one silent challenge, removes the frame on every terminal path, and fails closed instead of creating a visible or minimized fallback; once paired, auto also fails closed instead of launching an isolated browser.";
+const INSTALL_BEHAVIOR_GUIDANCE: &str = "No Suno tab or browser window is opened. For a required challenge, the bridge creates one nonce-bound Suno iframe inside Chrome's invisible offscreen document, uses the current Chrome profile's Suno context, stops and replaces the host response with a provider-only challenge document, and removes the frame on every terminal path. Turnstile rebuilds its widget exactly once only when the first 15-second silent attempt produces no callback; both widgets share one absolute 30-second budget after SDK readiness. A classified provider callback never starts another fresh widget, while Turnstile's bounded same-widget recovery remains enabled within that budget; visible-interaction requests fail immediately. The bridge fails closed instead of creating a visible or minimized fallback; once paired, auto also fails closed instead of launching an isolated browser.";
 
 #[derive(Clone, Copy)]
 enum BundleAssetContents {
     StaticText(&'static str),
     StaticBinary(&'static [u8]),
     RenderedManifest,
+    RenderedServiceWorker,
     RenderedPrivateConfig,
 }
 
@@ -68,7 +69,7 @@ const CURRENT_BUNDLE_ASSETS: &[BundleAsset] = &[
     },
     BundleAsset {
         path: "service-worker.js",
-        contents: BundleAssetContents::StaticText(SERVICE_WORKER),
+        contents: BundleAssetContents::RenderedServiceWorker,
     },
     BundleAsset {
         path: "transport-loopback.js",
@@ -1108,6 +1109,9 @@ fn write_bundle(directory: &Path, secret: &str) -> Result<(), CliError> {
             BundleAssetContents::RenderedManifest => {
                 write_asset(directory, asset.path, &render_manifest())?;
             }
+            BundleAssetContents::RenderedServiceWorker => {
+                write_asset(directory, asset.path, &render_service_worker())?;
+            }
             BundleAssetContents::RenderedPrivateConfig => {
                 write_private_asset(directory, asset.path, render_config(secret).as_bytes())?;
             }
@@ -1247,6 +1251,12 @@ fn current_bundle_without_sentinel_matches(
                 if !manifest_bytes_match_current_runtime(&std::fs::read(
                     directory.join(asset.path),
                 )?) {
+                    return Ok(false);
+                }
+            }
+            BundleAssetContents::RenderedServiceWorker => {
+                if std::fs::read(directory.join(asset.path))? != render_service_worker().as_bytes()
+                {
                     return Ok(false);
                 }
             }
@@ -1646,6 +1656,16 @@ fn render_config_template(
 
 fn render_manifest() -> String {
     render_manifest_with_version_name(BROWSER_BRIDGE_RUNTIME_BUILD)
+}
+
+fn render_service_worker() -> String {
+    const PLACEHOLDER: &str = "__SUNOX_BRIDGE_RUNTIME_BUILD__";
+    assert_eq!(
+        SERVICE_WORKER.matches(PLACEHOLDER).count(),
+        1,
+        "Browser Bridge service worker must contain exactly one runtime-build placeholder"
+    );
+    SERVICE_WORKER.replacen(PLACEHOLDER, BROWSER_BRIDGE_RUNTIME_BUILD, 1)
 }
 
 fn render_manifest_with_version_name(version_name: &str) -> String {
@@ -2944,13 +2964,13 @@ mod tests {
         install_bundle, install_next_steps, installation_evidence_at,
         manifest_bytes_match_current_runtime, mark_reload_pending_locked, read_bridge_secret,
         reload_pending_at, remove_snapshot_tree, remove_snapshot_tree_paths, render_config,
-        render_manifest, render_manifest_with_version_name, replace_directory_paths,
-        runtime_state_after_probe, secret_fingerprint,
+        render_manifest, render_manifest_with_version_name, render_service_worker,
+        replace_directory_paths, runtime_state_after_probe, secret_fingerprint,
     };
 
     #[test]
     fn extension_assets_share_the_bridge_contract() {
-        assert_eq!(super::BROWSER_BRIDGE_RUNTIME_BUILD, "0.3.41");
+        assert_eq!(super::BROWSER_BRIDGE_RUNTIME_BUILD, "0.3.49");
         assert!(MANIFEST.contains("https://suno.com/*"));
         assert!(MANIFEST.contains("http://127.0.0.1/*"));
         assert!(MANIFEST.contains("\"version\": \"__SUNOX_BRIDGE_RUNTIME_BUILD__\""));
@@ -2992,13 +3012,25 @@ mod tests {
             }])
         );
         assert!(SERVICE_WORKER.contains("chrome.offscreen.createDocument"));
+        assert_eq!(
+            SERVICE_WORKER
+                .matches("__SUNOX_BRIDGE_RUNTIME_BUILD__")
+                .count(),
+            1
+        );
+        assert!(SERVICE_WORKER.contains("response.runtimeBuild === SERVICE_WORKER_RUNTIME_BUILD"));
+        assert!(SERVICE_WORKER.contains("runtimeBuild: SERVICE_WORKER_RUNTIME_BUILD"));
         assert!(SERVICE_WORKER.contains("chrome.declarativeNetRequest.updateDynamicRules"));
         assert!(SERVICE_WORKER.contains("chrome.declarativeNetRequest.updateSessionRules"));
         assert!(SERVICE_WORKER.contains("addRules"));
         assert!(SERVICE_WORKER.contains("content-security-policy"));
         assert!(SERVICE_WORKER.contains("x-frame-options"));
         assert!(SERVICE_WORKER.contains("challengeDocumentCsp"));
-        assert!(SERVICE_WORKER.contains("__sunox_bridge"));
+        assert!(!SERVICE_WORKER.contains("__sunox_bridge"));
+        assert!(SERVICE_WORKER.contains("x-sunox-bridge-nonce"));
+        assert!(SERVICE_WORKER.contains("#sunox-browser-bridge="));
+        assert!(!OFFSCREEN.contains("__sunox_bridge"));
+        assert!(OFFSCREEN.contains("#sunox-browser-bridge="));
         assert!(SERVICE_WORKER.contains("chrome.webRequest.onSendHeaders"));
         assert!(SERVICE_WORKER.contains("chrome.webRequest.onResponseStarted"));
         assert!(SERVICE_WORKER.contains("reasons: [\"IFRAME_SCRIPTING\", \"WORKERS\"]"));
@@ -3033,7 +3065,7 @@ mod tests {
         assert!(OFFSCREEN.contains("managedFramePrepareTimeoutMs = 9_000"));
         assert!(OFFSCREEN.contains("managedFrameReleaseTimeoutMs = 500"));
         assert!(OFFSCREEN.contains("document.createElement(\"iframe\")"));
-        assert!(OFFSCREEN.contains("managedFrame.credentialless = true"));
+        assert!(!OFFSCREEN.contains("managedFrame.credentialless"));
         assert!(
             OFFSCREEN.contains("managedFrame.referrerPolicy = \"strict-origin-when-cross-origin\"")
         );
@@ -3103,6 +3135,17 @@ mod tests {
     }
 
     #[test]
+    fn rendered_service_worker_uses_the_exact_runtime_build() {
+        let service_worker = render_service_worker();
+
+        assert!(service_worker.contains(&format!(
+            "const SERVICE_WORKER_RUNTIME_BUILD = \"{}\";",
+            super::BROWSER_BRIDGE_RUNTIME_BUILD
+        )));
+        assert!(!service_worker.contains("__SUNOX_BRIDGE_RUNTIME_BUILD__"));
+    }
+
+    #[test]
     fn rendered_manifest_uses_only_the_stable_bridge_runtime_identity() {
         let manifest: serde_json::Value =
             serde_json::from_str(&render_manifest()).expect("rendered extension manifest");
@@ -3155,6 +3198,20 @@ mod tests {
         assert!(
             super::current_bundle_without_sentinel_matches(&destination, &installed)
                 .expect("registry-backed comparison")
+        );
+        let installed_service_worker =
+            fs::read_to_string(destination.join("service-worker.js")).expect("service worker");
+        assert!(installed_service_worker.contains(&format!(
+            "const SERVICE_WORKER_RUNTIME_BUILD = \"{}\";",
+            super::BROWSER_BRIDGE_RUNTIME_BUILD
+        )));
+        assert!(!installed_service_worker.contains("__SUNOX_BRIDGE_RUNTIME_BUILD__"));
+
+        fs::write(destination.join("service-worker.js"), SERVICE_WORKER)
+            .expect("restore unrendered service-worker template");
+        assert!(
+            !super::current_bundle_without_sentinel_matches(&destination, &installed)
+                .expect("unrendered service worker must not match")
         );
     }
 

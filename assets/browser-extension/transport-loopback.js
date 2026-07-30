@@ -16,6 +16,9 @@
     (_, index) => settings.portStart + index
   );
   const requestTimeoutMs = 350;
+  const resultDeliveryDeadlineMs = 1_350;
+  const resultRetryInitialDelayMs = 25;
+  const resultRetryMaxDelayMs = 200;
   const maxJsonResponseBytes = 4 * 1024;
   const textEncoder = new TextEncoder();
   const textDecoder = new TextDecoder();
@@ -166,14 +169,20 @@
     return JSON.parse(textDecoder.decode(bytes));
   }
 
-  async function bridgeRequest(port, path, body, expectJson = false) {
+  async function bridgeRequest(
+    port,
+    path,
+    body,
+    expectJson = false,
+    timeoutMs = requestTimeoutMs
+  ) {
     const controller = new AbortController();
     let timeout;
     const deadline = new Promise((_, reject) => {
       timeout = setTimeout(() => {
         controller.abort();
         reject(new Error("Sunox loopback request timed out"));
-      }, requestTimeoutMs);
+      }, timeoutMs);
     });
     const request = (async () => {
       const response = await fetch(`http://127.0.0.1:${port}${path}`, {
@@ -188,6 +197,7 @@
       });
       return {
         ok: response.ok,
+        status: response.status,
         json: response.ok && expectJson
           ? await readBoundedJson(response)
           : null
@@ -320,20 +330,43 @@
       kind,
       value
     ];
-    try {
-      const response = await bridgeRequest(bridge.port, "/v3/challenge/result", {
-        version: settings.protocolVersion,
-        request_id: message.requestId,
-        client_nonce: bridge.clientNonce,
-        server_nonce: bridge.serverNonce,
-        token: kind === "token" ? value : null,
-        error: kind === "error" ? value : null,
-        proof: await sign("sunox-bridge-result-v3", fields)
-      });
-      return { accepted: response.ok };
-    } catch {
-      return { accepted: false };
+    const payload = Object.freeze({
+      version: settings.protocolVersion,
+      request_id: message.requestId,
+      client_nonce: bridge.clientNonce,
+      server_nonce: bridge.serverNonce,
+      token: kind === "token" ? value : null,
+      error: kind === "error" ? value : null,
+      proof: await sign("sunox-bridge-result-v3", fields)
+    });
+    const deadline = Date.now() + resultDeliveryDeadlineMs;
+    let retryDelayMs = resultRetryInitialDelayMs;
+    while (Date.now() < deadline) {
+      const remainingMs = deadline - Date.now();
+      try {
+        const response = await bridgeRequest(
+          bridge.port,
+          "/v3/challenge/result",
+          payload,
+          false,
+          Math.min(requestTimeoutMs, remainingMs)
+        );
+        if (response.ok) return { accepted: true };
+        if (response.status !== 425) return { accepted: false };
+      } catch {
+        // A failed fetch is ambiguous: the server may have accepted the
+        // terminal result while its 204 response was lost. Replay only the
+        // exact precomputed and signed payload.
+      }
+      const retryWaitMs = Math.min(
+        retryDelayMs,
+        Math.max(0, deadline - Date.now())
+      );
+      if (retryWaitMs === 0) break;
+      await new Promise((resolve) => setTimeout(resolve, retryWaitMs));
+      retryDelayMs = Math.min(retryDelayMs * 2, resultRetryMaxDelayMs);
     }
+    return { accepted: false };
   }
 
   globalThis.SUNOX_BRIDGE_TRANSPORTS ||= Object.create(null);

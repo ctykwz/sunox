@@ -85,7 +85,6 @@ function managedFrameHref(
   { clerkHandshake = null } = {}
 ) {
   const url = new URL(pageUrl);
-  url.searchParams.set("__sunox_bridge", nonce);
   if (clerkHandshake !== null) {
     url.searchParams.set("__clerk_handshake", clerkHandshake);
   }
@@ -161,7 +160,6 @@ function elementHarness(name) {
 
 function preparePageBridgeContext(context) {
   const nonce = nonceFromManagedHref(context.location.href);
-  context.credentialless = true;
   context.document ??= {};
   const documentElement =
     context.document.documentElement ?? elementHarness("html");
@@ -177,13 +175,12 @@ function preparePageBridgeContext(context) {
 
 function prepareContentBridgeContext(
   context,
-  { credentialless = true, pageReady = true } = {}
+  { pageReady = true } = {}
 ) {
   const trace = [];
   const originalCreateElement = context.document?.createElement;
   const originalGetUrl = context.chrome?.runtime?.getURL;
   const originalSendMessage = context.chrome?.runtime?.sendMessage;
-  context.credentialless = credentialless;
   context.stop = () => {
     trace.push("stop");
   };
@@ -410,22 +407,28 @@ function expectedManagedResponseHeaderActions(provider, extensionId) {
   }];
 }
 
-const expectedManagedRequestHeaderActions = [
-  { header: "cookie", operation: "remove" },
-  { header: "authorization", operation: "remove" },
-  { header: "if-modified-since", operation: "remove" },
-  { header: "if-none-match", operation: "remove" },
-  {
-    header: "cache-control",
-    operation: "set",
-    value: "no-cache"
-  },
-  {
-    header: "pragma",
-    operation: "set",
-    value: "no-cache"
-  }
-];
+function expectedManagedRequestHeaderActions(nonce = managedNonce) {
+  return [
+    {
+      header: "x-sunox-bridge-nonce",
+      operation: "set",
+      value: nonce
+    },
+    { header: "authorization", operation: "remove" },
+    { header: "if-modified-since", operation: "remove" },
+    { header: "if-none-match", operation: "remove" },
+    {
+      header: "cache-control",
+      operation: "set",
+      value: "no-cache"
+    },
+    {
+      header: "pragma",
+      operation: "set",
+      value: "no-cache"
+    }
+  ];
+}
 
 function observedManagedResponseHeaders(provider, extensionId) {
   return expectedManagedResponseHeaderActions(provider, extensionId)
@@ -477,7 +480,10 @@ function bridgeProof(secret, label, fields) {
 
 function loadLoopbackTransport(fetchImpl, {
   portCount = 1,
-  requestTimeoutMs = 350
+  requestTimeoutMs = 350,
+  resultDeliveryDeadlineMs = 1_350,
+  resultRetryInitialDelayMs = 25,
+  resultRetryMaxDelayMs = 200
 } = {}) {
   const context = {
     AbortController,
@@ -505,13 +511,24 @@ function loadLoopbackTransport(fetchImpl, {
   };
   context.globalThis = context;
   vm.createContext(context);
-  vm.runInContext(
-    loopbackTransportSource.replace(
+  const source = loopbackTransportSource
+    .replace(
       "const requestTimeoutMs = 350;",
       `const requestTimeoutMs = ${requestTimeoutMs};`
-    ),
-    context
-  );
+    )
+    .replace(
+      "const resultDeliveryDeadlineMs = 1_350;",
+      `const resultDeliveryDeadlineMs = ${resultDeliveryDeadlineMs};`
+    )
+    .replace(
+      "const resultRetryInitialDelayMs = 25;",
+      `const resultRetryInitialDelayMs = ${resultRetryInitialDelayMs};`
+    )
+    .replace(
+      "const resultRetryMaxDelayMs = 200;",
+      `const resultRetryMaxDelayMs = ${resultRetryMaxDelayMs};`
+    );
+  vm.runInContext(source, context);
   return context.SUNOX_BRIDGE_TRANSPORTS.loopback;
 }
 
@@ -530,16 +547,20 @@ function popupServiceWorkerHarness({
   createError = null,
   deferInitialRuleCleanup = false,
   deferSessionRuleCall = null,
+  disconnectManagedPortsOnOffscreenClose = false,
   displayInfo = defaultDisplayInfo,
   displayInfoError = null,
   emitBlankUpdateDuringBoundsCheck = false,
   emitInitializationEvents = false,
   existingWindowUrl = null,
   initialOffscreenContext = false,
+  initialOffscreenBusy = false,
   initialStoredState = undefined,
   existingSessionRules = [],
-  fetchImpl = null,
-  managedPageUrl = "https://suno.com/home/advanced",
+  managedResultInvalidAcknowledgements = 0,
+  managedResultDeliveryFailures = 0,
+  offscreenRuntimeBuild = runtimeBuild,
+  offscreenCloseKeepsContext = false,
   sessionRuleFailureCalls = [],
   storageSetError = null,
   windowGetError = null,
@@ -548,14 +569,15 @@ function popupServiceWorkerHarness({
   windowUpdateApplies = true,
   windowUpdateError = null
 } = {}) {
-  const managedUrl = managedFrameHref(managedPageUrl);
+  const managedUrl = managedFrameHref("https://suno.com/");
+  const managedRequestUrl = managedNetworkUrl("https://suno.com/");
   const listeners = {};
   const calls = {
+    bootstrapEvents: [],
     consoleErrors: [],
     createdOffscreen: [],
     createdWindows: [],
     dynamicRules: [],
-    fetches: [],
     notifications: [],
     offscreenCloses: 0,
     offscreenStarts: 0,
@@ -577,6 +599,12 @@ function popupServiceWorkerHarness({
   let currentDisplayInfo = structuredClone(displayInfo);
   let currentWindowBounds = structuredClone(actualWindowBounds);
   let currentWindowGetError = windowGetError;
+  let remainingManagedResultInvalidAcknowledgements =
+    managedResultInvalidAcknowledgements;
+  let remainingManagedResultDeliveryFailures = managedResultDeliveryFailures;
+  let currentOffscreenHealthy = true;
+  const managedPorts = [];
+  let activeNonce = managedNonce;
   let activeProvider = "turnstile";
   const pendingWindowGetErrors = structuredClone(windowGetErrorSequence);
   const pendingWindowGetStates = structuredClone(windowGetSequence);
@@ -667,9 +695,15 @@ function popupServiceWorkerHarness({
         return structuredClone(existingSessionRules);
       },
       async updateDynamicRules(options) {
+        calls.bootstrapEvents.push(
+          options.addRules ? "dynamic-rules-install" : "dynamic-rules-remove"
+        );
         calls.dynamicRules.push(options);
       },
       async updateSessionRules(options) {
+        calls.bootstrapEvents.push(
+          options.addRules ? "session-rules-install" : "session-rules-remove"
+        );
         calls.sessionRules.push(options);
         if (failedSessionRuleCalls.has(calls.sessionRules.length)) {
           throw new Error("simulated session-rule update failure");
@@ -691,10 +725,17 @@ function popupServiceWorkerHarness({
     },
     offscreen: {
       async closeDocument() {
+        calls.bootstrapEvents.push("offscreen-close");
         calls.offscreenCloses += 1;
-        offscreenContexts = [];
+        if (disconnectManagedPortsOnOffscreenClose) {
+          for (const managedPort of managedPorts) {
+            if (!managedPort.disconnected) managedPort.disconnect();
+          }
+        }
+        if (!offscreenCloseKeepsContext) offscreenContexts = [];
       },
       async createDocument(options) {
+        calls.bootstrapEvents.push("offscreen-create");
         calls.createdOffscreen.push(options);
         offscreenContexts = [{
           contextType: "OFFSCREEN_DOCUMENT",
@@ -746,20 +787,41 @@ function popupServiceWorkerHarness({
           calls.offscreenStarts += 1;
           return {
             accepted: true,
-            clientId: offscreenClientId
+            clientId: offscreenClientId,
+            runtimeBuild: offscreenRuntimeBuild
           };
         }
         if (message.type === "sunox-offscreen-ping-v1") {
           return {
-            busy: false,
-            busySince: null,
+            busy: initialOffscreenBusy,
+            busySince: initialOffscreenBusy ? Date.now() - 1_000 : null,
             clientId: offscreenClientId,
+            runtimeBuild: offscreenRuntimeBuild,
             pollWorkerAgeMs: 1,
-            pollWorkerHealthy: true,
+            pollWorkerHealthy: currentOffscreenHealthy,
             type: "sunox-offscreen-pong-v1"
           };
         }
         calls.notifications.push(message);
+        if (
+          message.type === "sunox-managed-frame-result-v2"
+          && remainingManagedResultDeliveryFailures > 0
+        ) {
+          remainingManagedResultDeliveryFailures -= 1;
+          throw new Error("Could not establish connection. Receiving end does not exist.");
+        }
+        if (message.type === "sunox-managed-frame-result-v2") {
+          if (remainingManagedResultInvalidAcknowledgements > 0) {
+            remainingManagedResultInvalidAcknowledgements -= 1;
+            return { accepted: true };
+          }
+          return {
+            accepted: true,
+            type: "sunox-managed-frame-result-ack-v1",
+            nonce: message.nonce,
+            requestId: message.requestId
+          };
+        }
         return { accepted: true };
       }
     },
@@ -1012,7 +1074,6 @@ function popupServiceWorkerHarness({
     return timer;
   };
   const context = {
-    AbortController,
     chrome,
     clearInterval(timer) {
       if (timer) timer.cleared = true;
@@ -1036,26 +1097,6 @@ function popupServiceWorkerHarness({
       }
     },
     Date,
-    async fetch(input, options) {
-      calls.fetches.push({
-        input,
-        options: {
-          cache: options?.cache,
-          credentials: options?.credentials,
-          method: options?.method,
-          redirect: options?.redirect
-        }
-      });
-      const implementation = fetchImpl || (async () => ({
-        headers: new Headers({
-          "content-type": "text/html; charset=utf-8"
-        }),
-        ok: true,
-        status: 200,
-        url: managedPageUrl
-      }));
-      return await implementation(input, options);
-    },
     Headers,
     Promise,
     setInterval(callback, delay) {
@@ -1068,7 +1109,13 @@ function popupServiceWorkerHarness({
   context.globalThis = context;
   context.URL = URL;
   vm.createContext(context);
-  vm.runInContext(serviceWorkerSource, context);
+  vm.runInContext(
+    serviceWorkerSource.replace(
+      "__SUNOX_BRIDGE_RUNTIME_BUILD__",
+      runtimeBuild
+    ),
+    context
+  );
 
   const dispatchFromSender = (message, sender) => new Promise((resolve) => {
     const keepChannel = listeners.runtimeMessage(message, sender, resolve);
@@ -1083,6 +1130,7 @@ function popupServiceWorkerHarness({
       ...message
     };
     if (deliveredMessage?.type === "sunox-frame-environment-prepare-v1") {
+      activeNonce = deliveredMessage.nonce;
       activeProvider = deliveredMessage.provider;
     }
     const sender = {
@@ -1100,8 +1148,11 @@ function popupServiceWorkerHarness({
     parentDocumentId,
     parentFrameId = 0,
     requestId = "managed-request",
-    url = managedUrl
-  } = {}) => ({
+    url = managedRequestUrl
+  } = {}) => {
+    const networkUrl = new URL(url);
+    networkUrl.hash = "";
+    return {
     documentId,
     frameId,
     initiator,
@@ -1111,14 +1162,16 @@ function popupServiceWorkerHarness({
     requestId,
     tabId: chrome.tabs.TAB_ID_NONE,
     type: "sub_frame",
-    url
-  });
+    url: networkUrl.href
+    };
+  };
 
   const observeManagedResponse = ({
     fromCache = false,
     requestHeaders = [
       { name: "cache-control", value: "no-cache" },
-      { name: "pragma", value: "no-cache" }
+      { name: "pragma", value: "no-cache" },
+      { name: "x-sunox-bridge-nonce", value: activeNonce }
     ],
     responseHeaders = observedManagedResponseHeaders(
       activeProvider,
@@ -1141,12 +1194,33 @@ function popupServiceWorkerHarness({
     });
   };
 
-  const observeManagedRedirect = (details = {}) => {
+  const observeManagedRedirect = ({
+    fromCache = false,
+    redirectUrl = "https://suno.com/",
+    requestHeaders = [
+      { name: "cache-control", value: "no-cache" },
+      { name: "pragma", value: "no-cache" },
+      { name: "x-sunox-bridge-nonce", value: activeNonce }
+    ],
+    responseHeaders = [
+      ...observedManagedResponseHeaders(activeProvider, chrome.runtime.id),
+      { name: "location", value: redirectUrl }
+    ],
+    statusCode = 302,
+    ...details
+  } = {}) => {
     const common = managedNetworkDetails(details);
     listeners.beforeRequest?.(common);
+    listeners.sendHeaders?.({
+      ...common,
+      requestHeaders
+    });
     listeners.beforeRedirect?.({
       ...common,
-      redirectUrl: "https://suno.com/"
+      fromCache,
+      redirectUrl,
+      responseHeaders,
+      statusCode
     });
   };
 
@@ -1163,13 +1237,16 @@ function popupServiceWorkerHarness({
     calls,
     connect(sender, name) {
       const candidate = makePort(sender, name);
+      if (name === "sunox-managed-frame-v2") {
+        managedPorts.push(candidate);
+      }
       if (
         autoObserveManagedResponse
         && name === "sunox-managed-frame-v2"
         && sender?.frameId !== 0
       ) {
         observeManagedResponse({
-          url: sender.url
+          url: managedNetworkUrl(sender.url)
         });
       }
       listeners.connect(candidate);
@@ -1218,6 +1295,9 @@ function popupServiceWorkerHarness({
     observeManagedResponse,
     setTabUrl(url) {
       tabUrl = url;
+    },
+    setOffscreenHealthy(value) {
+      currentOffscreenHealthy = value;
     },
     port() {
       return port;
@@ -1278,34 +1358,150 @@ test("bootstrap clears stale frame rules without resolving a managed route", asy
   assert.deepEqual(calls.createdWindows, []);
 });
 
-test("a cold worker wake rebinds its live offscreen client before prepare", async () => {
+test("service worker refuses an offscreen document from another runtime build", async () => {
+  const harness = popupServiceWorkerHarness({
+    offscreenRuntimeBuild: "0.0.1"
+  });
+  await flushAsync();
+  await flushAsync();
+  await flushAsync();
+
+  assert.equal(harness.calls.createdOffscreen.length, 1);
+  assert.equal(harness.calls.offscreenStarts, 0);
+  assert.equal(
+    harness.calls.consoleErrors.some((entry) => (
+      entry.some((value) => value.includes(
+        "offscreen document did not identify itself"
+      ))
+    )),
+    true
+  );
+  assert.deepEqual(harness.calls.createdWindows, []);
+});
+
+test("a cold worker closes an unknown busy offscreen before removing its rules", async () => {
   const harness = popupServiceWorkerHarness({
     deferInitialRuleCleanup: true,
-    initialOffscreenContext: true
-  });
-  let preparationSettled = false;
-  const preparation = harness.dispatchFromOffscreen({
-    type: "sunox-frame-environment-prepare-v1",
-    nonce: managedNonce
-  }).finally(() => {
-    preparationSettled = true;
+    initialOffscreenBusy: true,
+    initialOffscreenContext: true,
+    existingSessionRules: [{ id: 29_764 }, { id: 29_765 }]
   });
   await flushAsync();
   await flushAsync();
 
-  assert.equal(
-    preparationSettled,
-    false,
-    "the wake-up message must bind its live client and wait for bootstrap cleanup"
-  );
-  assert.equal(harness.calls.fetches.length, 0);
+  assert.deepEqual(harness.calls.bootstrapEvents.slice(0, 3), [
+    "offscreen-close",
+    "dynamic-rules-remove",
+    "session-rules-remove"
+  ]);
+  assert.equal(harness.calls.offscreenCloses, 1);
+  assert.equal(harness.calls.createdOffscreen.length, 0);
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    await harness.dispatchFromOffscreen({
+      type: "sunox-frame-environment-prepare-v1",
+      nonce: managedNonce
+    })
+  )), {
+    accepted: false,
+    error: "challenge_environment_unavailable"
+  });
 
   harness.releaseInitialRuleCleanup();
-  assert.deepEqual(JSON.parse(JSON.stringify(await preparation)), {
+  await flushAsync();
+  await flushAsync();
+  await flushAsync();
+
+  assert.equal(harness.calls.createdOffscreen.length, 1);
+  assert.ok(
+    harness.calls.bootstrapEvents.indexOf("session-rules-remove")
+      < harness.calls.bootstrapEvents.indexOf("offscreen-create")
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    await harness.dispatchFromOffscreen({
+    type: "sunox-frame-environment-prepare-v1",
+    nonce: managedNonce
+    })
+  )), {
     accepted: true,
-    pageUrl: "https://suno.com/home/advanced"
+    pageUrl: "https://suno.com/"
   });
-  assert.equal(harness.calls.fetches.length, 1);
+});
+
+test("a cold worker preserves response rules when old offscreen destruction is unconfirmed", async () => {
+  const harness = popupServiceWorkerHarness({
+    initialOffscreenBusy: true,
+    initialOffscreenContext: true,
+    existingSessionRules: [{ id: 29_764 }, { id: 29_765 }],
+    offscreenCloseKeepsContext: true
+  });
+  await flushAsync();
+  await flushAsync();
+  await flushAsync();
+
+  assert.equal(harness.calls.offscreenCloses, 1);
+  assert.deepEqual(harness.calls.dynamicRules, []);
+  assert.deepEqual(harness.calls.sessionRules, []);
+  assert.deepEqual(harness.calls.createdOffscreen, []);
+  assert.equal(
+    harness.calls.consoleErrors.some((entry) => (
+      entry.some((value) => value.includes(
+        "previous Browser Bridge offscreen document did not close"
+      ))
+    )),
+    true
+  );
+});
+
+test("alarm recovery preserves active response rules when unhealthy offscreen destruction is unconfirmed", async () => {
+  const harness = popupServiceWorkerHarness({
+    disconnectManagedPortsOnOffscreenClose: true,
+    offscreenCloseKeepsContext: true
+  });
+  await flushAsync();
+  await flushAsync();
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    await harness.dispatchFromOffscreen({
+      type: "sunox-frame-environment-prepare-v1",
+      nonce: managedNonce
+    })
+  )), {
+    accepted: true,
+    pageUrl: "https://suno.com/"
+  });
+  const managedPort = harness.connect({
+    documentId: "managed-document-before-recovery",
+    id: "abcdefghijklmnopabcdefghijklmnop",
+    origin: "https://suno.com",
+    url: harness.managedUrl
+  }, "sunox-managed-frame-v2");
+  await flushAsync();
+  assert.equal(managedPort.disconnected, false);
+  const sessionRuleCallsBeforeRecovery = harness.calls.sessionRules.length;
+
+  harness.setOffscreenHealthy(false);
+  harness.listeners.alarm({ name: "sunox-bridge-poll" });
+  await flushAsync();
+  await flushAsync();
+  await flushAsync();
+
+  assert.equal(harness.calls.offscreenCloses, 1);
+  assert.equal(managedPort.disconnected, true);
+  assert.equal(
+    harness.calls.sessionRules.length,
+    sessionRuleCallsBeforeRecovery,
+    "failed offscreen destruction must not remove active response rules"
+  );
+  assert.equal(
+    harness.calls.sessionRules.at(-1).addRules.length,
+    2
+  );
+  assert.equal(harness.calls.createdOffscreen.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    await harness.dispatchFromOffscreen({
+      type: "sunox-frame-environment-release-v1",
+      nonce: managedNonce
+    })
+  )), { accepted: false });
 });
 
 test("owner binding rejects replacement between its ping and context lookup", async () => {
@@ -1329,8 +1525,6 @@ test("owner binding rejects replacement between its ping and context lookup", as
     accepted: false,
     error: "challenge_environment_unavailable"
   });
-  assert.equal(harness.calls.fetches.length, 0);
-
   harness.releaseInitialRuleCleanup();
   await flushAsync();
   await flushAsync();
@@ -1358,7 +1552,6 @@ test("challenge preparation waits for an in-flight stale-rule cleanup", async ()
   });
   await flushAsync();
 
-  assert.equal(harness.calls.fetches.length, 1);
   assert.equal(harness.calls.sessionRules.length, 3);
 
   harness.releaseDeferredSessionRuleCall();
@@ -1367,9 +1560,8 @@ test("challenge preparation waits for an in-flight stale-rule cleanup", async ()
   });
   assert.deepEqual(JSON.parse(JSON.stringify(await preparation)), {
     accepted: true,
-    pageUrl: "https://suno.com/home/advanced"
+    pageUrl: "https://suno.com/"
   });
-  assert.equal(harness.calls.fetches.length, 2);
   assert.equal(harness.calls.sessionRules.length, 4);
   assert.equal(harness.calls.sessionRules[3].addRules.length, 2);
 });
@@ -1409,7 +1601,6 @@ test("a timed-out prepare release waits through stale cleanup and late install",
 
   assert.equal(preparationSettled, false);
   assert.equal(releaseSettled, false);
-  assert.equal(harness.calls.fetches.length, 1);
   assert.equal(harness.calls.sessionRules.length, 3);
 
   harness.releaseDeferredSessionRuleCall();
@@ -1418,12 +1609,11 @@ test("a timed-out prepare release waits through stale cleanup and late install",
   });
   assert.deepEqual(JSON.parse(JSON.stringify(await preparation)), {
     accepted: true,
-    pageUrl: "https://suno.com/home/advanced"
+    pageUrl: "https://suno.com/"
   });
   assert.deepEqual(JSON.parse(JSON.stringify(await release)), {
     accepted: true
   });
-  assert.equal(harness.calls.fetches.length, 2);
   assert.equal(harness.calls.sessionRules.length, 5);
   assert.equal(harness.calls.sessionRules[3].addRules.length, 2);
   assert.deepEqual(
@@ -1438,27 +1628,13 @@ test("a timed-out prepare release waits through stale cleanup and late install",
     })
   )), {
     accepted: true,
-    pageUrl: "https://suno.com/home/advanced"
+    pageUrl: "https://suno.com/"
   });
-  assert.equal(
-    harness.calls.fetches.length,
-    3,
-    "the timed-out nonce must not remain active or block a fresh prepare"
-  );
 });
 
-test("challenge preparation follows a clean same-origin redirect and binds the exact final route", async () => {
-  const managedPageUrl = "https://suno.com/create/v3";
+test("challenge preparation installs a direct origin carrier before navigation", async () => {
   const harness = popupServiceWorkerHarness({
-    fetchImpl: async () => ({
-      headers: new Headers({
-        "content-type": "text/html; charset=utf-8"
-      }),
-      ok: true,
-      status: 200,
-      url: managedPageUrl
-    }),
-    managedPageUrl
+    autoObserveManagedResponse: false
   });
   await flushAsync();
   await flushAsync();
@@ -1469,21 +1645,15 @@ test("challenge preparation follows a clean same-origin redirect and binds the e
   });
   assert.deepEqual(JSON.parse(JSON.stringify(preparation)), {
     accepted: true,
-    pageUrl: managedPageUrl
+    pageUrl: "https://suno.com/"
   });
-  assert.deepEqual(harness.calls.fetches, [{
-    input: "https://suno.com/",
-    options: {
-      cache: "no-store",
-      credentials: "omit",
-      method: "GET",
-      redirect: "follow"
-    }
-  }]);
   const update = JSON.parse(JSON.stringify(harness.calls.sessionRules.at(-1)));
   const sunoRule = update.addRules.find((rule) => rule.id === 29_764);
-  const cookieRule = update.addRules.find((rule) => rule.id === 29_765);
-  assert.ok(sunoRule.condition.regexFilter.includes("__sunox_bridge"));
+  const requestRule = update.addRules.find((rule) => rule.id === 29_765);
+  assert.equal(
+    sunoRule.condition.regexFilter,
+    "^https://suno\\.com/.*$"
+  );
   assert.equal(sunoRule.priority, 1_000);
   assert.equal(sunoRule.condition.isUrlFilterCaseSensitive, true);
   assert.equal("responseHeaders" in sunoRule.condition, false);
@@ -1501,7 +1671,7 @@ test("challenge preparation follows a clean same-origin redirect and binds the e
     filter: webRequestFilter
   }, {
     event: "onBeforeRedirect",
-    extraInfoSpec: undefined,
+    extraInfoSpec: ["responseHeaders", "extraHeaders"],
     filter: webRequestFilter
   }, {
     event: "onResponseStarted",
@@ -1520,11 +1690,11 @@ test("challenge preparation follows a clean same-origin redirect and binds the e
     )
   );
   assert.deepEqual(
-    cookieRule.action.requestHeaders,
-    expectedManagedRequestHeaderActions
+    requestRule.action.requestHeaders,
+    expectedManagedRequestHeaderActions(managedNonce)
   );
-  assert.equal(cookieRule.priority, 1_000);
-  assert.deepEqual(cookieRule.condition, {
+  assert.equal(requestRule.priority, 1_000);
+  assert.deepEqual(requestRule.condition, {
     regexFilter: sunoRule.condition.regexFilter,
     isUrlFilterCaseSensitive: true,
     initiatorDomains: ["abcdefghijklmnopabcdefghijklmnop"],
@@ -1532,46 +1702,25 @@ test("challenge preparation follows a clean same-origin redirect and binds the e
     resourceTypes: ["sub_frame"],
     tabIds: [-1]
   });
-  const exactRoute = new RegExp(sunoRule.condition.regexFilter);
-  assert.equal(exactRoute.test(managedPageUrl), false);
-  assert.equal(
-    exactRoute.test(
-      `${managedPageUrl}?__sunox_bridge=${managedNonce}`
-    ),
-    true
-  );
-  assert.equal(
-    exactRoute.test(
-      `${managedPageUrl}?__sunox_bridge=${managedNonce}`
-      + "&__clerk_handshake=opaque-return"
-    ),
-    false
-  );
-  assert.equal(
-    exactRoute.test(
-      `${managedPageUrl}/child?__sunox_bridge=${managedNonce}`
-    ),
-    false
-  );
-  assert.equal(
-    exactRoute.test(
-      `${managedPageUrl}?__sunox_bridge=${managedNonce}&unexpected=1`
-    ),
-    false
-  );
-  assert.equal(
-    exactRoute.test(
-      `${managedPageUrl}?__sunox_bridge=${managedNonce}`
-      + "&__clerk_handshake=one&unexpected=two"
-    ),
-    false
-  );
-  assert.equal(
-    exactRoute.test(
-      `${managedPageUrl}?__sunox_bridge=87654321-4321-4123-8123-123456789abc`
-    ),
-    false
-  );
+  const sameOriginRoute = new RegExp(sunoRule.condition.regexFilter);
+  for (const value of [
+    "https://suno.com/",
+    "https://suno.com/create/v3",
+    "https://suno.com/?__clerk_handshake=opaque-return"
+  ]) {
+    assert.equal(sameOriginRoute.test(value), true, value);
+  }
+  for (const value of [
+    "http://suno.com/create/v3",
+    "https://www.suno.com/create/v3",
+    "https://auth.suno.com/create/v3",
+    "https://suno.com.example/create/v3",
+    "https://suno.com:8443/create/v3"
+  ]) {
+    assert.equal(sameOriginRoute.test(value), false, value);
+  }
+
+  harness.observeManagedResponse();
 
   const wrongRoute = harness.connect({
     documentId: "stale-route-document",
@@ -1587,7 +1736,7 @@ test("challenge preparation follows a clean same-origin redirect and binds the e
     {
       type: "sunox-managed-frame-diagnostic-v1",
       nonce: managedNonce,
-      reason: "managed_route_mismatch"
+      reason: "managed_url_invalid"
     }
   );
 
@@ -1612,46 +1761,15 @@ test("challenge preparation follows a clean same-origin redirect and binds the e
   );
 });
 
-test("a managed network redirect is a sticky fail-closed condition", async () => {
-  const harness = popupServiceWorkerHarness({
-    autoObserveManagedResponse: false
-  });
-  await flushAsync();
-  await flushAsync();
-  await harness.dispatchFromOffscreen({
-    type: "sunox-frame-environment-prepare-v1",
-    nonce: managedNonce
-  });
-  harness.observeManagedRedirect();
-  harness.observeManagedResponse();
-
-  const port = harness.connect({
-    documentId: "redirected-frame-document",
-    frameId: 1,
-    id: "abcdefghijklmnopabcdefghijklmnop",
-    origin: "https://suno.com",
-    url: harness.managedUrl
-  }, "sunox-managed-frame-v2");
-  await flushAsync();
-
-  assert.equal(port.disconnected, true);
-  assert.deepEqual(
-    JSON.parse(JSON.stringify(harness.calls.notifications.at(-1))),
-    {
-      type: "sunox-managed-frame-diagnostic-v1",
-      nonce: managedNonce,
-      reason: "managed_redirect_rejected"
-    }
-  );
-});
-
-test("extra managed-route query parameters cannot authorize a frame", async () => {
-  for (const query of [
-    `__sunox_bridge=${managedNonce}`
-      + "&__clerk_handshake=one&__clerk_handshake=two",
-    `__sunox_bridge=${managedNonce}`
-      + "&__clerk_handshake=one&unexpected=two"
-  ]) {
+test("every unsuppressed redirect is sticky fail-closed", async () => {
+  const redirectUrls = [
+    "https://suno.com/create/v3",
+    "https://auth.suno.com/session",
+    "https://www.suno.com/",
+    "https://user:password@suno.com/session",
+    "https://suno.com/create#server-fragment"
+  ];
+  for (const redirectUrl of redirectUrls) {
     const harness = popupServiceWorkerHarness({
       autoObserveManagedResponse: false
     });
@@ -1661,14 +1779,12 @@ test("extra managed-route query parameters cannot authorize a frame", async () =
       type: "sunox-frame-environment-prepare-v1",
       nonce: managedNonce
     });
-    harness.observeManagedResponse({
-      url:
-        `https://suno.com/home/advanced?${query}`
-        + `#sunox-browser-bridge=${managedNonce}`
+    harness.observeManagedRedirect({
+      redirectUrl
     });
 
     const port = harness.connect({
-      documentId: "ambiguous-clerk-return-frame-document",
+      documentId: "unsafe-redirect-frame-document",
       frameId: 1,
       id: "abcdefghijklmnopabcdefghijklmnop",
       origin: "https://suno.com",
@@ -1679,13 +1795,21 @@ test("extra managed-route query parameters cannot authorize a frame", async () =
     assert.equal(port.disconnected, true);
     assert.equal(
       harness.calls.notifications.at(-1)?.reason,
-      "managed_request_unverified"
+      "managed_redirect_not_suppressed"
+    );
+    assert.equal(
+      harness.calls.notifications.some((message) => (
+        JSON.stringify(message).includes(redirectUrl)
+      )),
+      false
     );
   }
 });
 
-test("cold retry rotates the one-time reservation without broadening its route", async () => {
-  const harness = popupServiceWorkerHarness();
+test("cold retry atomically rotates the one-time request marker", async () => {
+  const harness = popupServiceWorkerHarness({
+    autoObserveManagedResponse: false
+  });
   const firstNonce = managedNonce;
   const secondNonce = "87654321-4321-4123-8123-123456789abc";
   await flushAsync();
@@ -1699,7 +1823,7 @@ test("cold retry rotates the one-time reservation without broadening its route",
     })
   )), {
     accepted: true,
-    pageUrl: "https://suno.com/home/advanced"
+    pageUrl: "https://suno.com/"
   });
   const firstRuleUpdate = JSON.parse(JSON.stringify(
     harness.calls.sessionRules.at(-1)
@@ -1710,25 +1834,31 @@ test("cold retry rotates the one-time reservation without broadening its route",
   );
   assert.equal(
     firstRegex.test(
-      managedNetworkUrl("https://suno.com/home/advanced", firstNonce)
+      managedNetworkUrl("https://suno.com/", firstNonce)
     ),
     true
   );
   assert.equal(
     firstRegex.test(
-      managedNetworkUrl("https://suno.com/home/advanced", secondNonce)
+      managedNetworkUrl("https://suno.com/", secondNonce)
     ),
-    false
+    true
+  );
+  assert.deepEqual(
+    firstRuleUpdate.addRules.find((rule) => rule.id === 29_765)
+      .action.requestHeaders,
+    expectedManagedRequestHeaderActions(firstNonce)
   );
   const dynamicRuleCallCountBeforeRetry = harness.calls.dynamicRules.length;
   const sessionRuleCallCountBeforeRetry = harness.calls.sessionRules.length;
 
+  harness.observeManagedResponse();
   const firstPort = harness.connect({
     documentId: "first-retry-document",
     frameId: 1,
     id: "abcdefghijklmnopabcdefghijklmnop",
     origin: "https://suno.com",
-    url: managedFrameHref("https://suno.com/home/advanced", firstNonce)
+    url: managedFrameHref("https://suno.com/", firstNonce)
   }, "sunox-managed-frame-v2");
   firstPort.deferDisconnectNotification = true;
   assert.equal(firstPort.disconnected, false);
@@ -1747,7 +1877,7 @@ test("cold retry rotates the one-time reservation without broadening its route",
     })
   )), {
     accepted: true,
-    pageUrl: "https://suno.com/home/advanced"
+    pageUrl: "https://suno.com/"
   });
   assert.equal(
     harness.calls.sessionRules.length,
@@ -1768,26 +1898,33 @@ test("cold retry rotates the one-time reservation without broadening its route",
   );
   assert.equal(
     rotatedRegex.test(
-      managedNetworkUrl("https://suno.com/home/advanced", firstNonce)
+      managedNetworkUrl("https://suno.com/", firstNonce)
     ),
-    false
+    true
   );
   assert.equal(
     rotatedRegex.test(
-      managedNetworkUrl("https://suno.com/home/advanced", secondNonce)
+      managedNetworkUrl("https://suno.com/", secondNonce)
     ),
     true
+  );
+  assert.deepEqual(
+    rotatedRuleUpdate.addRules.find((rule) => rule.id === 29_765)
+      .action.requestHeaders,
+    expectedManagedRequestHeaderActions(secondNonce)
   );
   assert.equal(firstPort.disconnected, true);
   assert.equal(firstPort.disconnectNotificationPending, true);
   firstPort.deliverDisconnect();
+
+  harness.observeManagedResponse({ requestId: "rotated-managed-request" });
 
   const stalePort = harness.connect({
     documentId: "stale-retry-document",
     frameId: 1,
     id: "abcdefghijklmnopabcdefghijklmnop",
     origin: "https://suno.com",
-    url: managedFrameHref("https://suno.com/home/advanced", firstNonce)
+    url: managedFrameHref("https://suno.com/", firstNonce)
   }, "sunox-managed-frame-v2");
   assert.equal(stalePort.disconnected, true);
   assert.deepEqual(
@@ -1804,7 +1941,7 @@ test("cold retry rotates the one-time reservation without broadening its route",
     frameId: 1,
     id: "abcdefghijklmnopabcdefghijklmnop",
     origin: "https://suno.com",
-    url: managedFrameHref("https://suno.com/home/advanced", secondNonce)
+    url: managedFrameHref("https://suno.com/", secondNonce)
   }, "sunox-managed-frame-v2");
   assert.equal(currentPort.disconnected, false);
   currentPort.disconnect();
@@ -1829,7 +1966,7 @@ test("a foreign release cannot disturb a pending nonce rotation", async () => {
     })
   )), {
     accepted: true,
-    pageUrl: "https://suno.com/home/advanced"
+    pageUrl: "https://suno.com/"
   });
   assert.deepEqual(JSON.parse(JSON.stringify(
     await harness.dispatchFromOffscreen({
@@ -1875,7 +2012,7 @@ test("a foreign release cannot disturb a pending nonce rotation", async () => {
   harness.releaseDeferredSessionRuleCall();
   assert.deepEqual(JSON.parse(JSON.stringify(await rotation)), {
     accepted: true,
-    pageUrl: "https://suno.com/home/advanced"
+    pageUrl: "https://suno.com/"
   });
   assert.deepEqual(JSON.parse(JSON.stringify(
     await harness.dispatchFromOffscreen({
@@ -1895,13 +2032,8 @@ test("a foreign release cannot disturb a pending nonce rotation", async () => {
     })
   )), {
     accepted: true,
-    pageUrl: "https://suno.com/home/advanced"
+    pageUrl: "https://suno.com/"
   });
-  assert.equal(
-    harness.calls.fetches.length,
-    2,
-    "A2 release must leave no reservation that blocks fresh C1"
-  );
 });
 
 test("cold retry preserves the provider-specific controlled-document policy", async () => {
@@ -1920,7 +2052,7 @@ test("cold retry preserves the provider-specific controlled-document policy", as
     })
   )), {
     accepted: true,
-    pageUrl: "https://suno.com/home/advanced"
+    pageUrl: "https://suno.com/"
   });
 
   assert.deepEqual(JSON.parse(JSON.stringify(
@@ -1938,7 +2070,7 @@ test("cold retry preserves the provider-specific controlled-document policy", as
     })
   )), {
     accepted: true,
-    pageUrl: "https://suno.com/home/advanced"
+    pageUrl: "https://suno.com/"
   });
   const rotatedRule = JSON.parse(JSON.stringify(
     harness.calls.sessionRules.at(-1).addRules.find(
@@ -1972,7 +2104,7 @@ test("cold retry fails closed after ambiguous controlled response headers", asyn
     })
   )), {
     accepted: true,
-    pageUrl: "https://suno.com/home/advanced"
+    pageUrl: "https://suno.com/"
   });
   const callsBeforeRetry = harness.calls.sessionRules.length;
   const responseHeaders = observedManagedResponseHeaders(
@@ -2086,16 +2218,56 @@ test("ambiguous response headers permanently reject the managed frame", async ()
   );
 });
 
-test("managed network verification rejects leaked credentials, cache hits, and side-effect headers", async () => {
+test("managed network verification rejects authorization, cache hits, and side-effect headers", async () => {
   const extensionId = "abcdefghijklmnopabcdefghijklmnop";
   const cases = [{
-    name: "request credentials",
+    name: "missing request nonce",
+    observe(harness) {
+      harness.observeManagedResponse({
+        requestHeaders: [
+          { name: "cache-control", value: "no-cache" },
+          { name: "pragma", value: "no-cache" }
+        ]
+      });
+    },
+    reason: "managed_request_nonce_invalid"
+  }, {
+    name: "wrong request nonce",
     observe(harness) {
       harness.observeManagedResponse({
         requestHeaders: [
           { name: "cache-control", value: "no-cache" },
           { name: "pragma", value: "no-cache" },
-          { name: "cookie", value: "session=must-not-reach-suno" }
+          {
+            name: "x-sunox-bridge-nonce",
+            value: "87654321-4321-4123-8123-123456789abc"
+          }
+        ]
+      });
+    },
+    reason: "managed_request_nonce_invalid"
+  }, {
+    name: "duplicate request nonce",
+    observe(harness) {
+      harness.observeManagedResponse({
+        requestHeaders: [
+          { name: "cache-control", value: "no-cache" },
+          { name: "pragma", value: "no-cache" },
+          { name: "x-sunox-bridge-nonce", value: managedNonce },
+          { name: "x-sunox-bridge-nonce", value: managedNonce }
+        ]
+      });
+    },
+    reason: "managed_request_nonce_invalid"
+  }, {
+    name: "request authorization",
+    observe(harness) {
+      harness.observeManagedResponse({
+        requestHeaders: [
+          { name: "cache-control", value: "no-cache" },
+          { name: "pragma", value: "no-cache" },
+          { name: "x-sunox-bridge-nonce", value: managedNonce },
+          { name: "authorization", value: "Bearer must-not-reach-suno" }
         ]
       });
     },
@@ -2107,6 +2279,42 @@ test("managed network verification rejects leaked credentials, cache hits, and s
     },
     reason: "managed_response_cache_unsafe"
   }, {
+    name: "unsupported redirect response",
+    observe(harness) {
+      harness.observeManagedResponse({ statusCode: 304 });
+    },
+    reason: "managed_response_redirect_status"
+  }, {
+    name: "status 300",
+    observe(harness) {
+      harness.observeManagedResponse({ statusCode: 300 });
+    },
+    reason: "managed_response_redirect_status"
+  }, {
+    name: "status 305",
+    observe(harness) {
+      harness.observeManagedResponse({ statusCode: 305 });
+    },
+    reason: "managed_response_redirect_status"
+  }, {
+    name: "status 306",
+    observe(harness) {
+      harness.observeManagedResponse({ statusCode: 306 });
+    },
+    reason: "managed_response_redirect_status"
+  }, {
+    name: "empty response",
+    observe(harness) {
+      harness.observeManagedResponse({ statusCode: 204 });
+    },
+    reason: "managed_response_empty_status"
+  }, {
+    name: "empty response 205",
+    observe(harness) {
+      harness.observeManagedResponse({ statusCode: 205 });
+    },
+    reason: "managed_response_empty_status"
+  }, {
     name: "response side effect",
     observe(harness) {
       harness.observeManagedResponse({
@@ -2117,6 +2325,33 @@ test("managed network verification rejects leaked credentials, cache hits, and s
       });
     },
     reason: "managed_response_side_effect_header"
+  }, {
+    name: "residual location",
+    observe(harness) {
+      harness.observeManagedResponse({
+        responseHeaders: [
+          ...observedManagedResponseHeaders("turnstile", extensionId),
+          { name: "location", value: "https://auth.suno.com/session" }
+        ],
+        statusCode: 302
+      });
+    },
+    reason: "managed_response_side_effect_header"
+  }, {
+    name: "wide permissions policy",
+    observe(harness) {
+      harness.observeManagedResponse({
+        responseHeaders: observedManagedResponseHeaders(
+          "turnstile",
+          extensionId
+        ).map((header) => (
+          header.name === "permissions-policy"
+            ? { ...header, value: "camera=*" }
+            : header
+        ))
+      });
+    },
+    reason: "managed_response_policy_invalid"
   }, {
     name: "network error",
     observe(harness) {
@@ -2152,6 +2387,74 @@ test("managed network verification rejects leaked credentials, cache hits, and s
       candidate.reason,
       candidate.name
     );
+  }
+});
+
+test("managed network verification permits a controlled upstream challenge document", async () => {
+  const extensionId = "abcdefghijklmnopabcdefghijklmnop";
+  const harness = popupServiceWorkerHarness({
+    autoObserveManagedResponse: false
+  });
+  await flushAsync();
+  await flushAsync();
+  await harness.dispatchFromOffscreen({
+    type: "sunox-frame-environment-prepare-v1",
+    nonce: managedNonce
+  });
+  harness.observeManagedResponse({
+    requestHeaders: [
+      { name: "cache-control", value: "no-cache" },
+      { name: "pragma", value: "no-cache" },
+      { name: "x-sunox-bridge-nonce", value: managedNonce },
+      { name: "cookie", value: "session=current-profile" }
+    ],
+    statusCode: 503
+  });
+
+  const port = harness.connect({
+    documentId: "profile-context-frame-document",
+    frameId: 1,
+    id: extensionId,
+    origin: "https://suno.com",
+    url: harness.managedUrl
+  }, "sunox-managed-frame-v2");
+  await flushAsync();
+
+  assert.equal(port.disconnected, false);
+  assert.equal(
+    harness.calls.notifications.some((message) => (
+      JSON.stringify(message).includes("session=current-profile")
+    )),
+    false
+  );
+  port.disconnect();
+});
+
+test("managed network verification permits every Location-suppressed standard redirect document", async () => {
+  const extensionId = "abcdefghijklmnopabcdefghijklmnop";
+  for (const statusCode of [301, 302, 303, 307, 308]) {
+    const harness = popupServiceWorkerHarness({
+      autoObserveManagedResponse: false
+    });
+    await flushAsync();
+    await flushAsync();
+    await harness.dispatchFromOffscreen({
+      type: "sunox-frame-environment-prepare-v1",
+      nonce: managedNonce
+    });
+    harness.observeManagedResponse({ statusCode });
+
+    const port = harness.connect({
+      documentId: `suppressed-redirect-${statusCode}`,
+      frameId: 1,
+      id: extensionId,
+      origin: "https://suno.com",
+      url: harness.managedUrl
+    }, "sunox-managed-frame-v2");
+    await flushAsync();
+
+    assert.equal(port.disconnected, false, statusCode);
+    port.disconnect();
   }
 });
 
@@ -2211,7 +2514,7 @@ test("nested frame observations cannot authorize the managed first-level frame",
   assert.equal(port.disconnected, true);
   assert.equal(
     harness.calls.notifications.at(-1)?.reason,
-    "managed_parent_frame_mismatch"
+    "managed_request_unverified"
   );
 });
 
@@ -2219,11 +2522,11 @@ test("a retired old-frame error cannot poison the rotated reservation", async ()
   const firstNonce = managedNonce;
   const secondNonce = "87654321-4321-4123-8123-123456789abc";
   const firstUrl = managedFrameHref(
-    "https://suno.com/home/advanced",
+    "https://suno.com/",
     firstNonce
   );
   const secondUrl = managedFrameHref(
-    "https://suno.com/home/advanced",
+    "https://suno.com/",
     secondNonce
   );
   const harness = popupServiceWorkerHarness({
@@ -2276,9 +2579,22 @@ test("a retired old-frame error cannot poison the rotated reservation", async ()
     })
   )), {
     accepted: true,
-    pageUrl: "https://suno.com/home/advanced"
+    pageUrl: "https://suno.com/"
   });
-  harness.observeManagedResponse({ url: secondUrl });
+  const notificationCountAfterRotation = harness.calls.notifications.length;
+  harness.observeManagedError({
+    requestId: "managed-request",
+    url: firstUrl
+  });
+  assert.equal(
+    harness.calls.notifications.length,
+    notificationCountAfterRotation,
+    "a retired requestId must remain ignored after the next nonce activates"
+  );
+  harness.observeManagedResponse({
+    requestId: "new-managed-request",
+    url: secondUrl
+  });
 
   const port = harness.connect({
     documentId: "rotated-policy-frame-document",
@@ -2299,6 +2615,50 @@ test("a retired old-frame error cannot poison the rotated reservation", async ()
   );
 });
 
+test("a released request cannot poison the next fresh reservation", async () => {
+  const nextNonce = "87654321-4321-4123-8123-123456789abc";
+  const harness = popupServiceWorkerHarness({
+    autoObserveManagedResponse: false
+  });
+  await flushAsync();
+  await flushAsync();
+  await harness.dispatchFromOffscreen({
+    type: "sunox-frame-environment-prepare-v1",
+    nonce: managedNonce
+  });
+  harness.observeManagedResponse({ requestId: "released-request" });
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    await harness.dispatchFromOffscreen({
+      type: "sunox-frame-environment-release-v1",
+      nonce: managedNonce
+    })
+  )), { accepted: true });
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    await harness.dispatchFromOffscreen({
+      type: "sunox-frame-environment-prepare-v1",
+      nonce: nextNonce
+    })
+  )), {
+    accepted: true,
+    pageUrl: "https://suno.com/"
+  });
+
+  const notificationCount = harness.calls.notifications.length;
+  harness.observeManagedError({ requestId: "released-request" });
+  assert.equal(harness.calls.notifications.length, notificationCount);
+  harness.observeManagedResponse({ requestId: "fresh-request" });
+
+  const port = harness.connect({
+    documentId: "fresh-after-release-document",
+    frameId: 1,
+    id: "abcdefghijklmnopabcdefghijklmnop",
+    origin: "https://suno.com",
+    url: managedFrameHref("https://suno.com/", nextNonce)
+  }, "sunox-managed-frame-v2");
+  assert.equal(port.disconnected, false);
+  port.disconnect();
+});
+
 test("a failed cold-retry rule rotation preserves old rules but retires the old reservation", async () => {
   const firstNonce = managedNonce;
   const secondNonce = "87654321-4321-4123-8123-123456789abc";
@@ -2317,7 +2677,7 @@ test("a failed cold-retry rule rotation preserves old rules but retires the old 
     })
   )), {
     accepted: true,
-    pageUrl: "https://suno.com/home/advanced"
+    pageUrl: "https://suno.com/"
   });
   const firstRuleUpdate = JSON.parse(JSON.stringify(
     harness.calls.sessionRules.at(-1)
@@ -2351,7 +2711,7 @@ test("a failed cold-retry rule rotation preserves old rules but retires the old 
     frameId: 1,
     id: "abcdefghijklmnopabcdefghijklmnop",
     origin: "https://suno.com",
-    url: managedFrameHref("https://suno.com/home/advanced", firstNonce)
+    url: managedFrameHref("https://suno.com/", firstNonce)
   }, "sunox-managed-frame-v2");
   assert.equal(previousPort.disconnected, true);
   assert.equal(
@@ -2386,7 +2746,7 @@ test("a failed terminal rule cleanup is retried by the next poll alarm", async (
     })
   )), {
     accepted: true,
-    pageUrl: "https://suno.com/home/advanced"
+    pageUrl: "https://suno.com/"
   });
   assert.deepEqual(JSON.parse(JSON.stringify(
     await harness.dispatchFromOffscreen({
@@ -2409,7 +2769,9 @@ test("a failed terminal rule cleanup is retried by the next poll alarm", async (
 });
 
 test("terminal release retires a delayed old port before the next reservation", async () => {
-  const harness = popupServiceWorkerHarness();
+  const harness = popupServiceWorkerHarness({
+    autoObserveManagedResponse: false
+  });
   const nextNonce = "87654321-4321-4123-8123-123456789abc";
   await flushAsync();
   await flushAsync();
@@ -2418,6 +2780,7 @@ test("terminal release retires a delayed old port before the next reservation", 
     type: "sunox-frame-environment-prepare-v1",
     nonce: managedNonce
   });
+  harness.observeManagedResponse({ requestId: "terminal-old-request" });
   const oldPort = harness.connect({
     documentId: "terminal-release-old-document",
     frameId: 1,
@@ -2443,14 +2806,15 @@ test("terminal release retires a delayed old port before the next reservation", 
     })
   )), {
     accepted: true,
-    pageUrl: "https://suno.com/home/advanced"
+    pageUrl: "https://suno.com/"
   });
+  harness.observeManagedResponse({ requestId: "terminal-current-request" });
   const currentPort = harness.connect({
     documentId: "terminal-release-current-document",
     frameId: 1,
     id: "abcdefghijklmnopabcdefghijklmnop",
     origin: "https://suno.com",
-    url: managedFrameHref("https://suno.com/home/advanced", nextNonce)
+    url: managedFrameHref("https://suno.com/", nextNonce)
   }, "sunox-managed-frame-v2");
   assert.equal(currentPort.disconnected, false);
 
@@ -2473,7 +2837,7 @@ test("release of a timed-out new nonce cleans its retired previous owner", async
     })
   )), {
     accepted: true,
-    pageUrl: "https://suno.com/home/advanced"
+    pageUrl: "https://suno.com/"
   });
   assert.deepEqual(JSON.parse(JSON.stringify(
     await harness.dispatchFromOffscreen({
@@ -2524,7 +2888,7 @@ test("a missing offscreen owner revokes its reservation before replacement", asy
     })
   )), {
     accepted: true,
-    pageUrl: "https://suno.com/home/advanced"
+    pageUrl: "https://suno.com/"
   });
 
   // Simulate Chrome destroying the offscreen document after preparation but
@@ -2548,9 +2912,8 @@ test("a missing offscreen owner revokes its reservation before replacement", asy
     })
   )), {
     accepted: true,
-    pageUrl: "https://suno.com/home/advanced"
+    pageUrl: "https://suno.com/"
   });
-  assert.equal(harness.calls.fetches.length, 2);
 });
 
 test("an offscreen owner replacement cleans a late rule commit before the new owner prepares", async () => {
@@ -2597,7 +2960,7 @@ test("an offscreen owner replacement cleans a late rule commit before the new ow
     }, offscreenClientIdB)
   )), {
     accepted: true,
-    pageUrl: "https://suno.com/home/advanced"
+    pageUrl: "https://suno.com/"
   });
 
   assert.deepEqual(JSON.parse(JSON.stringify(
@@ -2643,7 +3006,7 @@ test("a replacement offscreen client cannot act until the worker rebinds it", as
     }, offscreenClientIdA)
   )), {
     accepted: true,
-    pageUrl: "https://suno.com/home/advanced"
+    pageUrl: "https://suno.com/"
   });
 
   harness.replaceOffscreenContext(replacementOwner, offscreenClientIdB);
@@ -2655,7 +3018,7 @@ test("a replacement offscreen client cannot act until the worker rebinds it", as
     }, offscreenClientIdB)
   )), {
     accepted: true,
-    pageUrl: "https://suno.com/home/advanced"
+    pageUrl: "https://suno.com/"
   });
   assert.deepEqual(JSON.parse(JSON.stringify(
     await harness.dispatchFromOffscreen({
@@ -2672,55 +3035,8 @@ test("a replacement offscreen client cannot act until the worker rebinds it", as
   )), { accepted: true });
 });
 
-test("challenge preparation rejects unsafe final URLs and clears frame rules", async () => {
-  const unsafeUrls = [
-    "https://attacker.example/create",
-    "https://suno.com/create?redirected=1",
-    "https://suno.com/create#unexpected",
-    "https://user:password@suno.com/create",
-    "https://suno.com:8443/create"
-  ];
-  for (const url of unsafeUrls) {
-    const harness = popupServiceWorkerHarness({
-      fetchImpl: async () => ({
-        headers: new Headers({
-          "content-type": "text/html"
-        }),
-        ok: true,
-        status: 200,
-        url
-      })
-    });
-    await flushAsync();
-    await flushAsync();
-
-    const preparation = await harness.dispatchFromOffscreen({
-      type: "sunox-frame-environment-prepare-v1",
-      nonce: managedNonce
-    });
-    assert.deepEqual(JSON.parse(JSON.stringify(preparation)), {
-      accepted: false,
-      error: "challenge_environment_unavailable"
-    });
-    assert.deepEqual(
-      JSON.parse(JSON.stringify(harness.calls.sessionRules.at(-1))),
-      { removeRuleIds: [29_764, 29_765] }
-    );
-  }
-});
-
-test("challenge preparation replaces a restrictive upstream CSP with the controlled document CSP", async () => {
-  const harness = popupServiceWorkerHarness({
-    fetchImpl: async () => ({
-      headers: new Headers({
-        "content-type": "text/html; charset=utf-8",
-        "content-security-policy": "frame-ancestors 'none'"
-      }),
-      ok: true,
-      status: 200,
-      url: "https://suno.com/create"
-    })
-  });
+test("challenge preparation installs the controlled response policy without route discovery", async () => {
+  const harness = popupServiceWorkerHarness();
   await flushAsync();
   await flushAsync();
 
@@ -2730,7 +3046,7 @@ test("challenge preparation replaces a restrictive upstream CSP with the control
   });
   assert.deepEqual(JSON.parse(JSON.stringify(preparation)), {
     accepted: true,
-    pageUrl: "https://suno.com/create"
+    pageUrl: "https://suno.com/"
   });
   const frameRule = JSON.parse(JSON.stringify(
     harness.calls.sessionRules.at(-1).addRules.find(
@@ -2745,34 +3061,25 @@ test("challenge preparation replaces a restrictive upstream CSP with the control
       "abcdefghijklmnopabcdefghijklmnop"
     )
   );
-});
-
-test("challenge preparation rejects a non-HTML discovery response", async () => {
-  const harness = popupServiceWorkerHarness({
-    fetchImpl: async () => ({
-      headers: new Headers({
-        "content-type": "application/json"
-      }),
-      ok: true,
-      status: 200,
-      url: "https://suno.com/create"
-    })
+  assert.deepEqual(frameRule.action.responseHeaders.find(
+    ({ header }) => header === "location"
+  ), {
+    header: "location",
+    operation: "remove"
   });
-  await flushAsync();
-  await flushAsync();
-
-  assert.deepEqual(JSON.parse(JSON.stringify(
-    await harness.dispatchFromOffscreen({
-      type: "sunox-frame-environment-prepare-v1",
-      nonce: managedNonce
-    })
-  )), {
-    accepted: false,
-    error: "challenge_environment_unavailable"
+  assert.deepEqual(frameRule.action.responseHeaders.find(
+    ({ header }) => header === "set-cookie"
+  ), {
+    header: "set-cookie",
+    operation: "remove"
   });
-  assert.deepEqual(
-    JSON.parse(JSON.stringify(harness.calls.sessionRules.at(-1))),
-    { removeRuleIds: [29_764, 29_765] }
+  assert.equal(
+    serviceWorkerSource.includes("MANAGED_PAGE_DISCOVERY_URL"),
+    false
+  );
+  assert.equal(
+    serviceWorkerSource.includes('credentials: "include"'),
+    false
   );
 });
 
@@ -2787,7 +3094,7 @@ test("service worker relays one nonce-bound offscreen frame challenge without cr
     })
   )), {
     accepted: true,
-    pageUrl: "https://suno.com/home/advanced"
+    pageUrl: "https://suno.com/"
   });
 
   const port = harness.connect({
@@ -2838,6 +3145,164 @@ test("service worker relays one nonce-bound offscreen frame challenge without cr
   assert.deepEqual(harness.calls.createdWindows, []);
 });
 
+test("service worker retries a terminal frame result until the offscreen document acknowledges it", async () => {
+  const token = "terminal-token-must-stay-on-the-offscreen-channel";
+  const harness = popupServiceWorkerHarness({
+    managedResultDeliveryFailures: 1
+  });
+  await flushAsync();
+  await flushAsync();
+  await harness.dispatchFromOffscreen({
+    type: "sunox-frame-environment-prepare-v1",
+    nonce: managedNonce
+  });
+  const port = harness.connect({
+    documentId: "terminal-retry-document",
+    id: "abcdefghijklmnopabcdefghijklmnop",
+    origin: "https://suno.com",
+    url: harness.managedUrl
+  }, "sunox-managed-frame-v2");
+  await flushAsync();
+  await harness.dispatchFromOffscreen({
+    type: "sunox-managed-frame-execute-v2",
+    nonce: managedNonce,
+    provider: "turnstile",
+    requestId: "request-terminal-retry"
+  });
+
+  const result = {
+    type: "sunox-managed-frame-result-v2",
+    requestId: "request-terminal-retry",
+    token
+  };
+  port.deliver(result);
+  await flushAsync();
+  await flushAsync();
+
+  const deliveries = harness.calls.notifications.filter(
+    (message) => message.type === "sunox-managed-frame-result-v2"
+  );
+  assert.equal(deliveries.length, 2);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(deliveries[0])),
+    JSON.parse(JSON.stringify(deliveries[1]))
+  );
+  port.deliver(result);
+  await flushAsync();
+  assert.equal(
+    harness.calls.notifications.filter(
+      (message) => message.type === "sunox-managed-frame-result-v2"
+    ).length,
+    2,
+    "an acknowledged terminal result must lock the frame to one result"
+  );
+  assert.equal(
+    JSON.stringify(harness.calls.consoleErrors).includes(token),
+    false
+  );
+  assert.equal(port.disconnected, false);
+  assert.deepEqual(harness.calls.createdWindows, []);
+});
+
+test("service worker accepts only the nonce-bound terminal-result acknowledgement", async () => {
+  const harness = popupServiceWorkerHarness({
+    managedResultInvalidAcknowledgements: 1
+  });
+  await flushAsync();
+  await flushAsync();
+  await harness.dispatchFromOffscreen({
+    type: "sunox-frame-environment-prepare-v1",
+    nonce: managedNonce
+  });
+  const port = harness.connect({
+    documentId: "terminal-strong-ack-document",
+    id: "abcdefghijklmnopabcdefghijklmnop",
+    origin: "https://suno.com",
+    url: harness.managedUrl
+  }, "sunox-managed-frame-v2");
+  await flushAsync();
+  await harness.dispatchFromOffscreen({
+    type: "sunox-managed-frame-execute-v2",
+    nonce: managedNonce,
+    provider: "turnstile",
+    requestId: "request-terminal-strong-ack"
+  });
+
+  port.deliver({
+    type: "sunox-managed-frame-result-v2",
+    requestId: "request-terminal-strong-ack",
+    token: "strong-ack-token"
+  });
+  await flushAsync();
+  await flushAsync();
+
+  assert.equal(
+    harness.calls.notifications.filter(
+      (message) => message.type === "sunox-managed-frame-result-v2"
+    ).length,
+    2,
+    "a generic accepted response must not complete terminal delivery"
+  );
+  assert.equal(port.disconnected, false);
+  assert.deepEqual(harness.calls.createdWindows, []);
+});
+
+test("service worker fails closed when no offscreen receiver acknowledges a terminal frame result", async () => {
+  const token = "terminal-token-must-not-enter-the-failure-signal";
+  const harness = popupServiceWorkerHarness({
+    managedResultDeliveryFailures: 2
+  });
+  await flushAsync();
+  await flushAsync();
+  await harness.dispatchFromOffscreen({
+    type: "sunox-frame-environment-prepare-v1",
+    nonce: managedNonce
+  });
+  const port = harness.connect({
+    documentId: "terminal-fail-closed-document",
+    id: "abcdefghijklmnopabcdefghijklmnop",
+    origin: "https://suno.com",
+    url: harness.managedUrl
+  }, "sunox-managed-frame-v2");
+  await flushAsync();
+  await harness.dispatchFromOffscreen({
+    type: "sunox-managed-frame-execute-v2",
+    nonce: managedNonce,
+    provider: "turnstile",
+    requestId: "request-terminal-fail-closed"
+  });
+
+  port.deliver({
+    type: "sunox-managed-frame-result-v2",
+    requestId: "request-terminal-fail-closed",
+    token
+  });
+  await flushAsync();
+  await flushAsync();
+  await flushAsync();
+
+  assert.equal(
+    harness.calls.notifications.filter(
+      (message) => message.type === "sunox-managed-frame-result-v2"
+    ).length,
+    2
+  );
+  assert.equal(port.disconnected, true);
+  const failureSignal = harness.calls.notifications.find(
+    (message) => message.type === "sunox-managed-frame-disconnected-v2"
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(failureSignal)), {
+    type: "sunox-managed-frame-disconnected-v2",
+    nonce: managedNonce
+  });
+  assert.equal(JSON.stringify(failureSignal).includes(token), false);
+  assert.equal(
+    JSON.stringify(harness.calls.consoleErrors).includes(token),
+    false
+  );
+  assert.deepEqual(harness.calls.createdWindows, []);
+});
+
 test("service worker exposes only static Turnstile diagnostic families", async () => {
   const cases = [
     [
@@ -2850,7 +3315,7 @@ test("service worker exposes only static Turnstile diagnostic families", async (
     ],
     [
       "turnstile_no_callback",
-      "silent_challenge_unavailable: Turnstile produced no callback before the silent deadline"
+      "silent_challenge_unavailable: Turnstile produced no callback across two fresh widget attempts"
     ]
   ];
 
@@ -3140,7 +3605,7 @@ test("a managed frame without an active nonce reservation is rejected", async ()
 
 test("isolated bridge stops the host response and reuses its real document root", () => {
   const nonce = "00000000-0000-4000-8000-000000000001";
-  const href = managedFrameHref("https://suno.com/create/v3", nonce);
+  const href = managedFrameHref("https://suno.com/", nonce);
   let connections = 0;
   const hostileDocumentElement = elementHarness("host-html");
   hostileDocumentElement.setAttribute("class", "host-controlled");
@@ -3226,44 +3691,9 @@ test("isolated bridge stops the host response and reuses its real document root"
   assert.equal(context.__sunoxBridgeContentLoaded, true);
   assert.equal(connections, 0);
 
-  const nonCredentialless = {
-    ...context,
-    __sunoxBridgeContentLoaded: false,
-    document: {
-      readyState: "loading"
-    }
-  };
-  nonCredentialless.window = nonCredentialless;
-  nonCredentialless.globalThis = nonCredentialless;
-  nonCredentialless.top = {};
-  nonCredentialless.parent = nonCredentialless.top;
-  const rejectedTrace = prepareContentBridgeContext(nonCredentialless, {
-    credentialless: false,
-    pageReady: false
-  });
-  vm.createContext(nonCredentialless);
-  vm.runInContext(bridgeSource, nonCredentialless);
-  assert.equal(rejectedTrace[0], "stop");
-  assert.ok(
-    rejectedTrace.indexOf("root-replace") > rejectedTrace.indexOf("stop")
-  );
-  assert.equal(
-    nonCredentialless.document.documentElement.getAttribute(
-      controlledDocumentAttribute
-    ),
-    null
-  );
-  assert.equal(
-    rejectedTrace.some((entry) => (
-      entry === "getURL:page.js" || entry === "append:script"
-    )),
-    false
-  );
-  assert.notEqual(nonCredentialless.__sunoxBridgeContentLoaded, true);
-
   const invalidUrl = new URL(href);
   invalidUrl.hash =
-    "sunox-browser-bridge=00000000-0000-4000-8000-000000000002";
+    "sunox-browser-bridge=00000000-0000-4000-8000-invalid";
   const invalidNonce = {
     ...context,
     __sunoxBridgeContentLoaded: false,
@@ -3303,7 +3733,7 @@ test("MAIN-world page bridge marks only an existing controlled document ready", 
       readyState: "complete"
     },
     location: {
-      href: managedFrameHref("https://suno.com/create/v3", nonce),
+      href: managedFrameHref("https://suno.com/", nonce),
       origin: "https://suno.com"
     },
     Promise,
@@ -3351,7 +3781,6 @@ test("MAIN-world page bridge marks only an existing controlled document ready", 
   uncontrolled.globalThis = uncontrolled;
   uncontrolled.top = {};
   uncontrolled.parent = uncontrolled.top;
-  uncontrolled.credentialless = true;
   uncontrolled.document.documentElement = elementHarness("html");
   vm.createContext(uncontrolled);
   vm.runInContext(pageSource, uncontrolled);
@@ -3366,7 +3795,7 @@ test("content bridge connects only after the exact nonce-bound frame is stable",
   const nonce = "00000000-0000-4000-8000-000000000001";
   const location = {
     href: managedFrameHref(
-      "https://suno.com/home/advanced",
+      "https://suno.com/",
       nonce
     ),
     origin: "https://suno.com"
@@ -3494,7 +3923,7 @@ test("managed frame messages keep the MV3 service worker alive during a challeng
     },
     location: {
       href: managedFrameHref(
-        "https://suno.com/home/advanced",
+        "https://suno.com/",
         "00000000-0000-4000-8000-000000000001"
       ),
       origin: "https://suno.com"
@@ -3605,7 +4034,7 @@ test("content bridge discards a token after same-document route drift", async ()
     },
     location: {
       href: managedFrameHref(
-        "https://suno.com/home/advanced",
+        "https://suno.com/",
         nonce
       ),
       origin: "https://suno.com"
@@ -3702,7 +4131,7 @@ test("content bridge rejects provider-mismatched main-world errors", async () =>
     },
     location: {
       href: managedFrameHref(
-        "https://suno.com/home/advanced",
+        "https://suno.com/",
         "00000000-0000-4000-8000-000000000001"
       ),
       origin: "https://suno.com"
@@ -3810,7 +4239,7 @@ test("page bridge executes both invisible challenge providers", async () => {
     },
     location: {
       href: managedFrameHref(
-        "https://suno.com/home/advanced",
+        "https://suno.com/",
         "00000000-0000-4000-8000-000000000001"
       ),
       origin: "https://suno.com"
@@ -3937,7 +4366,7 @@ test("page bridge discards a token after same-document route drift", async () =>
     },
     location: {
       href: managedFrameHref(
-        "https://suno.com/home/advanced",
+        "https://suno.com/",
         nonce
       ),
       origin: "https://suno.com"
@@ -4024,7 +4453,7 @@ test("page bridge waits for document.body at document_start before mounting hCap
     },
     location: {
       href: managedFrameHref(
-        "https://suno.com/home/advanced",
+        "https://suno.com/",
         "00000000-0000-4000-8000-000000000001"
       ),
       origin: "https://suno.com"
@@ -4117,7 +4546,7 @@ test("page bridge loads the current Turnstile SDK when the page has none", async
     },
     location: {
       href: managedFrameHref(
-        "https://suno.com/home/advanced",
+        "https://suno.com/",
         "00000000-0000-4000-8000-000000000001"
       ),
       origin: "https://suno.com"
@@ -4207,7 +4636,7 @@ test("page bridge loads the current hCaptcha SDK when the page has none", async 
     },
     location: {
       href: managedFrameHref(
-        "https://suno.com/home/advanced",
+        "https://suno.com/",
         "00000000-0000-4000-8000-000000000001"
       ),
       origin: "https://suno.com"
@@ -4288,7 +4717,7 @@ test("page bridge reports fatal Turnstile callbacks", async () => {
       },
       location: {
         href: managedFrameHref(
-          "https://suno.com/home/advanced",
+          "https://suno.com/",
           "00000000-0000-4000-8000-000000000001"
         ),
         origin: "https://suno.com"
@@ -4372,7 +4801,7 @@ test("page bridge allows Turnstile error and timeout recovery before success", a
       },
       location: {
         href: managedFrameHref(
-          "https://suno.com/home/advanced",
+          "https://suno.com/",
           "00000000-0000-4000-8000-000000000001"
         ),
         origin: "https://suno.com"
@@ -4466,7 +4895,7 @@ test("page bridge reports the last safe Turnstile family at its recovery cap", a
     },
     location: {
       href: managedFrameHref(
-        "https://suno.com/home/advanced",
+        "https://suno.com/",
         "00000000-0000-4000-8000-000000000001"
       ),
       origin: "https://suno.com"
@@ -4537,6 +4966,306 @@ test("page bridge reports the last safe Turnstile family at its recovery cap", a
   }]);
 });
 
+function silentTurnstileRetryHarness({
+  removalFailureWidgetId = null,
+  secondAttemptToken = null
+} = {}) {
+  const listeners = new Map();
+  const results = [];
+  const containers = [];
+  const renders = [];
+  const executes = [];
+  const widgetRemovals = [];
+  const timers = new Map();
+  const delays = [];
+  const events = [];
+  const visibleOperations = [];
+  const href = managedFrameHref(
+    "https://suno.com/",
+    "00000000-0000-4000-8000-000000000001"
+  );
+  let timerId = 0;
+  let now = 0;
+  let realmWindow;
+  const context = {
+    chrome: {
+      tabs: { create: () => visibleOperations.push("tab") },
+      windows: { create: () => visibleOperations.push("window") }
+    },
+    clearInterval() {},
+    clearTimeout(id) {
+      timers.delete(id);
+    },
+    Date: { now: () => now },
+    document: {
+      body: {
+        appendChild(container) {
+          containers.push(container);
+          events.push(`append:${container.id}`);
+        }
+      },
+      createElement() {
+        const id = `container-${containers.length + 1}`;
+        return {
+          id,
+          removed: false,
+          style: {},
+          remove() {
+            this.removed = true;
+            events.push(`remove:${id}`);
+          }
+        };
+      },
+      head: { appendChild() {} },
+      querySelector: () => null
+    },
+    location: { href, origin: "https://suno.com" },
+    open: () => visibleOperations.push("open"),
+    Promise,
+    setInterval(callback) {
+      queueMicrotask(callback);
+      return -1;
+    },
+    setTimeout(callback, delay) {
+      const id = ++timerId;
+      delays.push(delay);
+      timers.set(id, { callback, dueAt: now + delay });
+      return id;
+    },
+    turnstile: {
+      execute(widgetId) {
+        executes.push(widgetId);
+        events.push(`execute:${widgetId}`);
+        if (renders.length === 2 && secondAttemptToken) {
+          const options = renders[1].options;
+          queueMicrotask(() => options.callback(secondAttemptToken));
+        }
+      },
+      remove(widgetId) {
+        widgetRemovals.push(widgetId);
+        events.push(`remove:${widgetId}`);
+        if (widgetId === removalFailureWidgetId) {
+          throw new Error("simulated Turnstile removal failure");
+        }
+      },
+      render(container, options) {
+        const widgetId = `widget-${renders.length + 1}`;
+        renders.push({ container, options, widgetId });
+        events.push(`render:${widgetId}`);
+        return widgetId;
+      }
+    }
+  };
+  context.window = context;
+  context.top = {};
+  context.parent = context.top;
+  context.addEventListener = (type, listener) => listeners.set(type, listener);
+  context.postMessage = (message) => results.push(message);
+  context.globalThis = context;
+  context.URL = URL;
+  preparePageBridgeContext(context);
+  vm.createContext(context);
+  vm.runInContext(pageSource, context);
+  realmWindow = vm.runInContext("window", context);
+  return {
+    containers,
+    context,
+    delays,
+    events,
+    executes,
+    href,
+    renders,
+    results,
+    timers,
+    visibleOperations,
+    widgetRemovals,
+    advanceBy(elapsedMs) {
+      now += elapsedMs;
+    },
+    async start(requestId) {
+      const execution = listeners.get("message")({
+        data: { source: "sunox-extension-v1", requestId, provider: "turnstile" },
+        origin: "https://suno.com",
+        source: realmWindow
+      });
+      await flushAsync();
+      return { execution };
+    },
+    async tick() {
+      const [id, timer] = [...timers.entries()]
+        .sort(([, a], [, b]) => a.dueAt - b.dueAt)[0] ?? [];
+      assert.ok(timer, "expected a pending Turnstile deadline");
+      timers.delete(id);
+      now = timer.dueAt;
+      timer.callback();
+      await flushAsync();
+    }
+  };
+}
+
+test("page bridge retries one silent Turnstile no-callback with a fresh widget", async () => {
+  const h = silentTurnstileRetryHarness({
+    secondAttemptToken: "second-attempt-token"
+  });
+  const { execution } = await h.start("request-turnstile-fresh-retry");
+  assert.equal(h.renders.length, 1);
+
+  await h.tick();
+  await execution;
+
+  assert.equal(h.renders.length, 2);
+  assert.notEqual(h.renders[0].container, h.renders[1].container);
+  assert.deepEqual(h.executes, ["widget-1", "widget-2"]);
+  assert.deepEqual(h.widgetRemovals, ["widget-1", "widget-2"]);
+  assert.deepEqual(h.events, [
+    "append:container-1", "render:widget-1", "execute:widget-1",
+    "remove:widget-1", "remove:container-1",
+    "append:container-2", "render:widget-2", "execute:widget-2",
+    "remove:widget-2", "remove:container-2"
+  ]);
+  assert.deepEqual(h.delays, [15_000, 15_000]);
+  assert.equal(h.context.location.href, h.href);
+  assert.equal(h.containers.every(({ removed }) => removed), true);
+  assert.equal(h.containers.every(({ style }) =>
+    style.cssText === "position:fixed;z-index:-50;opacity:0;pointer-events:none"
+  ), true);
+  assert.equal(h.timers.size, 0);
+  assert.deepEqual(h.visibleOperations, []);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.results)), [{
+    source: "sunox-page-v1",
+    requestId: "request-turnstile-fresh-retry",
+    token: "second-attempt-token"
+  }]);
+  for (const { options } of h.renders) {
+    assert.equal(options.sitekey, "0x4AAAAAADI7xDNyj-3LcIbi");
+    assert.equal(options.execution, "execute");
+    assert.equal(options.appearance, "interaction-only");
+  }
+});
+
+test("page bridge stops after two silent Turnstile no-callback attempts", async () => {
+  const h = silentTurnstileRetryHarness();
+  const { execution } = await h.start("request-turnstile-double-no-callback");
+
+  await h.tick();
+  assert.equal(h.renders.length, 2);
+  await h.tick();
+  await execution;
+
+  assert.deepEqual(h.delays, [15_000, 15_000]);
+  assert.deepEqual(h.executes, ["widget-1", "widget-2"]);
+  assert.deepEqual(h.widgetRemovals, ["widget-1", "widget-2"]);
+  assert.equal(h.containers.length, 2);
+  assert.notEqual(h.containers[0], h.containers[1]);
+  assert.equal(h.containers.every(({ removed }) => removed), true);
+  assert.equal(h.timers.size, 0);
+  assert.deepEqual(h.visibleOperations, []);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.results)), [{
+    source: "sunox-page-v1",
+    requestId: "request-turnstile-double-no-callback",
+    errorCode: "turnstile_no_callback"
+  }]);
+});
+
+test("page bridge shares one absolute budget across fresh Turnstile widgets", async () => {
+  const h = silentTurnstileRetryHarness();
+  const { execution } = await h.start("request-turnstile-shared-budget");
+
+  await h.tick();
+  assert.equal(h.renders.length, 2);
+  h.advanceBy(5_000);
+  assert.equal(h.renders[1].options["error-callback"](300030), false);
+  await h.tick();
+  await execution;
+
+  assert.deepEqual(h.delays, [15_000, 15_000, 10_000]);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.results)), [{
+    source: "sunox-page-v1",
+    requestId: "request-turnstile-shared-budget",
+    errorCode: "turnstile_error_300"
+  }]);
+  assert.deepEqual(h.widgetRemovals, ["widget-1", "widget-2"]);
+  assert.equal(h.timers.size, 0);
+});
+
+test("page bridge accepts a second-widget token until the shared deadline", async () => {
+  const h = silentTurnstileRetryHarness();
+  const { execution } = await h.start("request-turnstile-late-second-token");
+
+  await h.tick();
+  h.advanceBy(14_999);
+  h.renders[1].options.callback("late-second-attempt-token");
+  await execution;
+
+  assert.deepEqual(JSON.parse(JSON.stringify(h.results)), [{
+    source: "sunox-page-v1",
+    requestId: "request-turnstile-late-second-token",
+    token: "late-second-attempt-token"
+  }]);
+  assert.deepEqual(h.widgetRemovals, ["widget-1", "widget-2"]);
+  assert.equal(h.timers.size, 0);
+});
+
+test("page bridge rejects a token delivered after the shared deadline", async () => {
+  const h = silentTurnstileRetryHarness();
+  const { execution } = await h.start("request-turnstile-over-budget-token");
+
+  await h.tick();
+  h.advanceBy(15_001);
+  h.renders[1].options.callback("over-budget-token");
+  await execution;
+
+  assert.deepEqual(JSON.parse(JSON.stringify(h.results)), [{
+    source: "sunox-page-v1",
+    requestId: "request-turnstile-over-budget-token",
+    errorCode: "turnstile_no_callback"
+  }]);
+  assert.deepEqual(h.widgetRemovals, ["widget-1", "widget-2"]);
+  assert.equal(h.timers.size, 0);
+});
+
+test("page bridge ignores callbacks from a retired Turnstile widget", async () => {
+  const h = silentTurnstileRetryHarness();
+  const { execution } = await h.start("request-turnstile-retired-callback");
+
+  await h.tick();
+  h.renders[0].options.callback("retired-widget-token");
+  await flushAsync();
+  assert.deepEqual(h.results, []);
+
+  h.renders[1].options.callback("current-widget-token");
+  await execution;
+
+  assert.deepEqual(JSON.parse(JSON.stringify(h.results)), [{
+    source: "sunox-page-v1",
+    requestId: "request-turnstile-retired-callback",
+    token: "current-widget-token"
+  }]);
+  assert.deepEqual(h.widgetRemovals, ["widget-1", "widget-2"]);
+});
+
+test("page bridge fails closed when a Turnstile widget cannot be removed", async () => {
+  const h = silentTurnstileRetryHarness({
+    removalFailureWidgetId: "widget-1"
+  });
+  const { execution } = await h.start("request-turnstile-removal-failure");
+
+  await h.tick();
+  await execution;
+
+  assert.equal(h.renders.length, 1);
+  assert.deepEqual(h.executes, ["widget-1"]);
+  assert.deepEqual(h.widgetRemovals, ["widget-1"]);
+  assert.equal(h.containers[0].removed, true);
+  assert.equal(h.timers.size, 0);
+  assert.deepEqual(h.visibleOperations, []);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.results)), [{
+    source: "sunox-page-v1",
+    requestId: "request-turnstile-removal-failure",
+    errorCode: "challenge_failed"
+  }]);
+});
+
 test("page bridge reports a distinct silent Turnstile callback deadline", async () => {
   const listeners = new Map();
   const pageResults = [];
@@ -4563,7 +5292,7 @@ test("page bridge reports a distinct silent Turnstile callback deadline", async 
     },
     location: {
       href: managedFrameHref(
-        "https://suno.com/home/advanced",
+        "https://suno.com/",
         "00000000-0000-4000-8000-000000000001"
       ),
       origin: "https://suno.com"
@@ -4644,7 +5373,7 @@ test("page bridge settles only once when a Turnstile error arrives after success
     },
     location: {
       href: managedFrameHref(
-        "https://suno.com/home/advanced",
+        "https://suno.com/",
         "00000000-0000-4000-8000-000000000001"
       ),
       origin: "https://suno.com"
@@ -4732,7 +5461,7 @@ test("page bridge clears its deadline when the Turnstile SDK throws synchronousl
       },
       location: {
         href: managedFrameHref(
-          "https://suno.com/home/advanced",
+          "https://suno.com/",
           "00000000-0000-4000-8000-000000000001"
         ),
         origin: "https://suno.com"
@@ -4830,7 +5559,7 @@ test("page bridge fails immediately when Turnstile requires interaction", async 
     },
     location: {
       href: managedFrameHref(
-        "https://suno.com/home/advanced",
+        "https://suno.com/",
         "00000000-0000-4000-8000-000000000001"
       ),
       origin: "https://suno.com"
@@ -4928,7 +5657,7 @@ test("page bridge fails immediately when invisible hCaptcha opens a challenge", 
     },
     location: {
       href: managedFrameHref(
-        "https://suno.com/home/advanced",
+        "https://suno.com/",
         "00000000-0000-4000-8000-000000000001"
       ),
       origin: "https://suno.com"
@@ -5114,7 +5843,7 @@ test("page bridge recovers after a hanging hCaptcha execution deadline", async (
     },
     location: {
       href: managedFrameHref(
-        "https://suno.com/home/advanced",
+        "https://suno.com/",
         "00000000-0000-4000-8000-000000000001"
       ),
       origin: "https://suno.com"
@@ -5274,6 +6003,134 @@ test("loopback transport acknowledges a signed probe without returning a challen
   ]);
 });
 
+test("loopback transport retries the exact signed terminal result after an ambiguous failure", async () => {
+  const secret = "a".repeat(64);
+  const serverNonce = "server-nonce-00000001";
+  const requestId = "request-terminal-replay";
+  const resultBodies = [];
+  let resultAttempts = 0;
+  const transport = loadLoopbackTransport(async (url, options) => {
+    const path = new URL(url).pathname;
+    const body = JSON.parse(options.body);
+    if (path === "/v3/challenge/hello") {
+      return new Response(JSON.stringify({
+        version: 3,
+        server_nonce: serverNonce,
+        proof: bridgeProof(secret, "sunox-bridge-server-v3", [
+          29_764,
+          body.client_nonce,
+          serverNonce
+        ])
+      }), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    if (path === "/v3/challenge/claim") {
+      return new Response(JSON.stringify({
+        version: 3,
+        provider: "turnstile",
+        request_id: requestId
+      }), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    if (path === "/v3/challenge/result") {
+      resultBodies.push(options.body);
+      resultAttempts += 1;
+      if (resultAttempts === 1) {
+        throw new Error("simulated lost 204 response");
+      }
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`unexpected loopback path ${path}`);
+  });
+  const challenge = await transport.claimChallenge({
+    clientId: "offscreen-client",
+    pageUrl: "https://suno.com/"
+  });
+  const token = "terminal-token-with-valid-minimum-length";
+  const result = await transport.submitResult({
+    transportReceipt: challenge.transportReceipt,
+    requestId,
+    token,
+    error: null
+  });
+
+  assert.equal(result.accepted, true);
+  assert.equal(resultBodies.length, 2);
+  assert.equal(resultBodies[0], resultBodies[1]);
+  const payload = JSON.parse(resultBodies[0]);
+  assert.equal(
+    payload.proof,
+    bridgeProof(secret, "sunox-bridge-result-v3", [
+      29_764,
+      payload.client_nonce,
+      payload.server_nonce,
+      requestId,
+      "token",
+      token
+    ])
+  );
+});
+
+test("loopback transport keeps the exact result alive across repeated 425 writer responses", async () => {
+  const secret = "a".repeat(64);
+  const serverNonce = "server-nonce-00000001";
+  const requestId = "request-writing-replay";
+  const resultBodies = [];
+  const transport = loadLoopbackTransport(async (url, options) => {
+    const path = new URL(url).pathname;
+    const body = JSON.parse(options.body);
+    if (path === "/v3/challenge/hello") {
+      return new Response(JSON.stringify({
+        version: 3,
+        server_nonce: serverNonce,
+        proof: bridgeProof(secret, "sunox-bridge-server-v3", [
+          29_764,
+          body.client_nonce,
+          serverNonce
+        ])
+      }), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    if (path === "/v3/challenge/claim") {
+      return new Response(JSON.stringify({
+        version: 3,
+        provider: "turnstile",
+        request_id: requestId
+      }), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    if (path === "/v3/challenge/result") {
+      resultBodies.push(options.body);
+      return new Response(null, {
+        status: resultBodies.length <= 4 ? 425 : 204
+      });
+    }
+    throw new Error(`unexpected loopback path ${path}`);
+  }, {
+    resultDeliveryDeadlineMs: 100,
+    resultRetryInitialDelayMs: 1,
+    resultRetryMaxDelayMs: 2
+  });
+  const challenge = await transport.claimChallenge({
+    clientId: "offscreen-client",
+    pageUrl: "https://suno.com/"
+  });
+  const result = await transport.submitResult({
+    transportReceipt: challenge.transportReceipt,
+    requestId,
+    token: "terminal-token-after-writing-state",
+    error: null
+  });
+
+  assert.equal(result.accepted, true);
+  assert.equal(resultBodies.length, 5);
+  assert.equal(new Set(resultBodies).size, 1);
+});
+
 test("loopback transport deadline covers a response body that never finishes", async () => {
   let aborted = false;
   let redirectMode;
@@ -5421,7 +6278,8 @@ test("offscreen heartbeat reports only recent poll-worker ticks as healthy", () 
     },
     SUNOX_BRIDGE_CONFIG: {
       schemaVersion: 1,
-      transport: "test"
+      transport: "test",
+      loopback: { runtimeBuild }
     },
     SUNOX_BRIDGE_SHARED: {
       errorMessage(error) {
@@ -5478,6 +6336,7 @@ test("offscreen heartbeat reports only recent poll-worker ticks as healthy", () 
     busy: false,
     busySince: null,
     clientId: initialPing.clientId,
+    runtimeBuild,
     type: "sunox-offscreen-pong-v1",
     pollWorkerAgeMs: null,
     pollWorkerHealthy: false
@@ -5489,6 +6348,7 @@ test("offscreen heartbeat reports only recent poll-worker ticks as healthy", () 
     busy: false,
     busySince: null,
     clientId: initialPing.clientId,
+    runtimeBuild,
     type: "sunox-offscreen-pong-v1",
     pollWorkerAgeMs: 250,
     pollWorkerHealthy: true
@@ -5563,7 +6423,8 @@ test("offscreen heartbeat protects a claim request while its response is in flig
     },
     SUNOX_BRIDGE_CONFIG: {
       schemaVersion: 1,
-      transport: "test"
+      transport: "test",
+      loopback: { runtimeBuild }
     },
     SUNOX_BRIDGE_SHARED: {
       errorMessage(error) {
@@ -5604,7 +6465,7 @@ test("offscreen heartbeat protects a claim request while its response is in flig
   };
 
   pollWorkerMessageListener({ data: { type: "sunox-poll" } });
-  dispatch({ type: "sunox-offscreen-start-v1" });
+  dispatch({ type: "sunox-offscreen-start-v1", runtimeBuild });
   assert.equal(typeof resolveClaim, "function");
 
   now += 30_000;
@@ -5616,6 +6477,7 @@ test("offscreen heartbeat protects a claim request while its response is in flig
       busy: true,
       busySince: 1_000,
       clientId: busyPing.clientId,
+      runtimeBuild,
       type: "sunox-offscreen-pong-v1",
       pollWorkerAgeMs: 30_000,
       pollWorkerHealthy: false
@@ -5634,19 +6496,24 @@ test("offscreen heartbeat protects a claim request while its response is in flig
 test("offscreen solves a claimed challenge in an invisible iframe without requesting a window", async () => {
   const runtimeListeners = new Set();
   const runtimeMessages = [];
+  const runtimeResponses = [];
   const submitted = [];
   const frames = [];
   const frameOperations = [];
   const claimedPageUrls = [];
-  const resolvedPageUrl = "https://suno.com/create/v3";
+  const resolvedPageUrl = "https://suno.com/";
   let claims = 0;
   const sender = {
     id: "abcdefghijklmnopabcdefghijklmnop"
   };
   const dispatchRuntimeMessage = (message) => {
+    let response;
     for (const listener of [...runtimeListeners]) {
-      listener(message, sender, () => {});
+      listener(message, sender, (value) => {
+        response = value;
+      });
     }
+    return response;
   };
   const detachedSetTimeout = (callback, delay) => {
     const timer = setTimeout(callback, delay);
@@ -5675,12 +6542,12 @@ test("offscreen solves a claimed challenge in an invisible iframe without reques
           }
           if (message.type !== "sunox-managed-frame-execute-v2") return undefined;
           queueMicrotask(() => {
-            dispatchRuntimeMessage({
+            runtimeResponses.push(dispatchRuntimeMessage({
               type: "sunox-managed-frame-result-v2",
               nonce: message.nonce,
               requestId: message.requestId,
               token: "offscreen-token"
-            });
+            }));
           });
           return { accepted: true };
         }
@@ -5706,18 +6573,10 @@ test("offscreen solves a claimed challenge in an invisible iframe without reques
       },
       createElement(name) {
         assert.equal(name, "iframe");
-        let credentialless = false;
         let referrerPolicy = "";
         let src = "";
         const sandboxTokens = [];
         const frame = {
-          get credentialless() {
-            return credentialless;
-          },
-          set credentialless(value) {
-            credentialless = value;
-            frameOperations.push(["credentialless", value]);
-          },
           get referrerPolicy() {
             return referrerPolicy;
           },
@@ -5752,7 +6611,8 @@ test("offscreen solves a claimed challenge in an invisible iframe without reques
     URL,
     SUNOX_BRIDGE_CONFIG: {
       schemaVersion: 1,
-      transport: "test"
+      transport: "test",
+      loopback: { runtimeBuild }
     },
     SUNOX_BRIDGE_SHARED: {
       errorMessage(error) {
@@ -5786,14 +6646,14 @@ test("offscreen solves a claimed challenge in an invisible iframe without reques
   context.globalThis = context;
   vm.createContext(context);
   vm.runInContext(offscreenSource, context);
-  dispatchRuntimeMessage({ type: "sunox-offscreen-start-v1" });
+  dispatchRuntimeMessage({ type: "sunox-offscreen-start-v1", runtimeBuild });
   await flushAsync();
   await flushAsync();
 
   assert.equal(claims, 1);
   assert.deepEqual(claimedPageUrls, ["https://suno.com/"]);
   assert.equal(frames.length, 1);
-  assert.equal(frames[0].credentialless, true);
+  assert.equal("credentialless" in frames[0], false);
   assert.equal(
     frames[0].referrerPolicy,
     "strict-origin-when-cross-origin"
@@ -5808,7 +6668,6 @@ test("offscreen solves a claimed challenge in an invisible iframe without reques
   ));
   assert.ok(srcIndex > -1);
   for (const prerequisite of [
-    "credentialless",
     "referrerPolicy",
     "sandbox"
   ]) {
@@ -5819,17 +6678,13 @@ test("offscreen solves a claimed challenge in an invisible iframe without reques
     );
   }
   const managedFrameUrl = new URL(frames[0].src);
-  const networkNonce = managedFrameUrl.searchParams.get("__sunox_bridge");
   const fragmentNonce = managedFrameUrl.hash.slice(
     "#sunox-browser-bridge=".length
   );
   assert.equal(managedFrameUrl.origin, "https://suno.com");
-  assert.equal(managedFrameUrl.pathname, "/create/v3");
-  assert.deepEqual([...managedFrameUrl.searchParams.keys()], [
-    "__sunox_bridge"
-  ]);
-  assert.match(networkNonce, /^[0-9a-f-]{36}$/);
-  assert.equal(fragmentNonce, networkNonce);
+  assert.equal(managedFrameUrl.pathname, "/");
+  assert.deepEqual([...managedFrameUrl.searchParams.keys()], []);
+  assert.match(fragmentNonce, /^[0-9a-f-]{36}$/);
   assert.equal(
     runtimeMessages.some(
       (message) => message.type === "sunox-managed-window-start-v1"
@@ -5842,17 +6697,24 @@ test("offscreen solves a claimed challenge in an invisible iframe without reques
     token: "offscreen-token",
     error: null
   }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(runtimeResponses)), [{
+    accepted: true,
+    type: "sunox-managed-frame-result-ack-v1",
+    nonce: fragmentNonce,
+    requestId: "request-offscreen"
+  }]);
 });
 
 function offscreenReadinessHarness({
   environmentResponse = {
     accepted: true,
-    pageUrl: "https://suno.com/home/advanced"
+    pageUrl: "https://suno.com/"
   },
   onExecute = null,
   onFrameAppended = null,
   onRelease = null,
-  onRetire = null
+  onRetire = null,
+  onSubmitResult = null
 } = {}) {
   const runtimeListeners = new Set();
   const submitted = [];
@@ -5867,17 +6729,19 @@ function offscreenReadinessHarness({
     id: "abcdefghijklmnopabcdefghijklmnop"
   };
   const dispatchRuntimeMessage = (message) => {
+    let response;
     for (const listener of [...runtimeListeners]) {
-      listener(message, sender, () => {});
+      listener(message, sender, (value) => {
+        response = value;
+      });
     }
+    return response;
   };
   const fireFrameEvent = (frame, type) => {
     frame.eventListeners.get(type)?.();
   };
   const frameNonce = (frame) =>
     new URL(frame.src).hash.slice("#sunox-browser-bridge=".length);
-  const frameNetworkNonce = (frame) =>
-    new URL(frame.src).searchParams.get("__sunox_bridge");
   const context = {
     chrome: {
       runtime: {
@@ -5994,7 +6858,8 @@ function offscreenReadinessHarness({
     URL,
     SUNOX_BRIDGE_CONFIG: {
       schemaVersion: 1,
-      transport: "test"
+      transport: "test",
+      loopback: { runtimeBuild }
     },
     SUNOX_BRIDGE_SHARED: {
       errorMessage(error) {
@@ -6016,6 +6881,12 @@ function offscreenReadinessHarness({
         },
         async submitResult(message) {
           submitted.push(message);
+          if (onSubmitResult) {
+            return await onSubmitResult({
+              message,
+              submissionIndex: submitted.length - 1
+            });
+          }
           return { accepted: true };
         }
       }
@@ -6032,7 +6903,6 @@ function offscreenReadinessHarness({
     dispatchRuntimeMessage,
     environmentMessages,
     executeMessages,
-    frameNetworkNonce,
     frameNonce,
     frames,
     get claims() {
@@ -6042,8 +6912,11 @@ function offscreenReadinessHarness({
       return now - startedAt;
     },
     runtimeListeners,
-    start() {
-      dispatchRuntimeMessage({ type: "sunox-offscreen-start-v1" });
+    start(build = runtimeBuild) {
+      return dispatchRuntimeMessage({
+        type: "sunox-offscreen-start-v1",
+        runtimeBuild: build
+      });
     },
     submitted,
     timers,
@@ -6059,6 +6932,21 @@ function offscreenReadinessHarness({
     }
   };
 }
+
+test("offscreen refuses polling startup from a stale service-worker build", async () => {
+  const harness = offscreenReadinessHarness();
+  const response = harness.start("0.0.1");
+  await flushAsync();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(response)), {
+    accepted: false,
+    clientId: response.clientId,
+    runtimeBuild
+  });
+  assert.equal(harness.claims, 0);
+  assert.equal(harness.frames.length, 0);
+  assert.equal(harness.submitted.length, 0);
+});
 
 test("offscreen refuses malformed prepared routes before creating an iframe", async () => {
   for (const pageUrl of [
@@ -6189,9 +7077,9 @@ test("offscreen retries one silent pre-execution frame without waiting for load"
 
   assert.equal(harness.frames.length, 1);
   const firstNonce = harness.frameNonce(harness.frames[0]);
-  assert.equal(
-    harness.frameNetworkNonce(harness.frames[0]),
-    firstNonce
+  assert.deepEqual(
+    [...new URL(harness.frames[0].src).searchParams.keys()],
+    []
   );
   const warmupTimerId = harness.timerIdByDelay(3_000);
   assert.ok(
@@ -6204,9 +7092,9 @@ test("offscreen retries one silent pre-execution frame without waiting for load"
 
   assert.equal(harness.frames.length, 2);
   const secondNonce = harness.frameNonce(harness.frames[1]);
-  assert.equal(
-    harness.frameNetworkNonce(harness.frames[1]),
-    secondNonce
+  assert.deepEqual(
+    [...new URL(harness.frames[1].src).searchParams.keys()],
+    []
   );
   assert.notEqual(secondNonce, firstNonce);
   assert.equal(harness.frames.every((frame) => frame.removed), true);
@@ -6249,6 +7137,47 @@ test("offscreen retries one silent pre-execution frame without waiting for load"
   }]);
 });
 
+test("offscreen never replaces an unacknowledged terminal token with a generic error", async () => {
+  const harness = offscreenReadinessHarness({
+    onExecute({ dispatchRuntimeMessage, message }) {
+      queueMicrotask(() => {
+        dispatchRuntimeMessage({
+          type: "sunox-managed-frame-result-v2",
+          nonce: message.nonce,
+          requestId: message.requestId,
+          token: "terminal-token"
+        });
+      });
+      return { accepted: true };
+    },
+    onFrameAppended({
+      dispatchRuntimeMessage,
+      frameNonce
+    }) {
+      queueMicrotask(() => {
+        dispatchRuntimeMessage({
+          type: "sunox-managed-frame-ready-v2",
+          nonce: frameNonce
+        });
+      });
+    },
+    onSubmitResult() {
+      return { accepted: false };
+    }
+  });
+  harness.start();
+  await flushAsync();
+  await flushAsync();
+  await flushAsync();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.submitted)), [{
+    transportReceipt: "receipt-cold-retry",
+    requestId: "request-cold-retry",
+    token: "terminal-token",
+    error: null
+  }]);
+});
+
 test("offscreen bounds second preparation by the shared readiness deadline", async () => {
   const unresolvedRotation = new Promise(() => {});
   const harness = offscreenReadinessHarness({
@@ -6256,7 +7185,7 @@ test("offscreen bounds second preparation by the shared readiness deadline", asy
       return message.previousNonce === null
         ? {
             accepted: true,
-            pageUrl: "https://suno.com/home/advanced"
+            pageUrl: "https://suno.com/"
           }
         : unresolvedRotation;
     }
@@ -6718,47 +7647,29 @@ function managedPageGateActivated(
     || context.__sunoxBridgePageLoaded === true;
 }
 
-test("managed page URL parser rejects ambiguous or oversized URLs", () => {
+test("managed page URL parser requires only a valid local nonce fragment", () => {
   const nonce = "00000000-0000-4000-8000-000000000001";
   const hash = `#sunox-browser-bridge=${nonce}`;
-  const query = `__sunox_bridge=${nonce}`;
   const invalidUrls = [
-    ["missing network nonce", `https://suno.com/create${hash}`],
+    ["missing fragment nonce", "https://suno.com/create"],
     [
-      "mismatched nonce",
-      `https://suno.com/create?__sunox_bridge=${managedNonce}${hash}`
+      "malformed fragment nonce",
+      "https://suno.com/create#sunox-browser-bridge=not-a-uuid"
     ],
-    ["wrong origin", `https://www.suno.com/create?${query}${hash}`],
+    ["wrong origin", `https://www.suno.com/create${hash}`],
     [
       "credentials",
-      `https://user:password@suno.com/home/advanced?${query}${hash}`
+      `https://user:password@suno.com/home/advanced${hash}`
     ],
-    ["port", `https://suno.com:8443/home/advanced?${query}${hash}`],
-    [
-      "duplicate query",
-      `https://suno.com/home/advanced?${query}`
-      + "&__clerk_handshake=one&__clerk_handshake=two"
-      + hash
-    ],
-    [
-      "extra query",
-      `https://suno.com/home/advanced?${query}`
-      + "&__clerk_handshake=one&unexpected=two"
-      + hash
-    ],
-    [
-      "oversized handshake",
-      `https://suno.com/home/advanced?${query}`
-      + `&__clerk_handshake=${"x".repeat(65_537)}${hash}`
-    ],
+    ["port", `https://suno.com:8443/home/advanced${hash}`],
     [
       "oversized URL",
-      `https://suno.com/home/advanced?${query}`
-      + `&__clerk_handshake=${"x".repeat(131_073)}${hash}`
+      "https://suno.com/home/advanced?redirect="
+      + `${"x".repeat(131_073)}${hash}`
     ],
     [
       "wrong hash",
-      `https://suno.com/home/advanced?${query}`
+      "https://suno.com/home/advanced"
       + `#sunox-browser-bridge=${nonce}-unexpected`
     ]
   ];
@@ -6777,9 +7688,9 @@ test("managed page URL parser rejects ambiguous or oversized URLs", () => {
   }
 });
 
-test("managed page scripts activate only in a first-level extension frame", () => {
+test("managed page scripts activate only for the root carrier in a first-level extension frame", () => {
   const href = managedFrameHref(
-    "https://suno.com/create/v3",
+    "https://suno.com/",
     "00000000-0000-4000-8000-000000000001"
   );
   for (const source of [bridgeSource, pageSource]) {
@@ -6795,19 +7706,23 @@ test("managed page scripts activate only in a first-level extension frame", () =
   }
 });
 
-test("managed page scripts reject redirect parameters on the nonce-bound route", () => {
-  const href = managedFrameHref(
-    "https://suno.com/create/v3",
-    "00000000-0000-4000-8000-000000000001",
-    { clerkHandshake: "opaque-return" }
-  );
+test("managed page scripts reject dynamic paths and redirect parameters", () => {
+  const nonce = "00000000-0000-4000-8000-000000000001";
+  const hrefs = [
+    managedFrameHref("https://suno.com/create/v3", nonce),
+    managedFrameHref("https://suno.com/", nonce, {
+      clerkHandshake: "opaque-return"
+    })
+  ];
   for (const source of [bridgeSource, pageSource]) {
-    assert.equal(managedPageGateActivated(source, href), false);
+    for (const href of hrefs) {
+      assert.equal(managedPageGateActivated(source, href), false);
+    }
   }
 });
 
 test("manifest and scripts expose only the invisible offscreen-frame transport", () => {
-  assert.equal(runtimeBuild, "0.3.41");
+  assert.equal(runtimeBuild, "0.3.49");
   assert.equal(manifest.version, "__SUNOX_BRIDGE_RUNTIME_BUILD__");
   assert.equal(manifest.version_name, "__SUNOX_BRIDGE_RUNTIME_BUILD__");
   assert.equal(manifest.minimum_chrome_version, "128");
@@ -6827,6 +7742,24 @@ test("manifest and scripts expose only the invisible offscreen-frame transport",
     "http://127.0.0.1/*",
     "https://suno.com/*"
   ]);
+  assert.equal(
+    manifest.content_security_policy.extension_pages,
+    "default-src 'none'; script-src 'self'; object-src 'none'; "
+      + "frame-src https://suno.com; "
+      + "connect-src http://127.0.0.1:*; worker-src 'self';"
+  );
+  for (const forbiddenFrameSource of [
+    "www.suno.com",
+    "auth.suno.com",
+    "*.suno.com"
+  ]) {
+    assert.equal(
+      manifest.content_security_policy.extension_pages.includes(
+        forbiddenFrameSource
+      ),
+      false
+    );
+  }
   assert.ok(manifest.content_scripts.every((script) => script.all_frames === true));
   assert.ok(
     manifest.content_scripts.every(
@@ -6963,9 +7896,13 @@ test("manifest and scripts expose only the invisible offscreen-frame transport",
     "HCAPTCHA_SILENT_TIMEOUT_MS"
   );
   const idleTimeout = numericConstant(pageSource, "TURNSTILE_IDLE_TIMEOUT_MS");
-  const recoveryTimeout = numericConstant(
+  const sharedAttemptBudget = numericConstant(
     pageSource,
-    "TURNSTILE_RECOVERY_TIMEOUT_MS"
+    "TURNSTILE_SHARED_ATTEMPT_BUDGET_MS"
+  );
+  const noCallbackAttempts = numericConstant(
+    pageSource,
+    "TURNSTILE_NO_CALLBACK_ATTEMPTS"
   );
   const pageTimeout = numericConstant(bridgeSource, "challengePageTimeoutMs");
   const frameWarmupGrace = numericConstant(
@@ -6980,27 +7917,29 @@ test("manifest and scripts expose only the invisible offscreen-frame transport",
     offscreenSource,
     "managedFrameResultTimeoutMs"
   );
-  const initialRuleFetchTimeout = numericConstant(
-    serviceWorkerSource,
-    "INITIAL_RULE_FETCH_TIMEOUT_MS"
-  );
   const offscreenBusyMaxAge = numericConstant(
     serviceWorkerSource,
     "OFFSCREEN_BUSY_MAX_AGE_MS"
   );
   assert.ok(
-    pageTimeout > sdkReadyTimeout + idleTimeout + hcaptchaSilentTimeout
+    pageTimeout > sdkReadyTimeout + hcaptchaSilentTimeout
   );
-  assert.equal(recoveryTimeout, 30_000);
-  assert.ok(recoveryTimeout > idleTimeout);
-  assert.ok(pageTimeout > recoveryTimeout);
+  assert.equal(noCallbackAttempts, 2);
+  assert.equal(sharedAttemptBudget, idleTimeout * noCallbackAttempts);
+  assert.equal(
+    pageTimeout - sdkReadyTimeout - sharedAttemptBudget,
+    5_000
+  );
+  assert.ok(pageTimeout > sharedAttemptBudget);
   assert.ok(frameResultTimeout > pageTimeout);
   assert.ok(
     offscreenBusyMaxAge
-      > initialRuleFetchTimeout + frameReadyTimeout + frameResultTimeout
+      > managedFramePrepareTimeoutMs
+        + frameReadyTimeout
+        + frameResultTimeout
   );
   assert.equal(frameWarmupGrace, 3_000);
-  assert.equal(offscreenBusyMaxAge, 125_000);
+  assert.equal(offscreenBusyMaxAge, 127_000);
   assert.equal(pageSource.includes("25_000"), false);
   assert.ok(pageSource.includes("TURNSTILE_HIDDEN_STYLE"));
   assert.equal(pageSource.includes("TURNSTILE_INTERACTIVE_STYLE"), false);
@@ -7014,7 +7953,7 @@ test("manifest and scripts expose only the invisible offscreen-frame transport",
   assert.ok(pageSource.includes("window === window.top"));
   assert.ok(bridgeSource.includes("window === window.top"));
   assert.equal(offscreenSource.includes("contentWindow.postMessage"), false);
-  assert.ok(offscreenSource.includes("managedFrame.credentialless = true"));
+  assert.equal(offscreenSource.includes("managedFrame.credentialless"), false);
   assert.equal(offscreenSource.includes("chrome.windows"), false);
   assert.equal(offscreenSource.includes("chrome.tabs"), false);
   assert.equal(
