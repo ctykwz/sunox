@@ -11,6 +11,19 @@ backward-compatible features, upstream protocol adaptations, and fixes.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-08-04
+
+### Fixed
+
+- Preserve a sanitized Browser Bridge failure category when Chrome rejects the hidden Suno frame
+  before a response is available. Client and administrator policy blocks now fail immediately with
+  an actionable classification instead of the misleading `frame port was rejected` message.
+- Retry one fresh hidden frame, within the existing shared readiness deadline, only for classified
+  connection, name-resolution, timeout, and protocol failures. A bounded diagnostic grace period
+  makes the result independent of Chrome's DOM-error and network-error event order. Unknown errors
+  and policy blocks remain fail-closed, raw Chrome error strings never cross the Bridge boundary,
+  and the flow still creates no tab, window, or separate browser process.
+
 ## [0.2.1] - 2026-07-30
 
 ### Fixed

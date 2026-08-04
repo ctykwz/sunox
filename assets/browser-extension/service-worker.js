@@ -656,7 +656,39 @@ function captureManagedNetworkError(details) {
     invalidateManagedNetwork(identityRejection);
     return;
   }
-  invalidateManagedNetwork("managed_network_error");
+  invalidateManagedNetwork(managedNetworkErrorReason(details.error));
+}
+
+function managedNetworkErrorReason(error) {
+  switch (error) {
+    case "net::ERR_BLOCKED_BY_CLIENT":
+      return "managed_network_blocked_by_client";
+    case "net::ERR_BLOCKED_BY_ADMINISTRATOR":
+    case "net::ERR_ACCESS_DENIED":
+      return "managed_network_blocked_by_policy";
+    case "net::ERR_NAME_NOT_RESOLVED":
+      return "managed_network_name_resolution";
+    case "net::ERR_CONNECTION_TIMED_OUT":
+    case "net::ERR_TIMED_OUT":
+      return "managed_network_timeout";
+    case "net::ERR_ADDRESS_UNREACHABLE":
+    case "net::ERR_CONNECTION_ABORTED":
+    case "net::ERR_CONNECTION_CLOSED":
+    case "net::ERR_CONNECTION_REFUSED":
+    case "net::ERR_CONNECTION_RESET":
+    case "net::ERR_INTERNET_DISCONNECTED":
+    case "net::ERR_NETWORK_CHANGED":
+    case "net::ERR_TUNNEL_CONNECTION_FAILED":
+      return "managed_network_connection";
+    case "net::ERR_EMPTY_RESPONSE":
+    case "net::ERR_HTTP2_PROTOCOL_ERROR":
+    case "net::ERR_QUIC_PROTOCOL_ERROR":
+      return "managed_network_protocol";
+    default:
+      // Do not forward Chrome's raw error string across the bridge. New or
+      // policy-specific values remain fail-closed until explicitly reviewed.
+      return "managed_network_error";
+  }
 }
 
 async function installFreshFrameRules(nonce, provider) {
