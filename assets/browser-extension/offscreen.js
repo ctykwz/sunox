@@ -27,6 +27,7 @@
   const managedFrameWarmupGraceMs = 3_000;
   const managedFramePrepareTimeoutMs = 9_000;
   const managedFrameReadyTimeoutMs = 45_000;
+  const managedFrameNetworkDiagnosticGraceMs = 1_000;
   const managedFrameReleaseTimeoutMs = 500;
   const managedFrameResultTimeoutMs = 65_000;
   const managedFrameReadyAttempts = 2;
@@ -34,6 +35,12 @@
   const managedNoncePattern =
     /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
   const managedFrameResultAckType = "sunox-managed-frame-result-ack-v1";
+  const retryableManagedNetworkReasons = new Set([
+    "managed_network_connection",
+    "managed_network_name_resolution",
+    "managed_network_protocol",
+    "managed_network_timeout"
+  ]);
   const pollWorkerStaleMs = 5_000;
   const maxTokenLength = 16_384;
   let busy = false;
@@ -220,6 +227,8 @@
     let frameErrorEvents = 0;
     let frameLoadEvents = 0;
     let executeRequested = false;
+    let diagnosticGraceTimer = null;
+    let domErrorPending = false;
     let lastStage = "none";
     let readinessGraceTimer = null;
     let retirementPending = false;
@@ -244,10 +253,19 @@
     return await new Promise((resolve) => {
       const onFrameError = () => {
         frameErrorEvents += 1;
-        finish({
-          token: null,
-          error: `Managed Suno frame failed to load (attempt=${attempt}/${managedFrameReadyAttempts}, stage=${lastStage})`
-        });
+        if (settled || domErrorPending) return;
+        domErrorPending = true;
+        clearTimeout(timeout);
+        clearTimeout(readinessGraceTimer);
+        diagnosticGraceTimer = setTimeout(() => {
+          finish({
+            token: null,
+            error: `Managed Suno frame failed to load without a classified network diagnostic (attempt=${attempt}/${managedFrameReadyAttempts}, stage=${lastStage})`
+          });
+        }, Math.min(
+          managedFrameNetworkDiagnosticGraceMs,
+          Math.max(0, readinessDeadline - Date.now())
+        ));
       };
       const onFrameLoad = () => {
         frameLoadEvents += 1;
@@ -273,6 +291,7 @@
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
+        clearTimeout(diagnosticGraceTimer);
         clearTimeout(readinessGraceTimer);
         clearTimeout(retirementTimeout);
         chrome.runtime.onMessage.removeListener(onFrameMessage);
@@ -291,6 +310,7 @@
         ) return;
         retirementPending = true;
         clearTimeout(timeout);
+        clearTimeout(diagnosticGraceTimer);
         clearTimeout(readinessGraceTimer);
         const retirementBudgetMs = Math.min(
           1_000,
@@ -329,6 +349,12 @@
 
       function onFrameMessage(message, sender, sendResponse) {
         if (sender.id !== chrome.runtime.id || sender.tab) return false;
+        const isManagedNetworkDiagnostic =
+          message?.type === "sunox-managed-frame-diagnostic-v1"
+          && message.nonce === nonce
+          && typeof message.reason === "string"
+          && /^[a-z_]{1,64}$/.test(message.reason);
+        if (domErrorPending && !isManagedNetworkDiagnostic) return false;
         if (
           message?.type === "sunox-managed-frame-stage-v1"
           && message.nonce === nonce
@@ -363,15 +389,19 @@
         }
         if (retirementPending) return false;
         if (
-          message?.type === "sunox-managed-frame-diagnostic-v1"
-          && message.nonce === nonce
-          && typeof message.reason === "string"
-          && /^[a-z_]{1,64}$/.test(message.reason)
+          isManagedNetworkDiagnostic
         ) {
-          finish({
-            token: null,
-            error: `Managed Suno frame port was rejected (${message.reason})`
-          });
+          const error =
+            `Managed Suno frame network request failed (${message.reason})`;
+          if (
+            attempt === 1
+            && !executeRequested
+            && retryableManagedNetworkReasons.has(message.reason)
+          ) {
+            finishForRetry(error);
+          } else {
+            finish({ token: null, error });
+          }
           return false;
         }
         if (

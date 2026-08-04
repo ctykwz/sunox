@@ -1229,7 +1229,7 @@ function popupServiceWorkerHarness({
     listeners.beforeRequest?.(common);
     listeners.requestError?.({
       ...common,
-      error: "net::ERR_FAILED"
+      error: details.error ?? "net::ERR_FAILED"
     });
   };
 
@@ -2353,11 +2353,23 @@ test("managed network verification rejects authorization, cache hits, and side-e
     },
     reason: "managed_response_policy_invalid"
   }, {
-    name: "network error",
+    name: "unknown network error",
     observe(harness) {
-      harness.observeManagedError();
+      harness.observeManagedError({ error: "net::ERR_UNRECOGNIZED" });
     },
     reason: "managed_network_error"
+  }, {
+    name: "client blocked network error",
+    observe(harness) {
+      harness.observeManagedError({ error: "net::ERR_BLOCKED_BY_CLIENT" });
+    },
+    reason: "managed_network_blocked_by_client"
+  }, {
+    name: "connection network error",
+    observe(harness) {
+      harness.observeManagedError({ error: "net::ERR_CONNECTION_RESET" });
+    },
+    reason: "managed_network_connection"
   }];
 
   for (const candidate of cases) {
@@ -7137,6 +7149,62 @@ test("offscreen retries one silent pre-execution frame without waiting for load"
   }]);
 });
 
+test("offscreen retries one classified transient frame network failure", async () => {
+  const harness = offscreenReadinessHarness({
+    onExecute({ dispatchRuntimeMessage, message }) {
+      queueMicrotask(() => {
+        dispatchRuntimeMessage({
+          type: "sunox-managed-frame-result-v2",
+          nonce: message.nonce,
+          requestId: message.requestId,
+          token: "network-retry-token"
+        });
+      });
+      return { accepted: true };
+    },
+    onFrameAppended({
+      dispatchRuntimeMessage,
+      frameNonce,
+      index
+    }) {
+      queueMicrotask(() => {
+        dispatchRuntimeMessage({
+          type: index === 0
+            ? "sunox-managed-frame-diagnostic-v1"
+            : "sunox-managed-frame-ready-v2",
+          nonce: frameNonce,
+          ...(index === 0
+            ? { reason: "managed_network_connection" }
+            : {})
+        });
+      });
+    }
+  });
+  harness.start();
+  await flushAsync();
+  await flushAsync();
+  await flushAsync();
+
+  assert.equal(harness.frames.length, 2);
+  assert.equal(harness.executeMessages.length, 1);
+  assert.deepEqual(
+    harness.environmentMessages.map((message) => message.type),
+    [
+      "sunox-frame-environment-prepare-v1",
+      "sunox-frame-environment-retire-v1",
+      "sunox-frame-environment-prepare-v1",
+      "sunox-frame-environment-release-v1",
+      "sunox-frame-environment-release-v1"
+    ]
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.submitted)), [{
+    transportReceipt: "receipt-cold-retry",
+    requestId: "request-cold-retry",
+    token: "network-retry-token",
+    error: null
+  }]);
+});
+
 test("offscreen never replaces an unacknowledged terminal token with a generic error", async () => {
   const harness = offscreenReadinessHarness({
     onExecute({ dispatchRuntimeMessage, message }) {
@@ -7232,7 +7300,7 @@ test("offscreen bounds second preparation by the shared readiness deadline", asy
   );
 });
 
-test("iframe DOM errors are terminal in either network-error ordering", async () => {
+test("iframe DOM and classified network errors are order-independent", async () => {
   for (const order of ["dom-first", "network-first"]) {
     const harness = offscreenReadinessHarness({
       onFrameAppended({
@@ -7246,7 +7314,7 @@ test("iframe DOM errors are terminal in either network-error ordering", async ()
           const reportNetworkError = () => dispatchRuntimeMessage({
             type: "sunox-managed-frame-diagnostic-v1",
             nonce: frameNonce,
-            reason: "managed_network_error"
+            reason: "managed_network_blocked_by_client"
           });
           if (order === "dom-first") {
             fireDomError();
@@ -7277,12 +7345,36 @@ test("iframe DOM errors are terminal in either network-error ordering", async ()
     assert.equal(harness.submitted[0].token, null, order);
     assert.match(
       harness.submitted[0].error,
-      order === "dom-first"
-        ? /Managed Suno frame failed to load \(attempt=1\/2/
-        : /Managed Suno frame port was rejected \(managed_network_error\)/,
+      /Managed Suno frame network request failed \(managed_network_blocked_by_client\)/,
       order
     );
   }
+});
+
+test("iframe DOM error without a network diagnostic fails after bounded grace", async () => {
+  const harness = offscreenReadinessHarness({
+    onFrameAppended({ fireFrameEvent, frame }) {
+      queueMicrotask(() => fireFrameEvent(frame, "error"));
+    }
+  });
+  harness.start();
+  await flushAsync();
+
+  assert.equal(harness.submitted.length, 0);
+  harness.runTimer(harness.timerIdByDelay(1_000));
+  await flushAsync();
+
+  assert.equal(harness.submitted.length, 1);
+  assert.match(
+    harness.submitted[0].error,
+    /failed to load without a classified network diagnostic/
+  );
+  assert.equal(
+    harness.environmentMessages.some(
+      (message) => message.type === "sunox-frame-environment-retire-v1"
+    ),
+    false
+  );
 });
 
 test("offscreen waits for retire ACK before removing, retrying, or executing", async () => {
@@ -7418,6 +7510,11 @@ test("a pending release never races an older nonce release", async () => {
 
   assert.equal(harness.frames.length, 2);
   const secondNonce = harness.frameNonce(harness.frames[1]);
+  assert.equal(harness.submitted.length, 0);
+  harness.runTimer(harness.timerIdByDelay(1_000));
+  await flushAsync();
+  await flushAsync();
+
   assert.deepEqual(
     harness.environmentMessages.map((message) => [
       message.type,
@@ -7722,7 +7819,7 @@ test("managed page scripts reject dynamic paths and redirect parameters", () => 
 });
 
 test("manifest and scripts expose only the invisible offscreen-frame transport", () => {
-  assert.equal(runtimeBuild, "0.3.49");
+  assert.equal(runtimeBuild, "0.3.51");
   assert.equal(manifest.version, "__SUNOX_BRIDGE_RUNTIME_BUILD__");
   assert.equal(manifest.version_name, "__SUNOX_BRIDGE_RUNTIME_BUILD__");
   assert.equal(manifest.minimum_chrome_version, "128");

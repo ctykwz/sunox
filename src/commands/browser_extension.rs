@@ -2970,7 +2970,7 @@ mod tests {
 
     #[test]
     fn extension_assets_share_the_bridge_contract() {
-        assert_eq!(super::BROWSER_BRIDGE_RUNTIME_BUILD, "0.3.49");
+        assert_eq!(super::BROWSER_BRIDGE_RUNTIME_BUILD, "0.3.51");
         assert!(MANIFEST.contains("https://suno.com/*"));
         assert!(MANIFEST.contains("http://127.0.0.1/*"));
         assert!(MANIFEST.contains("\"version\": \"__SUNOX_BRIDGE_RUNTIME_BUILD__\""));
