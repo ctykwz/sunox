@@ -38,6 +38,7 @@ pub async fn inspire(args: InspireArgs, ctx: &AppContext) -> Result<(), CliError
                 weirdness: args.weirdness,
                 audio_influence: args.audio_influence,
                 challenge_token: None,
+                model: ctx.config.default_model.as_str(),
             })
             .await?;
         Ok((client, req))

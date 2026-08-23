@@ -17,6 +17,19 @@ the actual `/create` pathname, distinguishes uploaded-audio continuation as
 account-gated `aug_creativity` in `metadata.control_sliders`. Sunox implements
 the applicable `audio_weight` control and leaves the gated control unexposed.
 
+A deeper August 23 audit also compared account model capabilities, exact
+condition combinations, playlist v2 bodies, flat playlist responses, and audio
+upload guards. Extend and Inspiration now resolve the configured/account model
+instead of hard-coding v5.5; Cover/Extend/upload-Extend/Inspiration validate
+task plus condition compatibility before submission. Uploaded playlist covers
+send only `metadata.cover_image_s3_id`, flat cover fields no longer duplicate
+normalized JSON keys, and audio uploads reject formats outside
+`mp3,m4a,wav,flac,ogg,aac` or sizes above 524,288,000 bytes before presign.
+Authenticated Persona APIs use a Persona-scoped HTTP/1 client because current
+live list requests reset on the normal transport; mine/loved/followed lists
+decoded after that workaround, while detail and paginated clips remained
+transport-inaccessible and were not re-routed without evidence.
+
 ## Capture Scope (June 30, 2026)
 
 Captured Chrome NetLog URL/method evidence from:

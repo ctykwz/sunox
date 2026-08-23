@@ -11,6 +11,9 @@ use crate::core::{
 };
 use serde::Serialize;
 
+const SUPPORTED_AUDIO_EXTENSIONS: &[&str] = &["mp3", "m4a", "wav", "flac", "ogg", "aac"];
+const MAX_AUDIO_UPLOAD_BYTES: u64 = 524_288_000;
+
 #[derive(Debug, Serialize)]
 pub struct UploadResult {
     pub upload_id: String,
@@ -44,6 +47,12 @@ pub async fn run(
         return Err(CliError::Config(format!(
             "upload path is not a regular file: {}",
             input.file.display()
+        )));
+    }
+    if metadata.len() > MAX_AUDIO_UPLOAD_BYTES {
+        return Err(CliError::Config(format!(
+            "upload file is {} bytes, exceeding the current Suno Web limit of {MAX_AUDIO_UPLOAD_BYTES} bytes",
+            metadata.len()
         )));
     }
 
@@ -341,6 +350,12 @@ pub fn audio_extension(path: &Path) -> Result<String, CliError> {
         .map(|extension| extension.trim_start_matches('.').to_ascii_lowercase())
         .filter(|extension| !extension.is_empty())
         .ok_or_else(|| CliError::Config("upload file must have an audio extension".into()))?;
+    if !SUPPORTED_AUDIO_EXTENSIONS.contains(&extension.as_str()) {
+        return Err(CliError::Config(format!(
+            "unsupported audio extension `{extension}`; current Suno Web uploads accept {}",
+            SUPPORTED_AUDIO_EXTENSIONS.join(", ")
+        )));
+    }
     Ok(extension)
 }
 
@@ -416,8 +431,9 @@ mod tests {
     use crate::core::CliError;
 
     use super::{
-        ExpectedClipMetadata, UploadWorkflowInput, audio_extension, initialized_clip_id, run,
-        upload_filename, upload_metadata_stage_error, upload_stage_error, wait_until_complete,
+        ExpectedClipMetadata, MAX_AUDIO_UPLOAD_BYTES, UploadWorkflowInput, audio_extension,
+        initialized_clip_id, run, upload_filename, upload_metadata_stage_error, upload_stage_error,
+        wait_until_complete,
     };
 
     #[test]
@@ -425,6 +441,16 @@ mod tests {
         assert_eq!(
             audio_extension(Path::new("/tmp/Demo.MP3")).expect("extension"),
             "mp3"
+        );
+    }
+
+    #[test]
+    fn audio_extension_rejects_formats_the_current_web_uploader_does_not_offer() {
+        let error = audio_extension(Path::new("/tmp/Demo.aiff"))
+            .expect_err("unsupported extensions must be rejected before upload creation");
+
+        assert!(
+            matches!(error, CliError::Config(message) if message.contains("aiff") && message.contains("mp3"))
         );
     }
 
@@ -540,6 +566,43 @@ mod tests {
 
         assert!(
             matches!(error, CliError::Config(message) if message.contains("poll timeout") && message.contains("greater than 0"))
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_workflow_rejects_oversized_file_before_remote_creation() {
+        let dir = tempfile::tempdir().expect("upload tempdir");
+        let path = dir.path().join("too-large.wav");
+        std::fs::File::create(&path)
+            .expect("create sparse audio fixture")
+            .set_len(MAX_AUDIO_UPLOAD_BYTES + 1)
+            .expect("size sparse audio fixture");
+        let client = SunoClient::new_for_tests(
+            "http://127.0.0.1:9".into(),
+            AuthState {
+                jwt: Some("test-jwt".into()),
+                ..AuthState::default()
+            },
+        )
+        .expect("test client");
+
+        let error = run(
+            &client,
+            UploadWorkflowInput {
+                file: &path,
+                upload_type: "file_upload",
+                is_stem_mix: false,
+                title: None,
+                lyrics: None,
+                timeout: Duration::from_secs(1),
+                poll_interval: Duration::from_secs(1),
+            },
+        )
+        .await
+        .expect_err("oversized files must be rejected before creating an upload");
+
+        assert!(
+            matches!(error, CliError::Config(message) if message.contains("524288001") && message.contains("524288000"))
         );
     }
 

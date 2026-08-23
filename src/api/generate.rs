@@ -57,7 +57,9 @@ impl SunoClient {
         req: &mut GenerateRequest,
         required_features: &[&str],
     ) -> Result<Option<MaxLengths>, CliError> {
+        let web_requirement = generation_web_requirement(req.task.as_deref());
         let needs_model_features = req.mv == "auto"
+            || web_requirement.is_some()
             || req.metadata.control_sliders.is_some()
             || !required_features.is_empty();
         if !req.metadata.user_tier.trim().is_empty() && !needs_model_features {
@@ -67,11 +69,17 @@ impl SunoClient {
         let info = match self.billing_info().await {
             Ok(info) => info,
             Err(error) if is_transient_billing_transport(&error) => {
-                if req.task.as_deref() == Some("cover") {
-                    return Err(CliError::Config(
-                        "could not verify whether the selected base model is available for the current Suno Cover protocol; refusing to submit a Cover request without validating and mapping its model"
-                            .into(),
-                    ));
+                if let Some(requirement) = web_requirement {
+                    if requirement.task == "cover" {
+                        return Err(CliError::Config(
+                            "could not verify whether the selected base model is available for the current Suno Cover protocol; refusing to submit a Cover request without validating and mapping its model"
+                                .into(),
+                        ));
+                    }
+                    return Err(CliError::Config(format!(
+                        "could not verify whether the selected model supports the current Suno Web {} protocol; refusing to submit without account capability validation",
+                        requirement.label
+                    )));
                 }
                 if req.metadata.control_sliders.is_some() || !required_features.is_empty() {
                     return Err(CliError::Config(
@@ -105,7 +113,15 @@ impl SunoClient {
         } else {
             &req.mv
         };
-        let model = select_generation_model(&info.models, requested_model)?;
+        let model = select_generation_model(&info.models, requested_model, web_requirement)?;
+        if let Some(requirement) = web_requirement
+            && !model_supports_requirement(model, requirement)
+        {
+            return Err(CliError::Config(format!(
+                "Suno model `{}` does not support {} in the current Web model capabilities and condition combinations",
+                model.external_key, requirement.label
+            )));
+        }
         req.mv = if req.task.as_deref() == Some("cover") {
             cover_reference_model(&model.external_key).to_string()
         } else {
@@ -266,20 +282,67 @@ fn cover_reference_model(model: &str) -> &str {
     }
 }
 
+#[derive(Clone, Copy)]
+struct WebModelRequirement {
+    task: &'static str,
+    conditions: &'static [&'static str],
+    label: &'static str,
+}
+
+fn generation_web_requirement(task: Option<&str>) -> Option<WebModelRequirement> {
+    match task {
+        Some("cover") => Some(WebModelRequirement {
+            task: "cover",
+            conditions: &["cover"],
+            label: "Cover",
+        }),
+        Some("extend") => Some(WebModelRequirement {
+            task: "extend",
+            conditions: &["extend"],
+            label: "Extend",
+        }),
+        Some("upload_extend") => Some(WebModelRequirement {
+            task: "upload_extend",
+            conditions: &["extend"],
+            label: "uploaded-audio Extend",
+        }),
+        Some("playlist_condition") => Some(WebModelRequirement {
+            task: "playlist_condition",
+            conditions: &["playlist"],
+            label: "Inspiration",
+        }),
+        _ => None,
+    }
+}
+
+fn model_supports_requirement(model: &Model, requirement: WebModelRequirement) -> bool {
+    model.supports_web_task(requirement.task)
+        && model.supports_web_conditions(requirement.conditions)
+}
+
 fn select_generation_model<'a>(
     models: &'a [Model],
     requested: &str,
+    requirement: Option<WebModelRequirement>,
 ) -> Result<&'a Model, CliError> {
+    let eligible = |model: &&Model| {
+        model.can_use
+            && requirement
+                .map(|required| model_supports_requirement(model, required))
+                .unwrap_or(true)
+    };
     let selected = if requested == "auto" {
         models
             .iter()
-            .find(|model| model.can_use && model.is_default_model)
+            .filter(eligible)
+            .find(|model| model.is_default_model)
             .or_else(|| {
                 models
                     .iter()
-                    .find(|model| model.can_use && model.is_default_free_model)
+                    .filter(eligible)
+                    .find(|model| model.is_default_free_model)
             })
-            .or_else(|| models.iter().find(|model| model.can_use))
+            .or_else(|| models.iter().find(eligible))
     } else {
         models
             .iter()
@@ -345,8 +408,8 @@ fn generation_challenge_error(challenge: &super::challenge::GenerationChallenge)
 #[cfg(test)]
 mod tests {
     use super::{
-        cover_base_model, cover_reference_model, select_generation_model,
-        validate_generation_lengths,
+        cover_base_model, cover_reference_model, generation_web_requirement,
+        select_generation_model, validate_generation_lengths,
     };
     use crate::api::types::{GenerateRequest, MaxLengths, Model};
 
@@ -359,6 +422,7 @@ mod tests {
             is_default_free_model: false,
             description: "fixture".into(),
             capabilities: Vec::new(),
+            allowed_condition_combinations: Vec::new(),
             features: Vec::new(),
             badges: Vec::new(),
             max_lengths,
@@ -370,7 +434,7 @@ mod tests {
     fn account_model_selection_rejects_unusable_explicit_model() {
         let models = [model(false, true, MaxLengths::default())];
 
-        let error = select_generation_model(&models, "chirp-auk-turbo")
+        let error = select_generation_model(&models, "chirp-auk-turbo", None)
             .expect_err("unusable model must be rejected");
 
         assert!(error.to_string().contains("cannot use"));
@@ -384,7 +448,7 @@ mod tests {
         free_default.is_default_free_model = true;
         let models = [first_usable, free_default];
 
-        let selected = select_generation_model(&models, "auto").expect("free default");
+        let selected = select_generation_model(&models, "auto", None).expect("free default");
 
         assert_eq!(selected.external_key, "chirp-fenix");
     }
@@ -396,7 +460,28 @@ mod tests {
         let web_fallback = model(true, false, MaxLengths::default());
         let models = [first_usable, web_fallback];
 
-        let selected = select_generation_model(&models, "auto").expect("first usable");
+        let selected = select_generation_model(&models, "auto", None).expect("first usable");
+
+        assert_eq!(selected.external_key, "chirp-fenix");
+    }
+
+    #[test]
+    fn auto_model_selection_skips_a_default_that_cannot_run_the_requested_web_flow() {
+        let mut incompatible_default = model(true, true, MaxLengths::default());
+        incompatible_default.capabilities = vec!["generate".into()];
+        incompatible_default.allowed_condition_combinations = vec![vec![]];
+        let mut compatible_fallback = model(true, false, MaxLengths::default());
+        compatible_fallback.external_key = "chirp-fenix".into();
+        compatible_fallback.capabilities = vec!["upload_extend".into()];
+        compatible_fallback.allowed_condition_combinations = vec![vec!["extend".into()]];
+        let models = [incompatible_default, compatible_fallback];
+
+        let selected = select_generation_model(
+            &models,
+            "auto",
+            generation_web_requirement(Some("upload_extend")),
+        )
+        .expect("compatible upload-extend fallback");
 
         assert_eq!(selected.external_key, "chirp-fenix");
     }

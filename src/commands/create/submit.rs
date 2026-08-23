@@ -298,6 +298,7 @@ pub async fn extend(args: ExtendArgs, ctx: &AppContext) -> Result<(), CliError> 
                 title: args.title.as_deref(),
                 instrumental,
                 challenge_token: None,
+                model: ctx.config.default_model.as_str(),
             })
             .await?;
         client.prepare_generation_request(&mut req).await?;

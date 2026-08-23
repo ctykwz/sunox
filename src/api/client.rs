@@ -10,6 +10,7 @@ pub(crate) const BASE_URL: &str = "https://studio-api-prod.suno.com";
 
 pub struct SunoClient {
     pub(crate) client: Client,
+    persona_client: Client,
     base_url: String,
     /// Auth state behind a sync mutex so `&self` methods can transparently
     /// refresh the JWT mid-request when Suno returns
@@ -29,6 +30,7 @@ impl SunoClient {
 
         Ok(Self {
             client,
+            persona_client: http::browser_http1_client()?,
             base_url: BASE_URL.to_string(),
             auth: Mutex::new(auth),
             device_override: Mutex::new(None),
@@ -41,6 +43,7 @@ impl SunoClient {
     pub(crate) fn new_for_auth_validation(auth: AuthState) -> Result<Self, CliError> {
         Ok(Self {
             client: http::browser_client()?,
+            persona_client: http::browser_http1_client()?,
             base_url: BASE_URL.to_string(),
             auth: Mutex::new(auth),
             device_override: Mutex::new(None),
@@ -51,6 +54,7 @@ impl SunoClient {
     pub(crate) fn new_for_tests(base_url: String, auth: AuthState) -> Result<Self, CliError> {
         Ok(Self {
             client: http::browser_client()?,
+            persona_client: http::browser_http1_client()?,
             base_url: base_url.trim_end_matches('/').to_string(),
             auth: Mutex::new(auth),
             device_override: Mutex::new(None),
@@ -85,11 +89,25 @@ impl SunoClient {
         self.client.patch(self.url(path)).headers(self.headers())
     }
 
-    pub(crate) fn put(&self, path: &str) -> reqwest::RequestBuilder {
-        self.client.put(self.url(path)).headers(self.headers())
-    }
-
     pub(crate) fn delete(&self, path: &str) -> reqwest::RequestBuilder {
         self.client.delete(self.url(path)).headers(self.headers())
+    }
+
+    pub(crate) fn persona_get(&self, path: &str) -> reqwest::RequestBuilder {
+        self.persona_client
+            .get(self.url(path))
+            .headers(self.headers())
+    }
+
+    pub(crate) fn persona_post(&self, path: &str) -> reqwest::RequestBuilder {
+        self.persona_client
+            .post(self.url(path))
+            .headers(self.headers())
+    }
+
+    pub(crate) fn persona_put(&self, path: &str) -> reqwest::RequestBuilder {
+        self.persona_client
+            .put(self.url(path))
+            .headers(self.headers())
     }
 }

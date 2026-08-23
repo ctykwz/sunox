@@ -51,7 +51,7 @@ fn billing_info_response(plan_id: &str) -> String {
                 "can_use": true,
                 "is_default_model": true,
                 "description": "default test model",
-                "capabilities": ["create_control_sliders"],
+                "capabilities": ["all"],
                 "badges": ["custom"],
                 "max_lengths": {}
             },
@@ -1585,6 +1585,7 @@ async fn inspiration_posts_live_captured_playlist_condition_contract() {
             weirdness: 40.0,
             audio_influence: Some(60.0),
             challenge_token: None,
+            model: "auto",
         })
         .await
         .expect("inspiration generation");
@@ -1640,6 +1641,8 @@ async fn inspiration_revalidates_upsampled_tags_against_the_resolved_model_limit
             "can_use": true,
             "is_default_model": true,
             "description": "default test model",
+            "capabilities": ["playlist_condition"],
+            "allowed_condition_combinations": [["playlist"]],
             "badges": ["custom"],
             "max_lengths": {"tags": 4}
         }]),
@@ -1661,6 +1664,7 @@ async fn inspiration_revalidates_upsampled_tags_against_the_resolved_model_limit
             weirdness: 40.0,
             audio_influence: None,
             challenge_token: None,
+            model: "auto",
         })
         .await
         .expect_err("upsampled tags must still respect the selected model limit");
@@ -2063,6 +2067,39 @@ async fn cover_rejects_an_unavailable_legacy_base_model_before_tau_mapping() {
         .expect_err("unavailable base model must not be hidden by tau mapping");
 
     assert!(matches!(error, CliError::Config(message) if message.contains("cannot use")));
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/api/billing/info/");
+}
+
+#[tokio::test]
+async fn cover_rejects_a_usable_model_that_no_longer_supports_cover() {
+    let billing = billing_info_with_models(
+        "tier-pro",
+        serde_json::json!([{
+            "name": "v3",
+            "external_key": "chirp-v3-0",
+            "can_use": true,
+            "is_default_model": false,
+            "description": "generation and extend only",
+            "capabilities": ["generate", "extend"],
+            "allowed_condition_combinations": [["extend"]],
+            "max_lengths": {}
+        }]),
+    );
+    let server = MockServer::json(&billing).await;
+    let client = server.client();
+    let mut request = GenerateRequest::new("chirp-v3-0", "simple");
+    request.task = Some("cover".into());
+
+    let error = client
+        .prepare_generation_request(&mut request)
+        .await
+        .expect_err("current Web-incompatible Cover model must be rejected");
+
+    assert!(
+        matches!(error, CliError::Config(message) if message.contains("does not support Cover"))
+    );
     let requests = server.captured_all().await;
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].path, "/api/billing/info/");
@@ -2782,6 +2819,7 @@ async fn extend_fetches_source_clip_and_posts_string_title_contract() {
             title: None,
             instrumental: None,
             challenge_token: None,
+            model: "auto",
         })
         .await
         .expect("extend");
@@ -2840,6 +2878,7 @@ async fn extend_uses_upload_extend_task_for_uploaded_audio() {
             title: None,
             instrumental: None,
             challenge_token: None,
+            model: "auto",
         })
         .await
         .expect("extend uploaded audio");
@@ -2875,6 +2914,7 @@ async fn extend_propagates_rate_limit_from_metadata_enrichment_without_submittin
             title: None,
             instrumental: None,
             challenge_token: None,
+            model: "auto",
         })
         .await
         .expect_err("metadata enrichment rate limit must stop extend");
@@ -2909,6 +2949,7 @@ async fn extend_metadata_fallback_does_not_merge_same_title_different_clip() {
             title: None,
             instrumental: None,
             challenge_token: None,
+            model: "auto",
         })
         .await
         .expect("extend");
@@ -3311,9 +3352,7 @@ async fn set_playlist_uploaded_cover_patches_v2_metadata_contract() {
         serde_json::from_str::<serde_json::Value>(&requests[0].body).expect("cover json"),
         serde_json::json!({
             "metadata": {
-                "cover_url": "https://cdn2.suno.ai/image_upload-1.jpeg",
-                "cover_image_s3_id": "image_upload-1",
-                "cover_is_user_set": true
+                "cover_image_s3_id": "image_upload-1"
             }
         })
     );

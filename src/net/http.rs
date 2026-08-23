@@ -28,6 +28,20 @@ pub fn browser_client() -> Result<Client, CliError> {
     .map_err(|e| CliError::Config(format!("HTTP client: {e}")))
 }
 
+/// Persona endpoints reset in the currently observed production transport
+/// when reqwest negotiates HTTP/2. Keep a dedicated HTTP/1 pool for that API
+/// family without downgrading unrelated APIs.
+pub fn browser_http1_client() -> Result<Client, CliError> {
+    crate::net::proxy::apply_to_client_builder(
+        Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .http1_only()
+            .user_agent(BROWSER_USER_AGENT),
+    )?
+    .build()
+    .map_err(|e| CliError::Config(format!("HTTP/1 client: {e}")))
+}
+
 /// CDN media can legitimately take longer than an API response. Keep the
 /// connection bounded but do not impose Reqwest's total-body deadline.
 pub fn download_client() -> Result<Client, CliError> {

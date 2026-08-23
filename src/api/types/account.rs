@@ -51,6 +51,8 @@ pub struct Model {
     #[serde(default)]
     pub capabilities: Vec<String>,
     #[serde(default)]
+    pub allowed_condition_combinations: Vec<Vec<String>>,
+    #[serde(default)]
     pub features: Vec<String>,
     #[serde(default)]
     pub badges: Vec<String>,
@@ -67,6 +69,107 @@ impl Model {
         self.badges.iter().any(|badge| badge == "custom")
             || self.features.iter().any(|candidate| candidate == feature)
     }
+
+    /// Match the current Web model helpers for task capabilities and the
+    /// exact active-condition combinations returned by billing info.
+    pub fn supports_web_task(&self, task: &str) -> bool {
+        self.capabilities
+            .iter()
+            .any(|capability| capability == "all")
+            || self
+                .capabilities
+                .iter()
+                .any(|capability| capability == task)
+    }
+
+    pub fn supports_web_conditions(&self, conditions: &[&str]) -> bool {
+        if self.allowed_condition_combinations.is_empty() {
+            return supports_legacy_web_conditions(&self.external_key, conditions);
+        }
+        self.allowed_condition_combinations.iter().any(|allowed| {
+            allowed.len() == conditions.len()
+                && conditions
+                    .iter()
+                    .all(|condition| allowed.iter().any(|item| item == condition))
+        })
+    }
+}
+
+fn supports_legacy_web_conditions(model: &str, conditions: &[&str]) -> bool {
+    const BLUEJAY_OR_LATER: &[&str] = &[
+        "bluejay",
+        "crow",
+        "dodo",
+        "eagle",
+        "fenix",
+        "goose",
+        "hawk",
+        "ibis",
+        "chirp-custom",
+    ];
+    const AUK_OR_LATER: &[&str] = &[
+        "auk",
+        "bluejay",
+        "crow",
+        "dodo",
+        "eagle",
+        "fenix",
+        "goose",
+        "hawk",
+        "ibis",
+        "chirp-custom",
+    ];
+    const V35_OR_LATER: &[&str] = &[
+        "v3-5",
+        "v4",
+        "auk",
+        "bluejay",
+        "crow",
+        "dodo",
+        "eagle",
+        "fenix",
+        "goose",
+        "hawk",
+        "ibis",
+        "chirp-custom",
+    ];
+    const EXTEND_MODELS: &[&str] = &[
+        "v2",
+        "v3-0",
+        "v3-5",
+        "v4",
+        "auk",
+        "bluejay",
+        "crow",
+        "dodo",
+        "eagle",
+        "fenix",
+        "goose",
+        "hawk",
+        "ibis",
+        "chirp-custom",
+    ];
+
+    let model_matches = |allowed: &[&str]| allowed.iter().any(|part| model.contains(part));
+    let contains_all = |required: &[&str]| {
+        required
+            .iter()
+            .all(|required| conditions.contains(required))
+    };
+    let restrictions: &[(&[&str], &[&str])] = &[
+        (EXTEND_MODELS, &["extend"]),
+        (V35_OR_LATER, &["persona"]),
+        (V35_OR_LATER, &["cover"]),
+        (V35_OR_LATER, &["persona", "extend"]),
+        (BLUEJAY_OR_LATER, &["playlist"]),
+        (BLUEJAY_OR_LATER, &["underpaint"]),
+        (BLUEJAY_OR_LATER, &["overpaint"]),
+        (AUK_OR_LATER, &["persona", "cover"]),
+    ];
+
+    restrictions
+        .iter()
+        .all(|(allowed_models, required)| !contains_all(required) || model_matches(allowed_models))
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -126,6 +229,7 @@ mod tests {
                 "badges": ["custom"],
                 "max_lengths": {"prompt": 5000, "duration": 480},
                 "capabilities": ["audio_upload"],
+                "allowed_condition_combinations": [["cover"]],
                 "major_version": 5
             }],
             "period": "monthly",
@@ -142,6 +246,10 @@ mod tests {
         assert_eq!(output["subscription_platform"], "stripe");
         assert_eq!(output["plan"]["currency"], "USD");
         assert_eq!(output["models"][0]["capabilities"][0], "audio_upload");
+        assert_eq!(
+            output["models"][0]["allowed_condition_combinations"][0][0],
+            "cover"
+        );
         assert_eq!(output["models"][0]["features"][0], "reuse_styles_lyrics");
         assert_eq!(output["models"][0]["badges"][0], "custom");
         assert_eq!(output["models"][0]["major_version"], 5);
@@ -163,6 +271,7 @@ mod tests {
 
         assert!(model.supports_web_feature("create_control_sliders"));
         assert!(model.supports_web_feature("sound"));
+        assert!(!model.supports_web_task("cover"));
 
         let feature_model: Model = serde_json::from_value(serde_json::json!({
             "name": "feature",
@@ -176,5 +285,44 @@ mod tests {
 
         assert!(feature_model.supports_web_feature("create_control_sliders"));
         assert!(!feature_model.supports_web_feature("sound"));
+
+        let capable_model: Model = serde_json::from_value(serde_json::json!({
+            "name": "current",
+            "external_key": "current-model",
+            "can_use": true,
+            "is_default_model": true,
+            "description": "fixture",
+            "capabilities": ["all"],
+            "allowed_condition_combinations": [["cover"], ["playlist"]]
+        }))
+        .expect("deserialize capable model");
+        assert!(capable_model.supports_web_task("cover"));
+        assert!(capable_model.supports_web_conditions(&["cover"]));
+        assert!(!capable_model.supports_web_conditions(&["extend"]));
+
+        let legacy_v3: Model = serde_json::from_value(serde_json::json!({
+            "name": "v3",
+            "external_key": "chirp-v3-0",
+            "can_use": true,
+            "is_default_model": false,
+            "description": "legacy fallback fixture",
+            "capabilities": ["all"]
+        }))
+        .expect("deserialize legacy model");
+        assert!(legacy_v3.supports_web_conditions(&["extend"]));
+        assert!(!legacy_v3.supports_web_conditions(&["cover"]));
+        assert!(!legacy_v3.supports_web_conditions(&["playlist"]));
+
+        let bluejay: Model = serde_json::from_value(serde_json::json!({
+            "name": "v4.5+",
+            "external_key": "chirp-bluejay",
+            "can_use": true,
+            "is_default_model": false,
+            "description": "legacy fallback fixture",
+            "capabilities": ["all"]
+        }))
+        .expect("deserialize bluejay model");
+        assert!(bluejay.supports_web_conditions(&["cover"]));
+        assert!(bluejay.supports_web_conditions(&["playlist"]));
     }
 }

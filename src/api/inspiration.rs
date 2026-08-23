@@ -14,6 +14,7 @@ pub struct InspirationOptions<'a> {
     pub weirdness: f64,
     pub audio_influence: Option<f64>,
     pub challenge_token: Option<String>,
+    pub model: &'a str,
 }
 
 impl SunoClient {
@@ -34,7 +35,7 @@ impl SunoClient {
             ));
         }
         let lyrics = options.lyrics.trim();
-        let mut req = GenerateRequest::new("chirp-fenix", "custom");
+        let mut req = GenerateRequest::new(options.model, "custom");
         req.task = Some("playlist_condition".into());
         req.title = Some(options.title.to_string());
         req.tags = Some(original_tags.to_string());

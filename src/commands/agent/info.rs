@@ -181,7 +181,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                 "route": "GET /api/clip/<clip_id>, optional POST /api/feed/v3 metadata enrichment, then POST /api/generate/v2-web/",
                 "defaults": "fetches the source clip through the current single-clip route before submit; only when it lacks source style metadata, searches feed/v3 by source.title and merges the exact source id; title defaults to source.title, tags defaults to source.metadata.tags, negative_tags defaults to source.metadata.negative_tags when available, and make_instrumental defaults to source.metadata.make_instrumental",
                 "overrides": "--title overrides the submitted title; --tags overrides inherited style tags; --exclude overrides inherited negative_tags; --instrumental forces make_instrumental=true; --no-instrumental forces make_instrumental=false",
-                "body_constraints": "task=upload_extend when the source metadata.type is upload, otherwise task=extend; metadata.create_mode=custom, metadata.is_remix=true, metadata.lyrics_updated reflects whether new lyrics were supplied, mv=chirp-fenix, continue_clip_id=<source clip id>, continue_at=<seconds>, continued_aligned_prompt=<source context or empty string>, title must be a string",
+                "body_constraints": "task=upload_extend when the source metadata.type is upload, otherwise task=extend; metadata.create_mode=custom, metadata.is_remix=true, metadata.lyrics_updated reflects whether new lyrics were supplied, mv resolves from configured/auto account models that support the task and extend condition, continue_clip_id=<source clip id>, continue_at=<seconds>, continued_aligned_prompt=<source context or empty string>, title must be a string",
                 "response": "generation response with submitted continuation clips"
             },
             "clip cover": {
@@ -194,7 +194,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                 "route": "POST /api/prompts/upsample, then POST /api/generate/v2-web/",
                 "status": "implemented from the live-captured playlist-conditioned Use as Inspiration request",
                 "constraints": "accepts exactly one source clip; requires --title, --tags, and --lyrics or --lyrics-file; optional --audio-influence is 0..100; does not expose instrumental or multi-source variants because those were not captured",
-                "body_constraints": "task=playlist_condition, mv=chirp-fenix, playlist_id=inspiration, playlist_clip_ids=[<source clip id>], metadata.create_mode=custom, optional --audio-influence is normalized into metadata.control_sliders.audio_weight, lyrics sent both as tag-upsample context and in prompt, no gpt_description_prompt, upsample response carried in metadata.last_tags_generation, override_fields=[]",
+                "body_constraints": "task=playlist_condition, mv resolves from configured/auto account models that support playlist_condition plus the playlist condition, playlist_id=inspiration, playlist_clip_ids=[<source clip id>], metadata.create_mode=custom, optional --audio-influence is normalized into metadata.control_sliders.audio_weight, lyrics sent both as tag-upsample context and in prompt, no gpt_description_prompt, upsample response carried in metadata.last_tags_generation, override_fields=[]",
                 "response": "generation response with submitted clips"
             },
             "clip concat": {

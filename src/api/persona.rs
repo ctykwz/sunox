@@ -27,7 +27,7 @@ impl SunoClient {
             if let Some(token) = continuation_token {
                 query.push(("continuation_token", token.to_string()));
             }
-            let resp = self.get(path).query(&query).send().await?;
+            let resp = self.persona_get(path).query(&query).send().await?;
             let resp = self.check_response(resp).await?;
             Ok(resp.json().await?)
         })
@@ -39,7 +39,7 @@ impl SunoClient {
     pub async fn get_persona(&self, persona_id: &str) -> Result<PersonaInfo, CliError> {
         self.with_auth_retry(|| async {
             let resp = self
-                .get(&format!("/api/persona/get-persona/{persona_id}/"))
+                .persona_get(&format!("/api/persona/get-persona/{persona_id}/"))
                 .send()
                 .await?;
             let resp = self.check_response(resp).await?;
@@ -57,7 +57,7 @@ impl SunoClient {
     ) -> Result<PersonaClipsResponse, CliError> {
         self.with_auth_retry(|| async {
             let resp = self
-                .get(&format!("/api/persona/get-persona-paginated/{persona_id}/"))
+                .persona_get(&format!("/api/persona/get-persona-paginated/{persona_id}/"))
                 .query(&[("page", page.to_string())])
                 .send()
                 .await?;
@@ -74,7 +74,11 @@ impl SunoClient {
         req: &CreatePersonaRequest,
     ) -> Result<PersonaInfo, CliError> {
         self.with_auth_retry(|| async {
-            let resp = self.post("/api/persona/create/").json(req).send().await?;
+            let resp = self
+                .persona_post("/api/persona/create/")
+                .json(req)
+                .send()
+                .await?;
             let resp = self.check_response(resp).await?;
             decode_persona(resp.json().await?)
         })
@@ -86,7 +90,7 @@ impl SunoClient {
     pub async fn edit_persona(&self, req: &EditPersonaRequest) -> Result<PersonaInfo, CliError> {
         self.with_auth_retry(|| async {
             let resp = self
-                .put(&format!("/api/persona/edit-persona/{}/", req.persona_id))
+                .persona_put(&format!("/api/persona/edit-persona/{}/", req.persona_id))
                 .json(req)
                 .send()
                 .await?;
@@ -104,7 +108,7 @@ impl SunoClient {
     ) -> Result<TogglePersonaLoveResponse, CliError> {
         self.with_auth_retry(|| async {
             let resp = self
-                .post(&format!("/api/persona/{persona_id}/toggle_love/"))
+                .persona_post(&format!("/api/persona/{persona_id}/toggle_love/"))
                 .send()
                 .await?;
             let resp = self.check_response(resp).await?;
@@ -137,7 +141,7 @@ impl SunoClient {
     ) -> Result<PersonaInfo, CliError> {
         self.with_auth_retry(|| async {
             let resp = self
-                .put(&format!("/api/persona/set_visibility/{persona_id}/"))
+                .persona_put(&format!("/api/persona/set_visibility/{persona_id}/"))
                 .query(&[("is_public", is_public.to_string())])
                 .send()
                 .await?;
@@ -199,7 +203,7 @@ impl SunoClient {
             let response = match self
                 .with_auth_retry(|| async {
                     let resp = self
-                        .put(&format!("/api/persona/trash-persona/{persona_id}/"))
+                        .persona_put(&format!("/api/persona/trash-persona/{persona_id}/"))
                         .query(&[("undo", undo), ("hide", hide)])
                         .send()
                         .await?;
