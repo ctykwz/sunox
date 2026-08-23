@@ -40,9 +40,9 @@ backward-compatible features, upstream protocol adaptations, and fixes.
   blind replay that could duplicate clips or consume credits twice.
 - Preserve current and legacy `accessible_features` response shapes behind one fail-closed typed
   feature check.
-- Preflight local download destinations before any prepared-format or conversion request, preserve
-  all batch destinations before the first such request, preserve nested recovery details for
-  partial batch failures, and strictly sanitize capability limits.
+- Preflight all local batch download destinations before the first prepared-format or conversion
+  request, preserve nested recovery details for partial failures, and strictly sanitize capability
+  limits.
 
 ### Security
 
