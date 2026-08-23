@@ -111,8 +111,9 @@ sunox download <clip_id_1> <clip_id_2> --output ./songs
 ```
 
 The default download is the existing CDN MP3. Sunox writes available plain and timed lyrics into
-the file's ID3 tags. Use `--format mp3|m4a|wav|opus` only when you want Suno's format-conversion
-workflow, or `--video` for an available MP4.
+the file's ID3 tags. Use `--format mp3|m4a|wav|opus` only when you want Suno's prepared-format
+workflow; WAV and OPUS reuse an existing converted file before requesting a conversion. Use
+`--video` for an available MP4.
 
 ## Common commands
 
@@ -155,7 +156,9 @@ sunox update                      Install the latest GitHub release
 Cowrite lyrics models are discovered from Suno at runtime. Select one by ID or
 display name with `sunox lyrics --prompt "..." --model <model>`, and add
 `--thinking` only when that model advertises support. For clip inspiration,
-`--audio-influence 0..100` controls the current Web `audio_weight` slider.
+`--audio-influence 0..100` controls the current Web `audio_weight` slider; add
+`--enhance-tags` only when you want the same optional style-enhance action used
+by the current Web editor before submission.
 
 Run `sunox --help` or `sunox <command> --help` for the complete set of options.
 

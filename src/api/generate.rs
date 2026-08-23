@@ -57,7 +57,7 @@ impl SunoClient {
         req: &mut GenerateRequest,
         required_features: &[&str],
     ) -> Result<Option<MaxLengths>, CliError> {
-        let web_requirement = generation_web_requirement(req.task.as_deref());
+        let mut web_requirement = generation_web_requirement(req.task.as_deref());
         let needs_model_features = req.mv == "auto"
             || web_requirement.is_some()
             || req.metadata.control_sliders.is_some()
@@ -113,7 +113,49 @@ impl SunoClient {
         } else {
             &req.mv
         };
-        let model = select_generation_model(&info.models, requested_model, web_requirement)?;
+        let sourced_vox = req.task.as_deref() == Some("vox") && req.artist_clip_id.is_some();
+        let model = match select_generation_model(&info.models, requested_model, web_requirement) {
+            Ok(model)
+                if sourced_vox
+                    && web_requirement
+                        .is_some_and(|required| !model_supports_requirement(model, required)) =>
+            {
+                let legacy_requirement = generation_web_requirement(Some("artist_consistency"))
+                    .expect("artist_consistency has a Web requirement");
+                match select_generation_model(
+                    &info.models,
+                    requested_model,
+                    Some(legacy_requirement),
+                ) {
+                    Ok(legacy_model)
+                        if model_supports_requirement(legacy_model, legacy_requirement) =>
+                    {
+                        req.task = Some("artist_consistency".into());
+                        web_requirement = Some(legacy_requirement);
+                        legacy_model
+                    }
+                    _ => model,
+                }
+            }
+            Ok(model) => model,
+            Err(vox_error) if sourced_vox => {
+                let legacy_requirement = generation_web_requirement(Some("artist_consistency"))
+                    .expect("artist_consistency has a Web requirement");
+                match select_generation_model(
+                    &info.models,
+                    requested_model,
+                    Some(legacy_requirement),
+                ) {
+                    Ok(model) if model_supports_requirement(model, legacy_requirement) => {
+                        req.task = Some("artist_consistency".into());
+                        web_requirement = Some(legacy_requirement);
+                        model
+                    }
+                    Ok(_) | Err(_) => return Err(vox_error),
+                }
+            }
+            Err(error) => return Err(error),
+        };
         if let Some(requirement) = web_requirement
             && !model_supports_requirement(model, requirement)
         {
@@ -241,7 +283,7 @@ impl SunoClient {
         Ok(ids.iter().filter_map(|id| by_id.get(id).cloned()).collect())
     }
 
-    async fn get_clip(&self, id: &str) -> Result<Option<Clip>, CliError> {
+    pub(crate) async fn get_clip(&self, id: &str) -> Result<Option<Clip>, CliError> {
         let path = format!("/api/clip/{id}");
         self.with_auth_retry(|| async {
             let resp = self.get(&path).send().await?;
@@ -310,6 +352,16 @@ fn generation_web_requirement(task: Option<&str>) -> Option<WebModelRequirement>
             task: "playlist_condition",
             conditions: &["playlist"],
             label: "Inspiration",
+        }),
+        Some("vox") => Some(WebModelRequirement {
+            task: "vox",
+            conditions: &["vox"],
+            label: "Voice Persona generation",
+        }),
+        Some("artist_consistency") => Some(WebModelRequirement {
+            task: "artist_consistency",
+            conditions: &["persona"],
+            label: "legacy Persona generation",
         }),
         _ => None,
     }
@@ -484,6 +536,18 @@ mod tests {
         .expect("compatible upload-extend fallback");
 
         assert_eq!(selected.external_key, "chirp-fenix");
+    }
+
+    #[test]
+    fn persona_tasks_require_the_current_web_condition_families() {
+        let vox = generation_web_requirement(Some("vox")).expect("Vox requirement");
+        assert_eq!(vox.task, "vox");
+        assert_eq!(vox.conditions, ["vox"]);
+
+        let legacy = generation_web_requirement(Some("artist_consistency"))
+            .expect("legacy Persona requirement");
+        assert_eq!(legacy.task, "artist_consistency");
+        assert_eq!(legacy.conditions, ["persona"]);
     }
 
     #[test]

@@ -12,6 +12,7 @@ pub(crate) const BASE_URL: &str = "https://studio-api-prod.suno.com";
 pub struct SunoClient {
     pub(crate) client: Client,
     http1_read_client: Client,
+    pub(crate) clerk_client: Client,
     base_url: String,
     /// Auth state behind a sync mutex so `&self` methods can transparently
     /// refresh the JWT mid-request when Suno returns
@@ -27,11 +28,13 @@ impl SunoClient {
     /// auto-refresh the JWT transparently.
     pub async fn new_with_refresh(mut auth: AuthState) -> Result<Self, CliError> {
         let client = http::browser_client()?;
-        super::auth_retry::refresh_state_if_needed(&client, &mut auth).await?;
+        let clerk_client = http::clerk_client()?;
+        super::auth_retry::refresh_state_if_needed(&clerk_client, &mut auth).await?;
 
         Ok(Self {
             client,
             http1_read_client: http::browser_http1_client()?,
+            clerk_client,
             base_url: BASE_URL.to_string(),
             auth: Mutex::new(auth),
             device_override: Mutex::new(None),
@@ -45,6 +48,7 @@ impl SunoClient {
         Ok(Self {
             client: http::browser_client()?,
             http1_read_client: http::browser_http1_client()?,
+            clerk_client: http::clerk_client()?,
             base_url: BASE_URL.to_string(),
             auth: Mutex::new(auth),
             device_override: Mutex::new(None),
@@ -56,6 +60,7 @@ impl SunoClient {
         Ok(Self {
             client: http::browser_client()?,
             http1_read_client: http::browser_http1_client()?,
+            clerk_client: http::clerk_client()?,
             base_url: base_url.trim_end_matches('/').to_string(),
             auth: Mutex::new(auth),
             device_override: Mutex::new(None),

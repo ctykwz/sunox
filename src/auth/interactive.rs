@@ -1147,7 +1147,7 @@ async fn wait_for_suno_auth(
 ) -> Result<(BrowserAuth, String, String), CliError> {
     let deadline = tokio::time::Instant::now() + LOGIN_TIMEOUT;
     eprintln!("Preparing the Suno validation client...");
-    let http = http::browser_client()?;
+    let http = http::clerk_client()?;
     eprintln!("Connecting to the dedicated browser page...");
     let mut session = CdpSession::connect(&ws_url).await?;
     // The browser is launched directly on LOGIN_URL. Enabling Page/Network and

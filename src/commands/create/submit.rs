@@ -115,6 +115,7 @@ async fn generate(args: GenerateArgs, ctx: &AppContext) -> Result<(), CliError> 
     }
     let clips = execute_generation_submission(token, challenge_mode, ctx, move || async move {
         let client = ctx.client().await?;
+        resolve_persona_reference(&mut req, &client).await?;
         if should_enhance_tags {
             let limits = client
                 .prepare_generation_request_with_features(&mut req, &[TAG_UPSAMPLE_FEATURE])
@@ -175,6 +176,89 @@ fn build_generate_request(
     Ok(req)
 }
 
+const EMPTY_CLIP_ID: &str = "00000000-0000-0000-0000-000000000000";
+
+async fn resolve_persona_reference(
+    req: &mut GenerateRequest,
+    client: &SunoClient,
+) -> Result<(), CliError> {
+    let Some(persona_id) = req.persona_id.clone() else {
+        return Ok(());
+    };
+    let persona = client.get_persona(&persona_id).await?;
+    let root_clip_id = usable_persona_root_clip_id(persona.root_clip_id.as_deref());
+    let root_duration = if let Some(root_clip_id) = root_clip_id.as_deref() {
+        if let Some(duration) = persona
+            .clip
+            .as_ref()
+            .filter(|clip| clip.id == root_clip_id)
+            .and_then(|clip| clip.metadata.duration)
+            .filter(|duration| duration.is_finite() && *duration >= 0.0)
+        {
+            Some(duration)
+        } else {
+            client
+                .get_clip(root_clip_id)
+                .await?
+                .and_then(|clip| clip.metadata.duration)
+                .filter(|duration| duration.is_finite() && *duration >= 0.0)
+        }
+    } else {
+        None
+    };
+    apply_persona_reference(req, &persona_id, persona, root_duration)
+}
+
+fn usable_persona_root_clip_id(root_clip_id: Option<&str>) -> Option<String> {
+    root_clip_id.and_then(|clip_id| {
+        let clip_id = clip_id.trim();
+        (!clip_id.is_empty() && clip_id != EMPTY_CLIP_ID).then(|| clip_id.to_string())
+    })
+}
+
+fn apply_persona_reference(
+    req: &mut GenerateRequest,
+    requested_persona_id: &str,
+    persona: crate::api::types::PersonaInfo,
+    root_duration: Option<f64>,
+) -> Result<(), CliError> {
+    if persona.id != requested_persona_id {
+        return Err(CliError::Api {
+            code: "schema_drift",
+            message: format!(
+                "Suno returned Persona `{}` while resolving `{requested_persona_id}`",
+                persona.id
+            ),
+        });
+    }
+    if persona.is_trashed || persona.is_hidden {
+        return Err(CliError::Config(format!(
+            "Persona `{requested_persona_id}` is trashed or hidden and cannot be used for generation"
+        )));
+    }
+
+    let is_vox = persona
+        .persona_type
+        .as_deref()
+        .is_some_and(|kind| kind.eq_ignore_ascii_case("vox"));
+    let root_clip_id = usable_persona_root_clip_id(persona.root_clip_id.as_deref());
+    if !is_vox && root_clip_id.is_none() {
+        return Err(CliError::Config(format!(
+            "Persona `{requested_persona_id}` has no usable root clip for the current artist_consistency protocol"
+        )));
+    }
+
+    req.task = Some(if is_vox {
+        "vox".to_string()
+    } else {
+        "artist_consistency".to_string()
+    });
+    req.artist_clip_id = root_clip_id;
+    req.artist_start_s = Some(0.0);
+    req.artist_end_s = req.artist_clip_id.as_ref().and(root_duration);
+    Ok(())
+}
+
 async fn describe(args: DescribeArgs, ctx: &AppContext) -> Result<(), CliError> {
     let mut req = build_describe_request(&args, &ctx.config)?;
     let challenge_mode = ChallengeMode::from_flags(args.captcha, args.no_captcha);
@@ -190,6 +274,7 @@ async fn describe(args: DescribeArgs, ctx: &AppContext) -> Result<(), CliError> 
     }
     let clips = execute_generation_submission(token, challenge_mode, ctx, move || async move {
         let client = ctx.client().await?;
+        resolve_persona_reference(&mut req, &client).await?;
         if should_enhance_tags {
             let limits = client
                 .prepare_generation_request_with_features(&mut req, &[TAG_UPSAMPLE_FEATURE])
@@ -236,6 +321,7 @@ async fn enhance_tags(
     is_instrumental: bool,
     client: &SunoClient,
 ) -> Result<(), CliError> {
+    let personalization_enabled = client.styles_augmentation_enabled().await?;
     let original_tags = req.tags.clone().unwrap_or_default();
     let lyrics = (!is_instrumental)
         .then_some(req.prompt.trim())
@@ -252,6 +338,7 @@ async fn enhance_tags(
     req.metadata.last_tags_generation = Some(LastTagsGeneration::from_upsample_response(
         original_tags,
         upsample,
+        personalization_enabled,
     ));
     mark_tags_override(req);
     Ok(())
@@ -311,13 +398,24 @@ pub async fn extend(args: ExtendArgs, ctx: &AppContext) -> Result<(), CliError> 
 
 #[cfg(test)]
 mod tests {
+    use crate::api::types::{GenerateRequest, PersonaInfo};
     use crate::cli::{CreateArgs, DescribeArgs, ModelVersion};
     use crate::core::AppConfig;
 
     use super::{
-        build_describe_args_from_create, build_describe_request, build_generate_args_from_create,
-        build_generate_request, mark_tags_override,
+        apply_persona_reference, build_describe_args_from_create, build_describe_request,
+        build_generate_args_from_create, build_generate_request, mark_tags_override,
     };
+
+    fn persona_fixture(id: &str, persona_type: &str, root_clip_id: Option<&str>) -> PersonaInfo {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "name": "Protocol Persona",
+            "persona_type": persona_type,
+            "root_clip_id": root_clip_id
+        }))
+        .expect("persona fixture")
+    }
 
     fn config_with_default_model(default_model: &str) -> AppConfig {
         AppConfig {
@@ -563,6 +661,65 @@ mod tests {
             body["override_fields"],
             serde_json::json!(["prompt", "tags"])
         );
+    }
+
+    #[test]
+    fn vox_persona_reference_uses_current_rootless_advanced_contract() {
+        let mut req = GenerateRequest::new("auto", "custom");
+        req.persona_id = Some("persona-vox".into());
+
+        apply_persona_reference(
+            &mut req,
+            "persona-vox",
+            persona_fixture(
+                "persona-vox",
+                "vox",
+                Some("00000000-0000-0000-0000-000000000000"),
+            ),
+            None,
+        )
+        .expect("rootless Vox reference");
+
+        assert_eq!(req.task.as_deref(), Some("vox"));
+        assert_eq!(req.persona_id.as_deref(), Some("persona-vox"));
+        assert!(req.artist_clip_id.is_none());
+        assert_eq!(req.artist_start_s, Some(0.0));
+        assert!(req.artist_end_s.is_none());
+    }
+
+    #[test]
+    fn legacy_persona_reference_uses_current_artist_consistency_contract() {
+        let mut req = GenerateRequest::new("auto", "simple");
+        req.persona_id = Some("persona-legacy".into());
+
+        apply_persona_reference(
+            &mut req,
+            "persona-legacy",
+            persona_fixture("persona-legacy", "legacy", Some("clip-root")),
+            Some(239.84),
+        )
+        .expect("legacy Persona reference");
+
+        assert_eq!(req.task.as_deref(), Some("artist_consistency"));
+        assert_eq!(req.artist_clip_id.as_deref(), Some("clip-root"));
+        assert_eq!(req.artist_start_s, Some(0.0));
+        assert_eq!(req.artist_end_s, Some(239.84));
+    }
+
+    #[test]
+    fn legacy_persona_without_a_root_clip_fails_closed() {
+        let mut req = GenerateRequest::new("auto", "custom");
+        req.persona_id = Some("persona-legacy".into());
+
+        let error = apply_persona_reference(
+            &mut req,
+            "persona-legacy",
+            persona_fixture("persona-legacy", "legacy", None),
+            None,
+        )
+        .expect_err("rootless legacy Persona must not submit");
+
+        assert!(error.to_string().contains("no usable root clip"));
     }
 
     #[test]

@@ -8,7 +8,6 @@ use super::prompts::PromptUpsampleResponse;
 
 const WEB_CLIENT_PATHNAME: &str = "/create";
 const GENERATION_TYPE_TEXT: &str = "TEXT";
-const TAG_UPSAMPLE_PERSONALIZATION_ENABLED: bool = true;
 
 /// Shared browser-facing generation fields that are common across create,
 /// cover, extend, stems, and other `/api/generate/v2-web/` submits.
@@ -231,14 +230,16 @@ pub struct LastTagsGeneration {
 }
 
 impl LastTagsGeneration {
-    pub fn from_upsample_response(original_tags: String, response: PromptUpsampleResponse) -> Self {
+    pub fn from_upsample_response(
+        original_tags: String,
+        response: PromptUpsampleResponse,
+        personalization_enabled: bool,
+    ) -> Self {
         Self {
             tags: response.upsampled,
             request_id: response.request_id,
             original_tags,
-            // Captured web submits set this field to true when carrying
-            // tag-upsample metadata; it is not returned by /api/prompts/upsample.
-            personalization_enabled: TAG_UPSAMPLE_PERSONALIZATION_ENABLED,
+            personalization_enabled,
         }
     }
 }

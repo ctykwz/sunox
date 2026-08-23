@@ -1651,6 +1651,68 @@ async fn generate_rejects_control_sliders_for_a_model_without_the_web_capability
 }
 
 #[tokio::test]
+async fn sourced_vox_reference_falls_back_to_current_legacy_task_for_an_older_model() {
+    let billing = billing_info_with_models(
+        "tier-pro",
+        serde_json::json!([{
+            "name": "v4.5+",
+            "external_key": "chirp-bluejay",
+            "can_use": true,
+            "is_default_model": true,
+            "description": "legacy Persona capable",
+            "capabilities": ["artist_consistency"],
+            "allowed_condition_combinations": [["persona"]],
+            "max_lengths": {}
+        }]),
+    );
+    let server = MockServer::json(&billing).await;
+    let client = server.client();
+    let mut request = GenerateRequest::new("chirp-bluejay", "custom");
+    request.task = Some("vox".into());
+    request.persona_id = Some("persona-1".into());
+    request.artist_clip_id = Some("clip-root".into());
+
+    client
+        .prepare_generation_request(&mut request)
+        .await
+        .expect("sourced Vox reference should use legacy task on an older model");
+
+    assert_eq!(request.task.as_deref(), Some("artist_consistency"));
+    assert_eq!(request.mv, "chirp-bluejay");
+}
+
+#[tokio::test]
+async fn rootless_vox_reference_rejects_a_model_without_vox_support() {
+    let billing = billing_info_with_models(
+        "tier-pro",
+        serde_json::json!([{
+            "name": "v4.5+",
+            "external_key": "chirp-bluejay",
+            "can_use": true,
+            "is_default_model": true,
+            "description": "legacy Persona capable",
+            "capabilities": ["artist_consistency"],
+            "allowed_condition_combinations": [["persona"]],
+            "max_lengths": {}
+        }]),
+    );
+    let server = MockServer::json(&billing).await;
+    let client = server.client();
+    let mut request = GenerateRequest::new("chirp-bluejay", "custom");
+    request.task = Some("vox".into());
+    request.persona_id = Some("persona-1".into());
+
+    let error = client
+        .prepare_generation_request(&mut request)
+        .await
+        .expect_err("rootless Vox must require a Vox-capable model");
+
+    assert!(
+        matches!(error, CliError::Config(message) if message.contains("does not support Voice Persona"))
+    );
+}
+
+#[tokio::test]
 async fn generate_rejects_tag_upsample_before_calling_it_for_an_unsupported_model() {
     let billing = billing_info_response("tier-pro");
     let server = MockServer::json(&billing).await;
@@ -1726,10 +1788,40 @@ async fn prompt_upsample_posts_current_web_contract() {
 }
 
 #[tokio::test]
+async fn personalization_settings_preserve_explicit_disabled_styles_augmentation() {
+    let server = MockServer::json(r#"{"styles_augmentation":false}"#).await;
+    let client = server.client();
+
+    assert!(
+        !client
+            .styles_augmentation_enabled()
+            .await
+            .expect("personalization settings")
+    );
+    let request = server.captured().await;
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.path, "/api/personalization/settings");
+}
+
+#[tokio::test]
+async fn personalization_settings_default_to_enabled_when_field_is_missing() {
+    let server = MockServer::json(r#"{}"#).await;
+    let client = server.client();
+
+    assert!(
+        client
+            .styles_augmentation_enabled()
+            .await
+            .expect("default personalization settings")
+    );
+}
+
+#[tokio::test]
 async fn inspiration_posts_live_captured_playlist_condition_contract() {
     let billing = billing_info_response("tier-pro");
     let server = MockServer::json_sequence(&[
         billing.as_str(),
+        r#"{"styles_augmentation":false}"#,
         r#"{"upsampled":"dry garage pop, tight drums","request_id":"request-inspire"}"#,
         r#"{"required":false}"#,
         r#"{"clips":[{"id":"clip-inspired","title":"New Song","status":"submitted","model_name":"chirp-fenix","created_at":"2026-07-10T00:00:00Z"}]}"#,
@@ -1742,6 +1834,7 @@ async fn inspiration_posts_live_captured_playlist_condition_contract() {
             clip_id: "clip-source",
             title: "New Song",
             tags: "garage pop",
+            enhance_tags: true,
             negative_tags: "ballad",
             lyrics: "[Verse]\nNew words",
             weirdness: 40.0,
@@ -1754,11 +1847,13 @@ async fn inspiration_posts_live_captured_playlist_condition_contract() {
 
     assert_eq!(clips[0].id, "clip-inspired");
     let requests = server.captured_all().await;
-    assert_eq!(requests.len(), 4);
+    assert_eq!(requests.len(), 5);
     assert_eq!(requests[0].path, "/api/billing/info/");
-    assert_eq!(requests[1].path, "/api/prompts/upsample");
+    assert_eq!(requests[1].method, "GET");
+    assert_eq!(requests[1].path, "/api/personalization/settings");
+    assert_eq!(requests[2].path, "/api/prompts/upsample");
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&requests[1].body)
+        serde_json::from_str::<serde_json::Value>(&requests[2].body)
             .expect("upsample request json"),
         serde_json::json!({
             "original_tags": "garage pop",
@@ -1766,9 +1861,9 @@ async fn inspiration_posts_live_captured_playlist_condition_contract() {
             "is_instrumental": false
         })
     );
-    assert_eq!(requests[2].path, "/api/c/check");
-    assert_eq!(requests[3].path, "/api/generate/v2-web/");
-    let body = serde_json::from_str::<serde_json::Value>(&requests[3].body).expect("request json");
+    assert_eq!(requests[3].path, "/api/c/check");
+    assert_eq!(requests[4].path, "/api/generate/v2-web/");
+    let body = serde_json::from_str::<serde_json::Value>(&requests[4].body).expect("request json");
     assert_eq!(body["task"], "playlist_condition");
     assert_eq!(body["title"], "New Song");
     assert_eq!(body["tags"], "dry garage pop, tight drums");
@@ -1785,12 +1880,54 @@ async fn inspiration_posts_live_captured_playlist_condition_contract() {
         body["metadata"]["last_tags_generation"]["request_id"],
         "request-inspire"
     );
+    assert_eq!(
+        body["metadata"]["last_tags_generation"]["personalization_enabled"],
+        false
+    );
     assert_eq!(body["override_fields"], serde_json::json!([]));
     assert_eq!(body["playlist_id"], "inspiration");
     assert_eq!(
         body["playlist_clip_ids"],
         serde_json::json!(["clip-source"])
     );
+}
+
+#[tokio::test]
+async fn inspiration_preserves_tags_without_explicit_web_enhance_action() {
+    let billing = billing_info_response("tier-pro");
+    let server = MockServer::json_sequence(&[
+        billing.as_str(),
+        r#"{"required":false}"#,
+        r#"{"clips":[{"id":"clip-inspired","title":"New Song","status":"submitted","model_name":"chirp-fenix","created_at":"2026-08-23T00:00:00Z"}]}"#,
+    ])
+    .await;
+    let client = server.client();
+
+    let clips = client
+        .inspire(InspirationOptions {
+            clip_id: "clip-source",
+            title: "New Song",
+            tags: "garage pop",
+            enhance_tags: false,
+            negative_tags: "",
+            lyrics: "[Verse]\nNew words",
+            weirdness: 40.0,
+            audio_influence: None,
+            challenge_token: None,
+            model: "auto",
+        })
+        .await
+        .expect("inspiration generation without tag enhancement");
+
+    assert_eq!(clips[0].id, "clip-inspired");
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].path, "/api/billing/info/");
+    assert_eq!(requests[1].path, "/api/c/check");
+    assert_eq!(requests[2].path, "/api/generate/v2-web/");
+    let body = serde_json::from_str::<serde_json::Value>(&requests[2].body).expect("request json");
+    assert_eq!(body["tags"], "garage pop");
+    assert!(body["metadata"].get("last_tags_generation").is_none());
 }
 
 #[tokio::test]
@@ -1811,6 +1948,7 @@ async fn inspiration_revalidates_upsampled_tags_against_the_resolved_model_limit
     );
     let server = MockServer::json_sequence(&[
         billing.as_str(),
+        r#"{}"#,
         r#"{"upsampled":"tags are too long","request_id":"request-inspire"}"#,
     ])
     .await;
@@ -1821,6 +1959,7 @@ async fn inspiration_revalidates_upsampled_tags_against_the_resolved_model_limit
             clip_id: "clip-source",
             title: "New Song",
             tags: "pop",
+            enhance_tags: true,
             negative_tags: "",
             lyrics: "[Verse]\nNew words",
             weirdness: 40.0,
@@ -1835,9 +1974,10 @@ async fn inspiration_revalidates_upsampled_tags_against_the_resolved_model_limit
         matches!(error, CliError::Config(message) if message.contains("generation field `tags`"))
     );
     let requests = server.captured_all().await;
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 3);
     assert_eq!(requests[0].path, "/api/billing/info/");
-    assert_eq!(requests[1].path, "/api/prompts/upsample");
+    assert_eq!(requests[1].path, "/api/personalization/settings");
+    assert_eq!(requests[2].path, "/api/prompts/upsample");
 }
 
 #[tokio::test]
@@ -2792,8 +2932,32 @@ async fn official_download_polls_m4a_download_url() {
 }
 
 #[tokio::test]
-async fn wav_download_posts_convert_then_polls_file_url() {
+async fn wav_download_uses_existing_file_url_without_conversion() {
+    let server = MockServer::json(r#"{"wav_file_url":"https://cdn.example/song.wav"}"#).await;
+    let client = server.client();
+
+    let url = client
+        .download_url(
+            "clip-a",
+            super::download::DownloadFormat::Wav,
+            super::PollingOptions {
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_millis(1),
+            },
+        )
+        .await
+        .expect("wav url");
+
+    assert_eq!(url, "https://cdn.example/song.wav");
+    let request = server.captured().await;
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.path, "/api/gen/clip-a/wav_file/");
+}
+
+#[tokio::test]
+async fn wav_download_posts_convert_when_file_url_is_missing() {
     let server = MockServer::json_sequence(&[
+        r#"{"wav_file_url":null}"#,
         r#"{"ok":true}"#,
         r#"{"wav_file_url":null}"#,
         r#"{"wav_file_url":"https://cdn.example/song.wav"}"#,
@@ -2815,11 +2979,13 @@ async fn wav_download_posts_convert_then_polls_file_url() {
 
     assert_eq!(url, "https://cdn.example/song.wav");
     let requests = server.captured_all().await;
-    assert_eq!(requests[0].method, "POST");
-    assert_eq!(requests[0].path, "/api/gen/clip-a/convert_wav/");
-    assert_eq!(requests[1].method, "GET");
-    assert_eq!(requests[1].path, "/api/gen/clip-a/wav_file/");
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].path, "/api/gen/clip-a/wav_file/");
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[1].path, "/api/gen/clip-a/convert_wav/");
+    assert_eq!(requests[2].method, "GET");
     assert_eq!(requests[2].path, "/api/gen/clip-a/wav_file/");
+    assert_eq!(requests[3].path, "/api/gen/clip-a/wav_file/");
 }
 
 #[tokio::test]
@@ -3130,7 +3296,7 @@ async fn extend_metadata_fallback_does_not_merge_same_title_different_clip() {
 }
 
 #[tokio::test]
-async fn lyrics_generation_uses_july_captured_cowrite_submit_contract() {
+async fn lyrics_generation_uses_current_cowrite_submit_contract() {
     let server = MockServer::json_sequence(&[
         r#"[{"id":"lyrics-v2","display_name":"Lyrics v2","family":"remi","supports_thinking":true}]"#,
         r#"{"edited_lyrics":"[Verse]\nHello","lyrics_request_id":"request-1","lyrics_id":"lyrics-1","variants":null,"artist_to_tag_mapping":{"A":"pop"},"next_prompts":["add a chorus"],"generation_trace":"trace-1"}"#,
@@ -4028,6 +4194,7 @@ async fn edit_persona_puts_current_web_contract() {
             persona_id: "persona-1".into(),
             name: Some("Lead Voice".into()),
             description: Some("Warm".into()),
+            image_s3_id: Some("image-1".into()),
             is_public: Some(false),
             persona_type: Some("vox".into()),
             user_input_styles: Some("soul".into()),
@@ -4048,6 +4215,7 @@ async fn edit_persona_puts_current_web_contract() {
             "persona_id": "persona-1",
             "name": "Lead Voice",
             "description": "Warm",
+            "image_s3_id": "image-1",
             "is_public": false,
             "persona_type": "vox",
             "user_input_styles": "soul",
@@ -4205,7 +4373,7 @@ async fn list_personas_uses_scope_page_and_continuation_query() {
     let client = server.client();
 
     client
-        .list_personas(PersonaListScope::Loved, 2, Some("next-token"))
+        .list_personas(PersonaListScope::Mine, 2, Some("next-token"))
         .await
         .expect("list personas");
 
@@ -4213,9 +4381,23 @@ async fn list_personas_uses_scope_page_and_continuation_query() {
     assert_eq!(request.method, "GET");
     assert_eq!(
         request.path,
-        "/api/persona/get-loved-personas/?page=2&continuation_token=next-token"
+        "/api/persona/get-personas/?page=2&continuation_token=next-token"
     );
     assert_eq!(request.body, "");
+}
+
+#[tokio::test]
+async fn loved_personas_reject_current_web_unsupported_continuation_tokens() {
+    let server = MockServer::json(r#"{"personas":[]}"#).await;
+    let client = server.client();
+
+    let error = client
+        .list_personas(PersonaListScope::Loved, 2, Some("next-token"))
+        .await
+        .expect_err("loved continuation token must stop locally");
+
+    assert!(matches!(error, CliError::Config(message) if message.contains("page numbers only")));
+    assert!(server.captured_all().await.is_empty());
 }
 
 #[tokio::test]

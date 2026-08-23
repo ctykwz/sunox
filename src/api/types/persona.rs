@@ -111,6 +111,8 @@ pub struct EditPersonaRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_s3_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub is_public: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub persona_type: Option<String>,
@@ -217,6 +219,7 @@ mod tests {
             persona_id: "persona-1".into(),
             name: Some("Lead Voice".into()),
             description: None,
+            image_s3_id: None,
             is_public: Some(false),
             persona_type: Some("vox".into()),
             user_input_styles: None,

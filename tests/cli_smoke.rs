@@ -130,6 +130,7 @@ fn create_help_accepts_prompt_argument() {
         )
         .stdout(predicate::str::contains("--title"))
         .stdout(predicate::str::contains("--tags"))
+        .stdout(predicate::str::contains("--enhance-tags"))
         .stdout(predicate::str::contains("--captcha"));
 }
 

@@ -16,6 +16,12 @@ impl SunoClient {
         page: u32,
         continuation_token: Option<&str>,
     ) -> Result<PersonaListResponse, CliError> {
+        if continuation_token.is_some() && !matches!(scope, PersonaListScope::Mine) {
+            return Err(CliError::Config(
+                "Suno Web continuation tokens apply only to the owned Persona collection; loved and followed collections use page numbers only"
+                    .into(),
+            ));
+        }
         let path = match scope {
             PersonaListScope::Mine => "/api/persona/get-personas/",
             PersonaListScope::Loved => "/api/persona/get-loved-personas/",
@@ -24,7 +30,9 @@ impl SunoClient {
 
         self.with_auth_retry(|| async {
             let mut query = vec![("page", page.to_string())];
-            if let Some(token) = continuation_token {
+            if let Some(token) =
+                continuation_token.filter(|_| matches!(scope, PersonaListScope::Mine))
+            {
                 query.push(("continuation_token", token.to_string()));
             }
             self.read_json_with_transport_retry(self.get(path).query(&query))

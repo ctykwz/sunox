@@ -1,4 +1,4 @@
-# Sunox / Suno Web Deep Protocol Audit — 2026-08-23
+# Sunox / Suno Web Deep Protocol Audit — 2026-08-23～24
 
 ## Executive summary
 
@@ -8,9 +8,8 @@ audio-upload/edit routes used by Sunox. The August 23 changes for
 `metadata.web_client_pathname: "/create"`, `task: "upload_extend"`, Cowrite
 model discovery, and `audio_weight` match the current bundle.
 
-The deeper pass found five confirmed actionable gaps. All five were corrected
-in the working tree covered by this report. It also found one high-risk
-Persona-generation mismatch that requires a credit-bearing capture:
+The first deep pass found five actionable gaps. All five were corrected in the
+working tree covered by this report:
 
 1. **Model selection for Extend and Inspire is not Web-compatible.** Both
    commands construct a request with `chirp-fenix`, while the Web builder uses
@@ -31,25 +30,53 @@ Persona-generation mismatch that requires a credit-bearing capture:
    `capabilities` and exact `allowed_condition_combinations`; Sunox previously
    retained the latter only as opaque extra data.
 
-Separately, Sunox's ordinary `create/describe --persona` request only supplies
-`persona_id`, whereas the current advanced Create builder resolves a Persona
-reference to `task: "vox"` or `task: "artist_consistency"` and may attach the
-source clip and time range. An agentic bare-Persona path also exists, so this is
-not yet proof that Sunox's request is rejected; confirming the intended contract
-requires an authorized credit-consuming generation capture.
+The August 24 follow-up then closed the protocol questions that were still
+marked suspected:
 
-A second implementation review and authenticated readback also tightened four
-edges: Persona mutations were restored to normal transport negotiation because
-only reads had evidence; nullable `allowed_condition_combinations` now follows
-the Web `?? []` behavior; Cowrite POST evidence is labelled as the older
-2026-07-26 compatibility capture rather than current confirmation; and the
-machine-readable playlist-cover guidance now matches the S3-ID-only payload.
-Intermittent resets were observed on both negotiated HTTP/2 and forced HTTP/1.1,
-so the transport mitigation is a bounded fallback for explicit idempotent GETs,
-not a protocol downgrade for any mutation.
+- **Persona Advanced is implemented against the current picker contract.** The
+  normal Persona-detail picker uses only a valid `root_clip_id` as
+  `artist_clip_id`; rootless Vox does not substitute nested `clip.id`,
+  `vocal_clip_id`, or `persona_clips`. Root-backed references use the full
+  `0..rootClip.metadata.duration` range, rootless Vox uses `0/null`, and a
+  sourced Vox reference falls back to `artist_consistency` on an older model
+  while rootless Vox fails closed unless the model supports Vox. An authorized
+  rootless-Vox generation using the repaired contract subsequently completed
+  end to end on v5.5 (`chirp-fenix`).
+- **Cowrite submit is current, not merely a July compatibility assumption.** A
+  current first-party interaction chunk contains the POST body and response
+  fields. One authorized minimal submit also succeeded on the configured
+  account; the observed before/after credits delta was `0`.
+- **Persona mutation routes are present in current route-specific source.**
+  Create, edit, visibility, love, bulk and per-item trash/restore/purge are all
+  accounted for. Edit retains the existing `image_s3_id`. This is source
+  confirmation, not a claim that a Persona was mutated live.
+- **Inspiration enhancement is optional.** Current Web invokes tag upsampling
+  only from an explicit Enhance action and reads personalization settings;
+  Sunox's opt-in `enhance_tags` flow mirrors that boundary.
+- **WAV and OPUS are both GET-first.** Web first checks the file route, starts
+  conversion only when the URL is absent, then polls. The OPUS helper is still
+  referenced by Studio and is not dead compatibility code.
 
-No generation, upload, metadata change, deletion, reaction, playlist mutation,
-or credit-consuming endpoint was called during this pass.
+Authenticated readback on August 24 decoded both a root-backed legacy Persona
+and a rootless Vox Persona with non-empty nested clip structures. After the
+authorized Advanced generation, the paginated Persona-clips route also
+succeeded: page 1 reported `total_results=12` and 12 nested Persona clips; both
+new results were complete, private, `task:"vox"`, and linked to the selected
+Persona. Earlier transport resets therefore remain availability evidence, but
+the later bounded retry/read closes the route and non-empty schema live.
+
+The configured account also reports `can_use:false` for the available Remaster
+models, so Sunox correctly blocks before the Remaster POST. No eligibility was
+bypassed and no live Remaster result is claimed.
+
+The authorized writes in this follow-up were the minimal Cowrite submit and one
+private rootless-Vox Advanced generation. Generation returned two complete
+private clips with audio URLs; immediate credits moved from `2107` to `2097`,
+an exact delta of `10`. No upload, Persona/clip/playlist metadata mutation,
+visibility/publication change, reaction, deletion, or WAV/OPUS conversion was
+called. No account, Persona, or clip identifier is recorded in this report.
+Intermittent resets remain a bounded availability concern for idempotent reads,
+not evidence of a route or schema change.
 
 ## Scope and evidence levels
 
@@ -58,10 +85,18 @@ The repository baseline is commit
 
 Evidence is labelled as follows:
 
-- **BUNDLE** — first-party code downloaded from `https://suno.com/create` on
-  2026-08-23. Byte offsets below refer to the raw immutable chunk.
+- **BUNDLE** — first-party code downloaded from `https://suno.com/create` and
+  route-specific Suno pages on 2026-08-23～24. Byte offsets below refer to the
+  raw immutable chunk.
 - **LIVE-READ** — authenticated request that does not create, update, delete,
   upload, react, or consume credits.
+- **LIVE-SUBMIT** — the one authorized minimal Cowrite POST, with response
+  decoding and credits read before and after. Its observed delta is evidence
+  for that submission only, not a universal billing guarantee.
+- **LIVE-GENERATION** — one authorized private rootless-Vox Advanced generation,
+  including immediate credit readback, completed result fields, and a
+  subsequent persisted Persona-clips read. It proves this selected contract and
+  account/model combination, not every Persona or model path.
 - **REPO** — current Rust request/response implementation or tests.
 - **INFERENCE** — a conclusion that cannot be safely live-tested without a
   mutation or credit risk.
@@ -70,16 +105,25 @@ Relevant immutable bundle fingerprints:
 
 | Chunk | SHA-256 | Main evidence |
 |---|---|---|
-| `2vyct5q4gq553.js` | `7f54ece7f0888ff20c038a97931b78ba91e8aa8f3ae16e229159f678b2ac26ab` | generation builder, task resolver, Cowrite models, edit and aligned-lyrics flows |
+| `2vyct5q4gq553.js` | `7f54ece7f0888ff20c038a97931b78ba91e8aa8f3ae16e229159f678b2ac26ab` | generation builder, Persona picker/reference, tag upsample, edit and aligned-lyrics flows |
+| `3glkvxw_k-y2j.js` | `581825334acf60efb854dde6f94e01375c93afabb7a49843f60515d82e50ceba` | current Cowrite submit handler |
+| `0psavgrakzykm.js` | `e2e001380b49d4620078290007dac6468e27f94b496fc5820455f9ea5e0b6b41` | MP3/M4A and GET-first WAV/OPUS helpers |
 | `3u1ycshr_o1-2.js` | `5ed94f918b62041bc63785bf83847f8decdfb478760223e710afddb54c623265` | v2 playlist mutations |
 | `0f_f8o2o_ba96.js` | `3a64a1de0dc5c543f4a26cafd5adba8f25c367596b8517430837d3e2e8c0fe3f` | audio upload workflow |
 | `1dj8w_ebqiles.js` | `0e399b9b5ff5045324c7c4a68ca4508f04c857aa5449e17d494d7eb193750488` | challenge preflight and provider selection |
 | `1vw1tt48qlmdn.js` | `2c7dc982024a406bec64a5e4ff167b13e32b53bfccae3782fdefe28d10acd0d0` | clip mutation, concat/remaster and polling store |
-| `2o55p_0ruo1em.js` | `abe3ea475ec66dfd8735d49d1a08c4c3fa9fcbab1299655323d4d9e9d5fd909e` | `GEN_ENDPOINT` constant |
+| `2o55p_0ruo1em.js` | `abe3ea475ec66dfd8735d49d1a08c4c3fa9fcbab1299655323d4d9e9d5fd909e` | `GEN_ENDPOINT` and `EMPTY_UUID` constants |
+| `24l-fzxvb5otv.js` | `3d3a5a3a647b8cd60eb2f0ac0d4e536deec18f0fc9c3f2c5c892c19e3a4e21cf` | Persona bulk trash/restore/purge |
+| `3spz_3hruuf8x.js` | `fc8c28e1ea045b3380710a714bf6e1b8835479b273fd41c3683c49e89904e4dd` | Persona per-item trash/restore/purge |
+| `2x-65bipljzoj.js` | `476de78ecc690115872d049af7e1030b1f6e52f38e380982dfc5dad0dee3fcd9` | Persona edit route |
+| `3iglu18q2jo7v.js` | `012286bf7496160dc099ac988d1ffe8d5fce44881714b03e18481d870c78e063` | full Persona edit body |
+| `24xq6d54vzip9.js` | `e5c54cdc72714aa9e5eeed5fade6c47929671df1b23c4939b76c3f5c7472c6fb` | `/voice` visibility and lightweight edit |
 
-These files were captured between 20:08 and 20:13 Asia/Shanghai. The official
-source surface is [Suno Create](https://suno.com/create); chunk names and hashes
-are included because immutable asset URLs can later disappear.
+The initial create-page files were captured between 20:08 and 20:13
+Asia/Shanghai on August 23; the interaction and route-specific chunks were
+resolved in the August 24 follow-up. The official source surface is
+[Suno Create](https://suno.com/create); chunk names and hashes are included
+because immutable asset URLs can later disappear.
 
 ## Repository endpoint baseline
 
@@ -97,12 +141,13 @@ do not use `studio-api-prod.suno.com` after the presign step.
 | Clip detail | `GET /api/gen/{id}/comments?order=most_liked` | **LIVE-READ stable** through `clip info` |
 | Clip detail | `GET /api/clips/remixes/count?clip_id={id}` | **LIVE-READ stable** through `clip info` |
 | Clip detail | `GET /api/clips/get_similar/?id={id}` | **LIVE-READ stable** through `clip info` |
-| Generation | `POST /api/generate/v2-web/` | **BUNDLE stable**, mutation not live-tested |
-| Tag enhance | `POST /api/prompts/upsample` | Present in bundle; mutation-like POST not live-tested |
-| Cowrite | `GET /api/generate/cowrite-lyrics/models/` | **LIVE-READ stable**; deliberately invalid local model stopped before submit |
-| Cowrite | `POST /api/generate/cowrite-lyrics/` | **Unverified**; not present in the downloaded create chunk graph except as the models-prefix string |
+| Generation | `POST /api/generate/v2-web/` | **BUNDLE stable + LIVE-GENERATION** for one private rootless-Vox Advanced request; other variants not live-tested |
+| Personalization | `GET /api/personalization/settings` | **BUNDLE current**; read by the optional Enhance flow; settings mutation was not exercised |
+| Tag enhance | `POST /api/prompts/upsample` | **BUNDLE current and optional**; explicit Enhance only, POST not live-tested |
+| Cowrite | `GET /api/generate/cowrite-lyrics/models/` | **LIVE-READ stable**; current model family and thinking fields decoded |
+| Cowrite | `POST /api/generate/cowrite-lyrics/` | **BUNDLE + LIVE-SUBMIT current**; minimal submit decoded, observed credits delta `0` |
 | Concat | `POST /api/generate/concat/v2/` | **BUNDLE stable**, mutation not live-tested |
-| Remaster | `POST /api/generate/upsample` | **BUNDLE stable**, credit-risk mutation not live-tested |
+| Remaster | `POST /api/generate/upsample` | **BUNDLE stable**; LIVE-READ billing reports `can_use:false`, so the CLI blocked before POST and no result is claimed |
 | Speed | `POST /api/clips/adjust-speed/` | **BUNDLE payload stable**, mutation not live-tested |
 | Reverse | `POST /api/clips/reverse-clip/` | **BUNDLE payload stable**, mutation not live-tested |
 | Crop/cut | `POST /api/edit/crop/{id}/` | **BUNDLE payload stable**, mutation not live-tested |
@@ -116,8 +161,8 @@ do not use `studio-api-prod.suno.com` after the presign step.
 | Clip visibility | `POST /api/gen/{id}/set_visibility/` | **BUNDLE stable**, mutation not live-tested |
 | Clip reaction | `POST /api/gen/{id}/update_reaction_type/` | **BUNDLE stable**, mutation not live-tested |
 | Download | `GET /api/download/clip/{id}?format=mp3|m4a` | Same-day read-only API evidence exists; current Web also has gated/presigned helpers and response `media_urls` |
-| Download WAV | `POST convert_wav`, then `GET wav_file` | Current Web still has the WAV init/poll helper; conversion not live-tested here |
-| Download OPUS | `GET opus_file`, optional `POST convert_opus` | Backend compatibility route; not found in this create chunk graph and not live-tested here |
+| Download WAV | `GET wav_file`, optional `POST convert_wav`, then poll GET | **BUNDLE current GET-first**; conversion not live-tested here |
+| Download OPUS | `GET opus_file`, optional `POST convert_opus`, then poll GET | **BUNDLE current GET-first**; helper is referenced by Studio, conversion not live-tested here |
 | Playlist list | `GET /api/playlist/me?page=N` | **LIVE-READ observed-compatible**; flat cover fields decode to one normalized key after the fix |
 | Playlist detail | `GET /api/playlist/v2/{id}` | **LIVE-READ stable**, v2 metadata/relationship/stats envelope decoded |
 | Playlist create | `POST /api/playlist/create/` | Present in bundle, mutation not live-tested |
@@ -130,9 +175,9 @@ do not use `studio-api-prod.suno.com` after the presign step.
 | Playlist reorder | `POST .../tracks/reorder-by-index` | **BUNDLE stable**, body remains `{positions:[...]}` |
 | Playlist trash | `POST /api/playlist/v2/{id}/trash` | **BUNDLE stable**, body remains `{undo:boolean}` |
 | Persona list | `GET get-personas|get-loved-personas|get-followed-personas` | **LIVE-READ observed-compatible** for mine/loved/followed; page/token responses decoded through bounded idempotent-GET fallback |
-| Persona detail | `GET /api/persona/get-persona/{id}/` | **LIVE-READ observed-compatible** for one owned Persona; identity, visibility, and source-range fields decoded |
-| Persona clips | `GET /api/persona/get-persona-paginated/{id}/?page=N` | **LIVE-READ envelope compatible** for an empty page; non-empty clip-item schema not live-verified |
-| Persona create/edit/visibility/trash | `POST`, `PUT` persona routes | Mutation routes not live-tested; see suspected drift below |
+| Persona detail | `GET /api/persona/get-persona/{id}/` | **LIVE-READ current** for root-backed legacy and rootless Vox Personas; non-empty nested clips decoded |
+| Persona clips | `GET /api/persona/get-persona-paginated/{id}/?page=N` | **LIVE-READ current** after bounded retry; non-empty page and two newly generated private Vox clips decoded |
+| Persona create/edit/visibility/trash | `POST`, `PUT` persona routes | **BUNDLE current**, including route-specific chunks and `image_s3_id` preservation; no live Persona mutation |
 | Persona love | `POST /api/persona/{id}/toggle_love/` | **BUNDLE stable**, mutation not live-tested |
 | Audio upload | `POST /api/uploads/audio/`, S3 form, `POST upload-finish`, `GET status`, `POST initialize-clip` | **BUNDLE endpoint/body and local format/size validation matched after fix**; upload not live-tested |
 | Image upload | `POST /api/uploads/image/`, S3 form, `POST upload-finish` | Routes remain in bundle; mutation not live-tested |
@@ -333,62 +378,121 @@ universe expands.
 preparation validates Cover, Extend, uploaded-audio Extend, and Inspiration
 against both task capabilities and exact condition combinations.
 
-## Suspected issues requiring a safe capture or explicit mutation approval
+## Current protocol confirmations and bounded live gaps
 
-### P1 risk — `create/describe --persona` does not match advanced Create references
+### Persona Advanced references are implemented against the current picker
 
-**REPO:** `create/describe --persona` sets `persona_id` and adds `prompt` plus
-`tags` to `override_fields`, but does not resolve a task, source clip, or source
-time range (`src/commands/create/submit.rs:166-174,223-230`).
+**BUNDLE:** the current Advanced builder still resolves a Persona reference to
+`task:"vox"` or `task:"artist_consistency"`, then writes `persona_id`, optional
+`artist_clip_id`, and the artist range. The important boundary is the picker
+projection, not an arbitrary fallback across every clip-shaped field:
 
-**BUNDLE:** the current advanced Create builder writes `artist_clip_id` (when a
-source clip exists), `persona_id`, `artist_start_s`, and `artist_end_s` for a
-Persona reference (chunk `2vyct5q4gq553.js`, byte 1,872,023). Its task resolver
-chooses `vox` or `artist_consistency` according to the reference/version path
-(bytes 1,878,580 and 1,878,612).
+- the normal Persona-detail picker assigns both create-state `rootClipId` and
+  `clipId` from `detail.root_clip_id` only (chunk `2vyct5q4gq553.js`, bytes
+  1,168,010 and 1,168,044);
+- the Advanced reference then reads `clipId || rootClipId` (bytes 504,282,
+  504,784 and 1,234,312), and only a truthy reference clip becomes
+  `artist_clip_id`;
+- `persona_clips[0].clip.id || vocal_clip_id` is retained only as an agentic
+  fallback; the Advanced builder does not consume it;
+- a separate `applyPersonaFromData` helper uses `root_clip_id || clip.id`, and a
+  clip-origin entry can use the current clip ID. These are entry-specific paths,
+  not the normal Persona-detail picker rule.
 
-The bundle also contains an `agenticPersonaId` bare-Persona path. Therefore the
-evidence does **not** establish that Sunox's shorter request is rejected, but it
-does establish that the CLI's ordinary Persona contract is not equivalent to
-the current advanced Create contract and cannot locally validate Persona type,
-source, or model/task compatibility.
+`EMPTY_UUID` is currently
+`00000000-0000-0000-0000-000000000000` (`2o55p_0ruo1em.js`, byte 17,219).
+The Web validity helper rejects empty and zero IDs, the Persona detail hook
+normalizes an invalid root to `null`, and the final generation validator rejects
+a zero `artist_clip_id`. Therefore rootless Vox sends no artist source; it does
+not promote a nested clip or `vocal_clip_id` into `artist_clip_id`.
 
-**Required confirmation:** capture one user-authorized Persona generation and
-connect the selected Persona type, resolved task, submit payload, result, and
-credit delta. Until then, either resolve Persona detail/source before building
-`vox` or `artist_consistency`, or explicitly document the current option as an
-agentic bare-Persona contract rather than advanced Create parity.
+The normal root-backed picker range is `artist_start_s=0` and
+`artist_end_s=rootClip.metadata.duration`. Rootless Vox uses `0/null`; the
+normal picker does not derive this range from `vocal_start_s/vocal_end_s`.
 
-### Cowrite submit may have moved or become async
+Model selection is also part of the protocol. The current
+`modelValidForVoxPersona` accepts model keys containing
+`crow/custom/dodo/eagle/fenix/goose/hawk/ibis`. A sourced Vox reference uses
+`task:"vox"` on such a model but clears the Vox version and falls back to
+`artist_consistency` on an older model. A rootless Vox cannot make that fallback
+because it has no source, and Web blocks it with `VOICE_REQUIRES_V5`.
+Legacy/root-backed Personas use `artist_consistency`.
 
-The current create chunk graph contains and live-validates
-`GET /api/generate/cowrite-lyrics/models/`, including
-`id`, `display_name`, `family`, and `supports_thinking` (bundle byte 610,997).
-The UI state still defaults `lyricsModel` to literal `default`.
+**LIVE-READ:** August 24 detail reads distinguished the cases in real data. A
+legacy Persona returned a valid root equal to its nested clip, a non-zero vocal
+range, and a longer root duration. A rootless Vox returned a zero root plus a
+non-empty nested `clip.id`, `vocal_clip_id`, and `persona_clips`. Those fields
+decoded successfully but, per the source mapping above, are not normal-picker
+artist-source fallbacks.
 
-However, the downloaded chunks did not contain an actual
-`POST /api/generate/cowrite-lyrics/` call or its older request fields
-(`selected`, `context_before`, `context_after`, `num_variants`). The current
-bundle prominently uses async lyric jobs for adjacent features:
-`POST /api/generate/lyrics-mashup`, then
-`GET /api/generate/lyrics/{lyrics_id}`.
+**REPO:** `create/describe --persona` now resolves detail, normalizes zero root,
+uses only a valid root source, obtains the full root duration, implements the
+sourced-Vox model fallback, and fails closed for rootless Vox on a model without
+Vox support. Request-shape tests cover rootless handling, legacy range, fallback,
+and failure.
 
-This is **not proof that the Cowrite POST was removed**: an authenticated lazy
-chunk may not have been downloaded, and the model endpoint still exists. A
-full DevTools network capture of a user-authorized Cowrite submission is needed
-before changing the command.
+**LIVE-GENERATION:** one owned private rootless Vox whose detail root was the
+zero UUID was submitted through that repaired Advanced path. The response used
+`task:"vox"` and v5.5 (`chirp-fenix`); both returned clips reached `complete`,
+had audio URLs, remained `is_public:false`, and carried the selected
+`persona_id`. Credits were read immediately before submission (`2107`) and
+after completion (`2097`), an exact delta of `10`. A subsequent paginated
+Persona-clips read reported `total_results=12`/12 nested clips and contained
+both new complete/private Vox results with the same Persona association. This
+connects request construction, backend interpretation, completed media,
+privacy, cost, and persistence without publishing or mutating the Persona.
 
-### Persona mutation route family lacks current live evidence
+The separate Simple agentic Web path remains distinct: it can send bare
+`persona_id` plus optional `persona_voice_ref`/audio references without the
+Advanced task resolver. A paid generation would still be required only if the
+project wants to prove that its former bare *custom* short request remains a
+backend-compatible third shape. It is no longer required to discover or adapt
+the current Advanced contract.
 
-The current loaded create graph retains list/detail/create/toggle-love strings,
-but not Sunox's edit, visibility, paginated-clips, or per-persona trash strings.
-Older live evidence in `API_INTELLIGENCE.md` observed
-`PUT /api/persona/bulk-trash-personas/`, while Sunox uses per-persona
-`PUT /api/persona/trash-persona/{id}/`.
+### Cowrite submit is current and live-compatible
 
-List pagination is response-compatible but intermittently transport-flaky;
-mutation route parity still needs a DevTools capture. No persona was changed
-for this audit.
+**BUNDLE:** interaction chunk `3glkvxw_k-y2j.js` byte 8,735 calls
+`POST /api/generate/cowrite-lyrics/`. The current body contains `selected`,
+`context_before`, `context_after`, `instruction`, title (truncated to 100 code
+points), `style`, `mode`, `references`, nullable `num_variants`, `lyricist_id`,
+`metadata.{lyrics_model,enable_thinking}`, nullable `create_session_token`, and
+nullable `lyrics_project_id`. Its response reads `edited_lyrics`,
+`lyrics_request_id`, `lyrics_id`, `variants`, `artist_to_tag_mapping`, and
+`next_prompts`.
+
+**LIVE-SUBMIT:** one authorized minimal Cowrite submission succeeded on August
+24 and decoded through the current response type. Credits were read before and
+after; the observed delta was `0`. This demonstrates current-account backend
+compatibility and the observed cost of that one submission, not a promise that
+every Cowrite mode or account is always free.
+
+The earlier conclusion arose because the submit handler lives in an interaction
+lazy chunk rather than the initial create graph. Cowrite is not currently
+evidenced as having moved to the adjacent lyrics-mashup async job protocol.
+
+### Persona mutation route family is current in first-party source
+
+Current route-specific and interaction chunks confirm both mutation families:
+
+| Operation | Current route | BUNDLE evidence |
+|---|---|---|
+| Create | `POST /api/persona/create/` | `2vyct5q4gq553.js`, byte 861,679 |
+| Edit | `PUT /api/persona/edit-persona/{id}/` | `2x-65bipljzoj.js`, byte 25,733 |
+| Visibility | `PUT /api/persona/set_visibility/{id}/?is_public=<bool>` | `24xq6d54vzip9.js`, byte 2,906 |
+| Love | `POST /api/persona/{id}/toggle_love/` | `2vyct5q4gq553.js`, byte 1,888,350 |
+| Bulk trash/restore/purge | `PUT /api/persona/bulk-trash-personas/` | `24l-fzxvb5otv.js`, byte 2,563 |
+| Per-item trash/restore/purge | `PUT /api/persona/trash-persona/{id}/?undo=<bool>&hide=<bool>` | `3spz_3hruuf8x.js`, byte 3,093 |
+
+Both trash families encode ordinary trash as `undo=false,hide=false`, restore
+as `undo=true,hide=false`, and permanent hide/purge as
+`undo=false,hide=true`. The full and lightweight edit surfaces retain the
+existing `image_s3_id`; `/voice` initializes edit state from the current image
+and sends it again. Sunox's edit request preservation is therefore intentional.
+
+This section is **BUNDLE**, not LIVE-SUBMIT evidence. No Persona was created,
+edited, published, loved, trashed, restored, or purged during this audit. A
+real mutation is unnecessary for route discovery and would only add account
+permission, response, persistence, and rollback evidence.
 
 ### Read transport resets are intermittent and recoverable
 
@@ -399,6 +503,15 @@ HTTP/2. Because the probes occurred at different times, this proves only that
 both transports can intermittently reset and a retry can recover; it does not
 attribute recovery causally to the protocol switch or show that a route family
 permanently requires one protocol.
+
+On August 24, two early attempts to read
+`GET /api/persona/get-persona-paginated/{id}/?page=1` failed with “error sending
+request” after automatic JWT refresh. An ordinary Persona-detail control then
+failed at the same transport layer. After the authorized generation, the
+bounded retry/read succeeded on that same paginated route and decoded a
+non-empty page, including both new results. The early failures remain evidence
+of intermittent transport availability, while the later success rules out a
+current route or response-schema break for the observed account data.
 
 The final-binary account readback made the remaining availability limit
 visible: two Persona commands exhausted all three attempts, while a later
@@ -422,26 +535,53 @@ inside the retry boundary and that the final normal attempt is exercised. A
 separate runtime guard test proves that a POST is rejected before network I/O if
 a future caller accidentally passes it to the read helper.
 
-### Download behavior now has multiple Web paths
+### Download protocol is current and WAV/OPUS are GET-first
 
-Current clip responses expose `media_urls` (including a direct M4A entry), and
-Web has feature-gated presigned download helpers. Sunox's prepared
-`GET /api/download/clip/{id}?format=mp3|m4a` path still had same-day read-only
-success, so it is not broken. It is nonetheless no longer the only current Web
-path, and direct `media_urls` could be a lower-latency fallback when allowed by
-the clip response.
+**BUNDLE:** `0psavgrakzykm.js` confirms the prepared MP3/M4A routes and the full
+WAV/OPUS state machines:
 
-OPUS conversion is a backend compatibility feature but is not visible in the
-current create graph. Do not remove it without a direct read-only endpoint
-probe on an owned completed clip.
+```text
+GET  /api/download/clip/{id}?format=mp3|m4a
 
-### Inspiration's mandatory tag-upsample step needs a submit capture
+GET  /api/gen/{id}/wav_file/
+POST /api/gen/{id}/convert_wav/
 
-The generation builder itself does not mandate `/api/prompts/upsample`; it
-accepts the tags already present in create state. Sunox always performs tag
-upsampling for `clip inspire` and requires the model's `tag_upsample` feature.
-Prior HAR evidence supported that sequence, but a fresh Web submit capture is
-needed to determine whether it is still unconditional or only a UI option.
+GET  /api/gen/{id}/opus_file/
+POST /api/gen/{id}/convert_opus
+```
+
+MP3/M4A occur at bytes 18,194/18,778, WAV read/convert at 24,065/23,007,
+and OPUS read/convert at 23,119/23,274. Both lossless/codec helpers first GET
+the existing file. They return immediately when a URL is present; only a
+missing file starts conversion, followed by at most 24 GET polls five seconds
+apart. The OPUS helper is referenced from current Studio initialization, so it
+is not an unreferenced historical route.
+
+**REPO:** Sunox follows the same GET-first ordering for WAV and OPUS. No
+conversion POST was exercised in this audit. Current `media_urls`, direct audio
+fallbacks and presigned helpers are parallel optimization/compatibility paths;
+they do not invalidate the prepared-download or file-status contracts.
+
+### Inspiration tag enhancement is explicit and optional
+
+**BUNDLE:** the generation builder accepts the tags already in create state; an
+Inspiration reference does not itself call `/api/prompts/upsample`. Current Web
+offers a separate Enhance action, gated by the selected model's `tag_upsample`
+feature. That flow reads `GET /api/personalization/settings`, treats missing
+`styles_augmentation` as enabled, and only then submits the upsample request.
+
+**REPO:** Inspiration exposes `enhance_tags` as opt-in. With it disabled, Sunox
+preserves the supplied tags and does not fetch personalization settings or call
+upsample. With it enabled, Sunox validates model support, reads personalization
+settings, sends original tags plus optional lyrics/user guidance, adopts the
+upsampled value (`is_instrumental:false` for the current vocal Inspiration
+flow), records `metadata.last_tags_generation` including
+`personalization_enabled`, and validates the final tag length against the
+resolved model. Request-shape tests cover both branches.
+
+This closes the earlier “mandatory upsample” concern without a generation
+capture. Neither tag upsampling nor personalization-settings mutation was
+called live in this audit.
 
 ## New Web capability surface, not regressions in existing commands
 
@@ -449,7 +589,8 @@ The current task resolver includes more than Sunox exposes:
 
 - `fixed_infill`;
 - `stem_condition`, `stem_condition_infill`, `cover_stem_condition`;
-- `vox`, `vox_cover`, `vox_extend`, `vox_playlist_condition`;
+- `vox_cover`, `vox_extend`, `vox_playlist_condition` beyond the implemented
+  ordinary Advanced Persona `vox` reference;
 - `underpainting`, `overpainting`;
 - `sample_condition`, `chop_sample_condition`, `mashup_condition`;
 - `stacked`;
@@ -474,10 +615,12 @@ cover art, clip permissions, project collaboration, and video upload/generation.
 - `capabilities`, `features`, and `allowed_condition_combinations`;
 - `max_lengths` for title, prompt, tags, negative tags, and one-box prompt;
 - richer model presentation metadata retained safely by `extra`;
-- remaster models with account-specific `can_use`.
+- remaster models with account-specific `can_use`; the configured account's
+  available Remaster entries were all `false`, so no Remaster POST was sent.
 
-No credit balance, account ID, model UUID, or other account-specific value is
-recorded in this document.
+Only the immediate `2107`/`2097` credit readings needed to establish the exact
+generation delta are recorded. No account identifier, model UUID, Persona ID,
+clip ID, or unrelated account-specific value is retained in this document.
 
 ### Feed and clips
 
@@ -500,23 +643,32 @@ chunk set.
 - Persona mine/loved/followed list GETs returned their page envelopes. Mine
   included `personas`, `total_results`, `current_page`, nullable
   `continuation_token`, and current quota counters.
-- One owned Persona detail decoded identity, visibility, and source-range
-  fields; its paginated clips route decoded a valid empty page. This confirms
-  the empty envelope, not the schema of a non-empty clip item.
+- August 24 owned-detail reads decoded one root-backed legacy Persona and one
+  rootless Vox Persona. The latter included non-empty nested `clip`,
+  `vocal_clip_id`, and `persona_clips` data (including Vox task metadata), so
+  the nested detail schema is live-proven.
+- A historical August 23 read decoded a valid empty paginated-clips envelope.
+  On August 24 the first reads reset at the transport layer, but a later bounded
+  retry/read succeeded with `total_results=12` and 12 nested clips. It decoded
+  both newly generated results as complete, private, Vox-task clips associated
+  with the selected Persona.
 
-The observed playlist responses and Persona list/detail/empty-page envelopes
-are compatible under the bounded GET fallback. Playlist flat-item
+The observed playlist responses and Persona list/detail/paginated nested-clip
+envelopes are compatible under the bounded GET fallback. Playlist flat-item
 normalization was also corrected.
 
 ## Not safely verified
 
-The following require a write, a background job, a credit-bearing action, or a
-destructive action, so this audit did not probe them live:
+Other than the authorized minimal Cowrite submit and private rootless-Vox
+Advanced generation described above, the following require a write, a
+background job, account eligibility, a credit-bearing action, or a
+destructive/public state change, so this audit did not probe them live:
 
-- any `/api/generate/v2-web/` variant, including create, cover, extend,
-  inspiration, and stems;
-- Cowrite POST, tag upsample, remaster, concat, speed, reverse, crop, fade, and
-  timed-lyrics initiation;
+- other `/api/generate/v2-web/` variants, including non-Persona create, cover,
+  extend, inspiration, stems, root-backed Persona and older-model fallback;
+- tag upsample, concat, speed, reverse, crop, fade, and timed-lyrics initiation;
+- Remaster submission: current billing returned `can_use:false`, and the CLI
+  correctly blocked instead of bypassing account eligibility;
 - audio/image upload and finalization;
 - clip/persona/playlist metadata, visibility, reactions, membership, trash,
   restore, or purge;
@@ -525,22 +677,34 @@ destructive action, so this audit did not probe them live:
 
 A successful HTTP status from any of these would not by itself prove the full
 workflow; a future authorized capture should connect the submit body, returned
-IDs, polling route, final persisted state, credit delta, and rollback or cleanup.
+IDs, polling route, final persisted state, credit delta, and rollback or
+cleanup. In particular, current first-party Persona mutation source is not
+being represented here as a destructive or public live test.
 
 ## Follow-up order
 
-1. Capture a Persona generation before choosing between advanced-reference
-   resolution (`vox`/`artist_consistency`) and an explicitly agentic bare path.
-2. Capture a Cowrite submit and persona mutation in DevTools before changing
-   those protocols.
-3. Re-capture Inspiration submit to decide whether tag upsampling remains
-   mandatory.
+1. Exercise Remaster only with an account/model whose billing response says
+   `can_use:true`; do not force the current ineligible account past the guard.
+2. If the project wants to preserve a claim that the former bare *custom*
+   Persona payload remains backend-compatible, capture one authorized paid
+   generation with submit body, result, task interpretation, and credit delta.
+   The implemented current Advanced rootless-Vox path is already live-closed;
+   this optional check concerns only the former shorter payload.
+
+No further account write is required to confirm Cowrite, the implemented
+Advanced rootless-Vox path, current Persona mutation routes, paginated Persona
+clips, optional Inspiration enhancement, or GET-first WAV/OPUS.
 
 ## Reproduction notes
 
 Repository inventory used `rg` over Rust sources and no JavaScript script.
 Bundle analysis used literal searches, byte offsets, `dd`, `perl`, and SHA-256
-hashing. Live checks used the compiled Sunox CLI with read-only commands. The
-intentional Cowrite probe supplied an invalid model name: the client completed
-model discovery, rejected the name locally, and never sent the generation
-request.
+hashing. Live checks used the compiled Sunox CLI and the configured account.
+Most calls were read-only. The two authorized exceptions were the minimal
+Cowrite submit (successfully decoded, observed credits delta `0`) and one
+private rootless-Vox Advanced generation. The latter used v5.5
+(`chirp-fenix`), returned two complete private Vox clips with audio URLs and the
+selected Persona association, and consumed exactly 10 credits (`2107` to
+`2097`). The later paginated read verified both results persisted. No account,
+Persona, or clip identifier is recorded here. No upload, metadata/publication
+change, reaction, deletion, Persona mutation, or conversion job was performed.

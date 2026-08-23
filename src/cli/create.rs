@@ -295,9 +295,13 @@ pub struct InspireArgs {
     #[arg(long)]
     pub title: String,
 
-    /// Starting style tags; Suno expands these through its prompt upsample flow
+    /// Style tags for the inspiration request
     #[arg(long)]
     pub tags: String,
+
+    /// Enhance style tags through Suno's optional prompt enhance action before submit
+    #[arg(long)]
+    pub enhance_tags: bool,
 
     /// Styles to exclude
     #[arg(long)]

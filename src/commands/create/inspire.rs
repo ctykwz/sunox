@@ -33,6 +33,7 @@ pub async fn inspire(args: InspireArgs, ctx: &AppContext) -> Result<(), CliError
                 clip_id: &args.clip_id,
                 title: &args.title,
                 tags: &args.tags,
+                enhance_tags: args.enhance_tags,
                 negative_tags: &negative_tags,
                 lyrics: &lyrics,
                 weirdness: args.weirdness,

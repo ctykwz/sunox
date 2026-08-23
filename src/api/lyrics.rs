@@ -19,7 +19,7 @@ impl SunoClient {
         .await
     }
 
-    /// Generate fresh lyrics through the Cowrite submit contract captured on 2026-07-26.
+    /// Generate fresh lyrics through the current Web Cowrite submit contract.
     pub async fn generate_lyrics(
         &self,
         options: CowriteLyricsOptions<'_>,

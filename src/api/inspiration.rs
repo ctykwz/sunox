@@ -9,6 +9,7 @@ pub struct InspirationOptions<'a> {
     pub clip_id: &'a str,
     pub title: &'a str,
     pub tags: &'a str,
+    pub enhance_tags: bool,
     pub negative_tags: &'a str,
     pub lyrics: &'a str,
     pub weirdness: f64,
@@ -50,24 +51,29 @@ impl SunoClient {
         req.playlist_id = Some("inspiration".into());
         req.playlist_clip_ids = Some(vec![options.clip_id.to_string()]);
         req.set_challenge_token(options.challenge_token);
-        let limits = self
-            .prepare_generation_request_with_features(&mut req, &[TAG_UPSAMPLE_FEATURE])
-            .await?;
-
-        let upsampled = self
-            .upsample_tags(PromptUpsampleRequest {
-                original_tags,
-                lyrics: (!lyrics.is_empty()).then_some(lyrics),
-                is_instrumental: false,
-                user_guidance: None,
-            })
-            .await?;
-        req.tags = Some(upsampled.upsampled.clone());
-        req.metadata.last_tags_generation = Some(LastTagsGeneration::from_upsample_response(
-            original_tags.to_string(),
-            upsampled,
-        ));
-        validate_generation_lengths_with_limits(&req, &limits)?;
+        if options.enhance_tags {
+            let limits = self
+                .prepare_generation_request_with_features(&mut req, &[TAG_UPSAMPLE_FEATURE])
+                .await?;
+            let personalization_enabled = self.styles_augmentation_enabled().await?;
+            let upsampled = self
+                .upsample_tags(PromptUpsampleRequest {
+                    original_tags,
+                    lyrics: (!lyrics.is_empty()).then_some(lyrics),
+                    is_instrumental: false,
+                    user_guidance: None,
+                })
+                .await?;
+            req.tags = Some(upsampled.upsampled.clone());
+            req.metadata.last_tags_generation = Some(LastTagsGeneration::from_upsample_response(
+                original_tags.to_string(),
+                upsampled,
+                personalization_enabled,
+            ));
+            validate_generation_lengths_with_limits(&req, &limits)?;
+        } else {
+            self.prepare_generation_request(&mut req).await?;
+        }
         Ok(req)
     }
 }

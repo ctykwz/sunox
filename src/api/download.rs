@@ -60,7 +60,7 @@ impl SunoClient {
                     .await
             }
             DownloadFormat::Wav => {
-                self.generated_wav_url(clip_id, deadline, polling.interval)
+                self.generated_or_existing_wav_url(clip_id, deadline, polling.interval)
                     .await
             }
             DownloadFormat::Opus => {
@@ -72,6 +72,10 @@ impl SunoClient {
 
     async fn opus_url_if_ready(&self, clip_id: &str) -> Result<Option<String>, CliError> {
         Ok(self.opus_file(clip_id).await?.opus_file_url)
+    }
+
+    async fn wav_url_if_ready(&self, clip_id: &str) -> Result<Option<String>, CliError> {
+        Ok(self.wav_file(clip_id).await?.wav_file_url)
     }
 
     async fn prepared_download_url(
@@ -197,6 +201,25 @@ impl SunoClient {
             return Ok(url);
         }
         self.generated_opus_url(clip_id, deadline, poll_interval)
+            .await
+    }
+
+    async fn generated_or_existing_wav_url(
+        &self,
+        clip_id: &str,
+        deadline: Instant,
+        poll_interval: Duration,
+    ) -> Result<String, CliError> {
+        let existing = run_before_deadline(
+            deadline,
+            self.wav_url_if_ready(clip_id),
+            download_timeout("WAV file", clip_id),
+        )
+        .await?;
+        if let Some(url) = existing {
+            return Ok(url);
+        }
+        self.generated_wav_url(clip_id, deadline, poll_interval)
             .await
     }
 
