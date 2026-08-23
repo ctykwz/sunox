@@ -76,6 +76,7 @@ sunox create \
   --tags "dream pop, synth, female vocal" \
   --exclude "metal, aggressive" \
   --lyrics-file lyrics.txt \
+  --duration 180 \
   --weirdness 35 \
   --style-influence 70
 ```
@@ -105,9 +106,10 @@ sunox clip wait <clip_id_1> <clip_id_2>
 sunox download <clip_id_1> <clip_id_2> --output ./songs
 ```
 
-不指定格式时，Sunox 会直接下载现成的 CDN MP3，并把普通歌词和时间轴歌词写入 ID3。
-只有明确需要 Suno 的格式转换时，才使用 `--format mp3|m4a|wav|opus`；下载视频则使用
-`--video`。
+不指定格式时，Sunox 会通过 Suno 官方 prepared-download 接口下载 MP3，并把普通歌词和
+时间轴歌词写入 ID3。用 `--format mp3|m4a|wav|opus` 选择其他格式；WAV/OPUS 会先读取已有
+转换结果，缺失时才发起服务端转换。传 `--no-convert` 可禁止这个 POST；下载视频使用
+`--video`。prepared download 即使是 GET，也可能计入套餐下载额度。
 
 ## 常用命令
 
@@ -119,6 +121,7 @@ sunox lyrics                       只生成歌词
 sunox clip list                    查看自己的歌曲
 sunox clip search <关键词>         搜索歌曲
 sunox clip info <id>               查看歌曲详情
+sunox clip actions <id>            查看服务端对该歌曲开放的操作
 sunox clip wait <ids>              等待生成完成
 sunox download <ids>               下载歌曲
 
@@ -141,6 +144,7 @@ sunox persona create <clip_id>     从歌曲创建 Persona
 
 sunox clip upload <文件>           上传本地音频
 sunox models                       查看账号可用模型
+sunox capabilities                 查看账号权益与 CLI 适配矩阵
 sunox doctor --network             检查 DNS、TCP 和 HTTPS
 sunox update                       更新到最新 GitHub Release
 ```
@@ -151,6 +155,19 @@ Cowrite 歌词模型会在运行时从 Suno 查询。可用
 `sunox lyrics --prompt "..." --model <模型>` 按 ID 或展示名选择模型；只有模型声明支持时
 才使用 `--thinking`。`clip inspire` 可通过 `--audio-influence 0..100` 设置当前 Web
 协议中的 `audio_weight`。
+
+普通生成和 Cover 也不再依赖 CLI 内置的固定模型枚举：`--model` 可传当前账号模型的展示名、
+external key 或账号 model ID；不可用或同名歧义会在提交前失败。`--duration <秒>` 仅在选择
+当前 v5.5 `chirp-fenix` 时可用；若账号模型返回了 duration 上限，CLI 会按该值校验。
+`sunox capabilities --json` 会同时展示当前套餐、实时模型选择器、账号限制和各项权益的 CLI
+覆盖状态。
+
+Remaster 除了校验账号 feature 和模型列表，还会在提交前读取源 Clip：必须精确命中、已完成、
+未进回收站、不是 infill、时长不超过 960 秒，并且 `action_config` 中 Remaster 为
+`visible=true, disabled=false`。v4.5+ `chirp-bass` 协议不发送 `variation_category`，因此该模型
+显式传 `--variation` 会被本地拒绝。未传 `--model` 时只会自动选择 CLI 已知请求形状的
+实时模型；如果账号只暴露未知的未来模型，会在提交前失败。已支持的模型可按
+`capabilities` 返回的展示名或 external key 传给 `--model`。
 
 ## 生成验证
 
@@ -300,8 +317,17 @@ sunox config set challenge_browser auto
 同一账号的写操作默认串行执行，避免刷新认证或修改远端资源时互相覆盖。`--parallel` 会为
 当前命令关闭这层保护，只应在确定需要并发写入时使用。
 
+全局 `--read-only` 会在第一次写请求前拒绝账号写操作。它仍允许账号读取和 prepared download
+（后者可能计入下载额度），并禁止时间轴歌词补生成及缺失 WAV/OPUS 的服务端转换；若结果已存在，
+仍可只读返回。
+
 部分命令会消耗 Credits 或修改远端资源。新建的歌曲、歌单和 Persona 默认保持私有，只有
 显式执行公开命令才会改变可见性；不可恢复的操作必须传入 `-y` 或 `--yes`。
+
+[Suno 已公告](https://about.suno.com/blog/suno-updates-tos)自 2026 年 9 月 3 日起，Pro 每月最多
+下载 20 首、Premier 每月 60 首；Premier 的 Studio 导出不受此限制。Sunox 使用官方
+prepared-download 流程，不绕过套餐计数。CLI 只展示
+实时 billing 响应实际返回的额度字段，不臆测剩余下载次数。
 
 ## 开发
 

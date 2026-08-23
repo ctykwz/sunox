@@ -3,8 +3,8 @@ use crate::api::extend::ExtendClipOptions;
 use crate::api::generate::{TAG_UPSAMPLE_FEATURE, validate_generation_lengths_with_limits};
 use crate::api::types::{GenerateRequest, LastTagsGeneration};
 use crate::app::AppContext;
-use crate::cli::{CreateArgs, DescribeArgs, ExtendArgs, GenerateArgs, ModelVersion};
-use crate::core::{AppConfig, CliError};
+use crate::cli::{CreateArgs, DescribeArgs, ExtendArgs, GenerateArgs};
+use crate::core::{AppConfig, CliError, normalize_generation_model_selector};
 use crate::workflow::generation::{build_control_sliders, build_tags};
 
 use super::support::{ChallengeMode, execute_generation_submission, output_generation};
@@ -27,6 +27,7 @@ fn build_describe_args_from_create(args: CreateArgs) -> Result<DescribeArgs, Cli
         tags: args.tags,
         exclude: args.exclude,
         model: args.model,
+        duration: args.duration,
         vocal: args.vocal,
         weirdness: args.weirdness,
         style_influence: args.style_influence,
@@ -53,6 +54,7 @@ fn build_generate_args_from_create(args: CreateArgs) -> GenerateArgs {
         lyrics: args.lyrics,
         lyrics_file: args.lyrics_file,
         model: args.model,
+        duration: args.duration,
         vocal: if args.instrumental { None } else { args.vocal },
         weirdness: args.weirdness,
         style_influence: args.style_influence,
@@ -156,13 +158,16 @@ fn build_generate_request(
     let tags = build_tags(args.tags.as_deref(), None);
     let control_sliders = build_control_sliders(args.weirdness, args.style_influence)?;
 
-    let mut req = GenerateRequest::new(model_api_key(args.model.as_ref(), config), "custom");
+    let model = model_api_key(args.model.as_deref(), config)?;
+    validate_requested_duration(args.duration)?;
+    let mut req = GenerateRequest::new(&model, "custom");
     if let Some(lyrics) = lyrics {
         req.prompt = lyrics;
     }
     req.title = Some(args.title.clone().unwrap_or_default());
     req.tags = Some(tags.unwrap_or_default());
     req.negative_tags = args.exclude.clone().unwrap_or_default();
+    req.duration = args.duration;
     req.make_instrumental = args.instrumental;
     req.persona_id = args.persona.clone();
     req.metadata.control_sliders = control_sliders;
@@ -298,12 +303,15 @@ fn build_describe_request(
     let tags = build_tags(args.tags.as_deref(), args.vocal.as_ref());
     let control_sliders = build_control_sliders(args.weirdness, args.style_influence)?;
 
-    let mut req = GenerateRequest::new(model_api_key(args.model.as_ref(), config), "simple");
+    let model = model_api_key(args.model.as_deref(), config)?;
+    validate_requested_duration(args.duration)?;
+    let mut req = GenerateRequest::new(&model, "simple");
     req.gpt_description_prompt = Some(args.prompt.clone());
     req.metadata.lyrics_model = Some("default".into());
     req.title = args.title.clone();
     req.tags = tags;
     req.negative_tags = args.exclude.clone().unwrap_or_default();
+    req.duration = args.duration;
     req.make_instrumental = args.instrumental;
     req.persona_id = args.persona.clone();
     req.metadata.control_sliders = control_sliders;
@@ -350,16 +358,29 @@ fn mark_tags_override(req: &mut GenerateRequest) {
     }
 }
 
-fn model_api_key<'a>(model: Option<&'a ModelVersion>, config: &'a AppConfig) -> &'a str {
-    model
-        .map(ModelVersion::to_api_key)
-        .unwrap_or(config.default_model.as_str())
+fn model_api_key(model: Option<&str>, config: &AppConfig) -> Result<String, CliError> {
+    normalize_generation_model_selector(model.unwrap_or(config.default_model.as_str()))
 }
 
-fn model_label<'a>(model: Option<&'a ModelVersion>, config: &'a AppConfig) -> &'a str {
-    model
-        .map(ModelVersion::display_name)
-        .unwrap_or(config.default_model.as_str())
+fn model_label<'a>(model: Option<&'a String>, config: &'a AppConfig) -> &'a str {
+    model.map(String::as_str).unwrap_or_else(|| {
+        if config.default_model == "auto" {
+            "account default"
+        } else {
+            config.default_model.as_str()
+        }
+    })
+}
+
+fn validate_requested_duration(duration: Option<f64>) -> Result<(), CliError> {
+    if let Some(duration) = duration
+        && (!duration.is_finite() || duration <= 0.0)
+    {
+        return Err(CliError::Config(
+            "--duration must be a positive finite number of seconds".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub async fn extend(args: ExtendArgs, ctx: &AppContext) -> Result<(), CliError> {
@@ -399,7 +420,7 @@ pub async fn extend(args: ExtendArgs, ctx: &AppContext) -> Result<(), CliError> 
 #[cfg(test)]
 mod tests {
     use crate::api::types::{GenerateRequest, PersonaInfo};
-    use crate::cli::{CreateArgs, DescribeArgs, ModelVersion};
+    use crate::cli::{CreateArgs, DescribeArgs};
     use crate::core::AppConfig;
 
     use super::{
@@ -424,13 +445,14 @@ mod tests {
         }
     }
 
-    fn describe_args(title: Option<String>, model: Option<ModelVersion>) -> DescribeArgs {
+    fn describe_args(title: Option<String>, model: Option<String>) -> DescribeArgs {
         DescribeArgs {
             title,
             prompt: "bright city pop about a clean morning".into(),
             tags: Some("city pop, bright".into()),
             exclude: None,
             model,
+            duration: None,
             vocal: None,
             weirdness: None,
             style_influence: None,
@@ -447,7 +469,7 @@ mod tests {
     fn describe_request_omits_title_by_default() {
         let config = AppConfig::default();
 
-        let req = build_describe_request(&describe_args(None, Some(ModelVersion::V55)), &config)
+        let req = build_describe_request(&describe_args(None, Some("v5.5".into())), &config)
             .expect("request");
 
         let body = serde_json::to_value(req).expect("request json");
@@ -472,7 +494,7 @@ mod tests {
         let config = AppConfig::default();
 
         let req = build_describe_request(
-            &describe_args(Some("Morning Reset".into()), Some(ModelVersion::V55)),
+            &describe_args(Some("Morning Reset".into()), Some("v5.5".into())),
             &config,
         )
         .expect("request");
@@ -482,9 +504,34 @@ mod tests {
     }
 
     #[test]
+    fn describe_request_preserves_known_display_selector_and_writes_duration() {
+        let mut args = describe_args(None, Some("V5.5".into()));
+        args.duration = Some(210.5);
+
+        let request = build_describe_request(&args, &AppConfig::default()).expect("request");
+        let body = serde_json::to_value(request).expect("request json");
+
+        assert_eq!(body["mv"], "v5.5");
+        assert_eq!(body["duration"], 210.5);
+    }
+
+    #[test]
+    fn request_builder_rejects_non_positive_or_non_finite_duration() {
+        for duration in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut args = describe_args(None, Some("v5.5".into()));
+            args.duration = Some(duration);
+
+            let error =
+                build_describe_request(&args, &AppConfig::default()).expect_err("invalid duration");
+
+            assert!(error.to_string().contains("positive finite"));
+        }
+    }
+
+    #[test]
     fn describe_request_omits_unspecified_title_and_tags() {
         let config = AppConfig::default();
-        let mut args = describe_args(None, Some(ModelVersion::V55));
+        let mut args = describe_args(None, Some("v5.5".into()));
         args.tags = None;
 
         let req = build_describe_request(&args, &config).expect("request");
@@ -515,7 +562,8 @@ mod tests {
             exclude: None,
             lyrics: None,
             lyrics_file: None,
-            model: Some(ModelVersion::V55),
+            model: Some("v5.5".into()),
+            duration: Some(222.0),
             vocal: None,
             weirdness: None,
             style_influence: None,
@@ -533,6 +581,7 @@ mod tests {
         assert!(describe_args.captcha);
         assert!(!describe_args.no_captcha);
         assert!(describe_args.enhance_tags);
+        assert_eq!(describe_args.duration, Some(222.0));
     }
 
     #[test]
@@ -545,6 +594,7 @@ mod tests {
             lyrics: None,
             lyrics_file: None,
             model: None,
+            duration: None,
             vocal: None,
             weirdness: None,
             style_influence: None,
@@ -572,6 +622,7 @@ mod tests {
             lyrics: Some("[Verse]\nHello".into()),
             lyrics_file: None,
             model: None,
+            duration: None,
             vocal: None,
             weirdness: None,
             style_influence: None,
@@ -614,6 +665,7 @@ mod tests {
             lyrics: Some("[Verse]\nHello".into()),
             lyrics_file: None,
             model: None,
+            duration: Some(180.0),
             vocal: Some(crate::cli::VocalGender::Female),
             weirdness: None,
             style_influence: None,
@@ -630,6 +682,7 @@ mod tests {
 
         assert_eq!(body["tags"], "city pop");
         assert_eq!(body["metadata"]["vocal_gender"], "f");
+        assert_eq!(body["duration"], 180.0);
     }
 
     #[test]
@@ -641,6 +694,7 @@ mod tests {
             lyrics: Some("[Verse]\nHello".into()),
             lyrics_file: None,
             model: None,
+            duration: None,
             vocal: None,
             weirdness: None,
             style_influence: None,
@@ -731,6 +785,7 @@ mod tests {
             lyrics: Some("[Verse]\nHello".into()),
             lyrics_file: None,
             model: None,
+            duration: None,
             vocal: None,
             weirdness: None,
             style_influence: None,
@@ -762,6 +817,7 @@ mod tests {
             lyrics: Some(structure.into()),
             lyrics_file: None,
             model: None,
+            duration: None,
             vocal: None,
             weirdness: None,
             style_influence: None,
@@ -796,7 +852,8 @@ mod tests {
             exclude: Some("vocal, spoken word".into()),
             lyrics: None,
             lyrics_file: None,
-            model: Some(ModelVersion::V55),
+            model: Some("v5.5".into()),
+            duration: None,
             vocal: Some(crate::cli::VocalGender::Female),
             weirdness: Some(40.0),
             style_influence: Some(68.0),
@@ -823,7 +880,7 @@ mod tests {
             "cinematic synth-rock, humid pads, Full-length instrumental about heat before rain"
         );
         assert_eq!(body["negative_tags"], "vocal, spoken word");
-        assert_eq!(body["mv"], "chirp-fenix");
+        assert_eq!(body["mv"], "v5.5");
         assert!(
             !body["tags"]
                 .as_str()

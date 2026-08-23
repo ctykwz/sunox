@@ -24,6 +24,9 @@ pub enum ClipCommand {
     /// Show detailed info for a single clip
     Info(InfoArgs),
 
+    /// Show server-provided actions for a single clip
+    Actions(InfoArgs),
+
     /// Check generation status
     Status(StatusArgs),
 

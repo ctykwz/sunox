@@ -85,11 +85,10 @@ impl AppConfig {
             .map_err(|e| CliError::Config(format!("parse config: {e}")))?;
         config.apply_env_overrides(vars)?;
         // Figment deserializes persisted TOML directly into AppConfig, so
-        // canonicalize it through the same gate used by config writes. A
-        // removed v2 value is migrated in memory to account-driven selection
-        // instead of either submitting the obsolete protocol or bricking the
-        // `config set` command needed to update the file.
-        config.default_model = normalize_loaded_model_key(&config.default_model)?;
+        // canonicalize it through the same gate used by config writes. Model
+        // availability is account-specific and is validated against billing
+        // immediately before a generation submission.
+        config.default_model = normalize_generation_model_selector(&config.default_model)?;
         ensure_poll_interval_secs(config.poll_interval_secs)?;
         ensure_poll_timeout_secs(config.poll_timeout_secs)?;
         Ok(config)
@@ -113,7 +112,9 @@ impl AppConfig {
     {
         for (key, value) in vars {
             match key.as_str() {
-                "SUNOX_DEFAULT_MODEL" => self.default_model = normalize_model_key(&value)?,
+                "SUNOX_DEFAULT_MODEL" => {
+                    self.default_model = normalize_generation_model_selector(&value)?
+                }
                 "SUNOX_POLL_INTERVAL_SECS" => {
                     self.poll_interval_secs =
                         parse_poll_interval("SUNOX_POLL_INTERVAL_SECS", &value)?;
@@ -149,7 +150,7 @@ impl AppConfig {
 
     fn set_value(&mut self, key: &str, value: String) -> Result<(), CliError> {
         match key {
-            "default_model" => self.default_model = normalize_model_key(&value)?,
+            "default_model" => self.default_model = normalize_generation_model_selector(&value)?,
             "poll_interval_secs" => self.poll_interval_secs = parse_poll_interval(key, &value)?,
             "poll_timeout_secs" => self.poll_timeout_secs = parse_poll_timeout(key, &value)?,
             "output_dir" => self.output_dir = value,
@@ -252,7 +253,9 @@ impl StoredConfig {
 
     fn set(&mut self, key: &str, value: &str) -> Result<(), CliError> {
         match key {
-            "default_model" => self.default_model = Some(normalize_model_key(value)?),
+            "default_model" => {
+                self.default_model = Some(normalize_generation_model_selector(value)?)
+            }
             "poll_interval_secs" => {
                 self.poll_interval_secs = Some(parse_poll_interval(key, value)?)
             }
@@ -272,34 +275,20 @@ impl StoredConfig {
     }
 }
 
-fn normalize_model_key(value: &str) -> Result<String, CliError> {
-    let normalized = match value {
-        "auto" => "auto",
-        "v5.5" | "chirp-fenix" => "chirp-fenix",
-        "v5" | "chirp-crow" => "chirp-crow",
-        "v4.5+" | "chirp-bluejay" => "chirp-bluejay",
-        "v4.5-all" | "chirp-auk-turbo" => "chirp-auk-turbo",
-        "v4.5" | "chirp-auk" => "chirp-auk",
-        "v4" | "chirp-v4" => "chirp-v4",
-        "v3.5" | "chirp-v3-5" => "chirp-v3-5",
-        "v3" | "chirp-v3-0" => "chirp-v3-0",
-        _ => {
-            return Err(CliError::Config(format!(
-                "unknown model `{value}`; use auto, a CLI model version such as v5.5, or a Suno API model key such as chirp-fenix"
-            )));
-        }
-    };
-    Ok(normalized.to_string())
-}
-
-fn normalize_loaded_model_key(value: &str) -> Result<String, CliError> {
-    if matches!(value, "v2" | "chirp-v2-xxl-alpha") {
-        eprintln!(
-            "Warning: configured model `{value}` was removed from the current Suno Web protocol; using `default_model=auto`. Run `sunox config set default_model <model>` to update config.toml."
-        );
-        return Ok("auto".into());
+pub(crate) fn normalize_generation_model_selector(value: &str) -> Result<String, CliError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(CliError::Config(
+            "generation model selector cannot be empty".into(),
+        ));
     }
-    normalize_model_key(value)
+    let lower = value.to_ascii_lowercase();
+    match lower.as_str() {
+        "auto" | "v5.5" | "v5" | "v4.5+" | "v4.5-all" | "v4.5" | "v4" | "v3.5" | "v3" | "v2"
+        | "chirp-fenix" | "chirp-crow" | "chirp-bluejay" | "chirp-auk-turbo" | "chirp-auk"
+        | "chirp-v4" | "chirp-v3-5" | "chirp-v3-0" | "chirp-v2-xxl-alpha" => Ok(lower),
+        _ => Ok(value.to_string()),
+    }
 }
 
 fn normalize_override_value(value: &str) -> String {
@@ -366,7 +355,7 @@ mod tests {
 
         config.set("default_model", "v5.5").expect("set config");
 
-        assert_eq!(config.default_model.as_deref(), Some("chirp-fenix"));
+        assert_eq!(config.default_model.as_deref(), Some("v5.5"));
     }
 
     #[test]
@@ -377,53 +366,63 @@ mod tests {
             .set("default_model", "v4.5-all")
             .expect("set free model");
 
-        assert_eq!(config.default_model.as_deref(), Some("chirp-auk-turbo"));
+        assert_eq!(config.default_model.as_deref(), Some("v4.5-all"));
     }
 
     #[test]
-    fn stored_config_rejects_the_removed_v2_model() {
+    fn stored_config_preserves_v2_for_account_validation() {
         let mut config = StoredConfig::default();
 
-        let error = config
+        config
             .set("default_model", "v2")
-            .expect_err("v2 is no longer in the current Web model protocol");
+            .expect("account billing decides whether v2 remains usable");
 
-        assert!(error.to_string().contains("unknown model `v2`"));
+        assert_eq!(config.default_model.as_deref(), Some("v2"));
     }
 
     #[test]
-    fn load_migrates_a_removed_model_from_an_existing_config_file() {
+    fn load_does_not_migrate_a_live_v2_selector_to_auto() {
         let dir = tempfile::tempdir().expect("test dir");
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "default_model = \"chirp-v2-xxl-alpha\"\n")
             .expect("write legacy config");
 
-        let config = AppConfig::load_from_path(Some(path), [])
-            .expect("removed persisted model should recover safely");
+        let config = AppConfig::load_from_path(Some(path), []).expect("load persisted model");
 
-        assert_eq!(config.default_model, "auto");
+        assert_eq!(config.default_model, "chirp-v2-xxl-alpha");
     }
 
     #[test]
-    fn load_canonicalizes_a_supported_alias_from_an_existing_config_file() {
+    fn load_preserves_a_supported_display_selector_from_an_existing_config_file() {
         let dir = tempfile::tempdir().expect("test dir");
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "default_model = \"v5.5\"\n").expect("write config");
 
         let config = AppConfig::load_from_path(Some(path), []).expect("load config");
 
-        assert_eq!(config.default_model, "chirp-fenix");
+        assert_eq!(config.default_model, "v5.5");
     }
 
     #[test]
-    fn stored_config_rejects_unknown_default_model() {
+    fn stored_config_canonicalizes_an_exact_external_model_key() {
         let mut config = StoredConfig::default();
 
-        let err = config
-            .set("default_model", "unknown-model")
-            .expect_err("unknown model");
+        config
+            .set("default_model", "CHIRP-FENIX")
+            .expect("known external key");
 
-        assert!(err.to_string().contains("unknown model"));
+        assert_eq!(config.default_model.as_deref(), Some("chirp-fenix"));
+    }
+
+    #[test]
+    fn stored_config_accepts_account_model_selector() {
+        let mut config = StoredConfig::default();
+
+        config
+            .set("default_model", "  account-model-id  ")
+            .expect("billing validates account model selectors before submit");
+
+        assert_eq!(config.default_model.as_deref(), Some("account-model-id"));
     }
 
     #[test]
@@ -560,7 +559,7 @@ mod tests {
             ])
             .expect("env overrides");
 
-        assert_eq!(config.default_model, "chirp-crow");
+        assert_eq!(config.default_model, "v5");
         assert_eq!(config.poll_interval_secs, 9);
         assert_eq!(config.poll_timeout_secs, 777);
         assert_eq!(config.output_dir, "/tmp/suno-output");
@@ -590,17 +589,28 @@ mod tests {
     }
 
     #[test]
-    fn env_override_rejects_unknown_default_model() {
+    fn env_override_accepts_account_display_name() {
         let mut config = AppConfig::default();
 
-        let err = config
+        config
             .apply_env_overrides([(
                 "SUNOX_DEFAULT_MODEL".to_string(),
-                "unknown-model".to_string(),
+                "My Account Model".to_string(),
             )])
-            .expect_err("unknown model");
+            .expect("account display name");
 
-        assert!(err.to_string().contains("unknown model"));
+        assert_eq!(config.default_model, "My Account Model");
+    }
+
+    #[test]
+    fn empty_generation_model_selector_is_rejected() {
+        let mut config = StoredConfig::default();
+
+        let error = config
+            .set("default_model", "  ")
+            .expect_err("empty selector");
+
+        assert!(error.to_string().contains("cannot be empty"));
     }
 
     #[test]

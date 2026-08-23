@@ -40,12 +40,14 @@ fn help_lists_codex_style_commands() {
         .stdout(predicate::str::contains("download"))
         .stdout(predicate::str::contains("add"))
         .stdout(predicate::str::contains("clip"))
+        .stdout(predicate::str::contains("capabilities"))
         .stdout(predicate::str::contains("login"))
         .stdout(predicate::str::contains("logout"))
         .stdout(predicate::str::contains("doctor"))
         .stdout(predicate::str::contains("install-browser-extension"))
         .stdout(predicate::str::contains("-c, --config <key=value>"))
         .stdout(predicate::str::contains("--parallel"))
+        .stdout(predicate::str::contains("--read-only"))
         .stdout(predicate::str::contains("generate").not());
 }
 
@@ -135,24 +137,28 @@ fn create_help_accepts_prompt_argument() {
 }
 
 #[test]
-fn create_help_exposes_the_current_free_model() {
+fn create_help_exposes_dynamic_account_model_selection() {
     let mut cmd = Command::cargo_bin("sunox").expect("binary");
 
     cmd.args(["create", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("v4.5-all"));
+        .stdout(predicate::str::contains(
+            "Generation model display name, external key, or account model ID",
+        ))
+        .stdout(predicate::str::contains("--duration"));
 }
 
 #[test]
-fn cover_help_exposes_the_current_free_model_override() {
+fn cover_help_exposes_dynamic_account_model_selection() {
     let mut cmd = Command::cargo_bin("sunox").expect("binary");
 
     cmd.args(["clip", "cover", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("v5.5"))
-        .stdout(predicate::str::contains("v4.5-all"));
+        .stdout(predicate::str::contains(
+            "Cover model display name, external key, or account model ID",
+        ));
 }
 
 #[test]
@@ -177,6 +183,7 @@ fn clip_help_groups_clip_subcommands() {
         .success()
         .stdout(predicate::str::contains("Manage clips"))
         .stdout(predicate::str::contains("list"))
+        .stdout(predicate::str::contains("actions"))
         .stdout(predicate::str::contains("status"))
         .stdout(predicate::str::contains("download"))
         .stdout(predicate::str::contains("upload"))
@@ -967,7 +974,36 @@ fn top_level_download_help_is_user_facing() {
         .stdout(predicate::str::contains("--output"))
         .stdout(predicate::str::contains("--force"))
         .stdout(predicate::str::contains("--format"))
+        .stdout(predicate::str::contains("--no-convert"))
         .stdout(predicate::str::contains("--video"));
+}
+
+#[test]
+fn read_only_blocks_a_mutation_before_authentication() {
+    let test_home = isolated_test_home("sunox-cli-read-only-mutation-test");
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    with_isolated_home(&mut cmd, &test_home)
+        .args(["clip", "like", "clip-a", "--read-only", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("\"code\": \"config_error\""))
+        .stderr(predicate::str::contains("--read-only"))
+        .stderr(predicate::str::contains("auth_missing").not());
+}
+
+#[test]
+fn read_only_blocks_generation_before_preflight_or_authentication() {
+    let test_home = isolated_test_home("sunox-cli-read-only-generation-test");
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    with_isolated_home(&mut cmd, &test_home)
+        .args(["create", "a short piano theme", "--read-only", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("\"code\": \"config_error\""))
+        .stderr(predicate::str::contains("--read-only"))
+        .stderr(predicate::str::contains("auth_missing").not());
 }
 
 #[test]
@@ -1118,8 +1154,8 @@ fn config_set_persists_in_isolated_home() {
 }
 
 #[test]
-fn removed_v2_config_recovers_and_can_be_replaced_through_the_cli() {
-    let test_home = isolated_test_home("sunox-cli-removed-model-recovery");
+fn live_v2_config_is_preserved_and_can_be_replaced_through_the_cli() {
+    let test_home = isolated_test_home("sunox-cli-v2-model-preservation");
     let config_dir = test_home.join(".config").join("sunox");
     std::fs::create_dir_all(&config_dir).expect("config directory");
     let config_path = config_dir.join("config.toml");
@@ -1131,21 +1167,21 @@ fn removed_v2_config_recovers_and_can_be_replaced_through_the_cli() {
         .args(["config", "show", "--json"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"default_model\": \"auto\""))
-        .stderr(predicate::str::contains("was removed"));
+        .stdout(predicate::str::contains(
+            "\"default_model\": \"chirp-v2-xxl-alpha\"",
+        ))
+        .stderr(predicate::str::contains("was removed").not());
 
     let mut set = Command::cargo_bin("sunox").expect("binary");
     with_isolated_home(&mut set, &test_home)
         .args(["config", "set", "default_model", "v5.5", "--json"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "\"default_model\": \"chirp-fenix\"",
-        ));
+        .stdout(predicate::str::contains("\"default_model\": \"v5.5\""));
 
     let persisted = std::fs::read_to_string(config_path).expect("updated config");
-    assert!(persisted.contains("default_model = \"chirp-fenix\""));
-    assert!(!persisted.contains("v2"));
+    assert!(persisted.contains("default_model = \"v5.5\""));
+    assert!(!persisted.contains("chirp-v2-xxl-alpha"));
 }
 
 #[test]
@@ -1177,7 +1213,7 @@ fn config_show_applies_sunox_env_overrides() {
 }
 
 #[test]
-fn config_set_normalizes_default_model_version() {
+fn config_set_preserves_default_model_display_selector() {
     let test_home = isolated_test_home("sunox-cli-model-config-test");
 
     let mut cmd = Command::cargo_bin("sunox").expect("binary");
@@ -1185,9 +1221,7 @@ fn config_set_normalizes_default_model_version() {
         .args(["config", "set", "default_model", "v5.5", "--json"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "\"default_model\": \"chirp-fenix\"",
-        ));
+        .stdout(predicate::str::contains("\"default_model\": \"v5.5\""));
 }
 
 #[test]
@@ -1404,9 +1438,7 @@ fn global_config_override_applies_without_persisting() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "\"default_model\": \"chirp-crow\"",
-        ))
+        .stdout(predicate::str::contains("\"default_model\": \"v5\""))
         .stdout(predicate::str::contains("\"serial_mutations\": false"));
 
     let mut show = Command::cargo_bin("sunox").expect("binary");
@@ -1451,9 +1483,7 @@ fn agent_info_reports_submit_wait_download_workflow() {
         .stdout(predicate::str::contains("do not pass --parallel"))
         .stdout(predicate::str::contains("\"audio_analysis\""))
         .stdout(predicate::str::contains("\"download_formats\""))
-        .stdout(predicate::str::contains(
-            "supports explicit --format mp3|m4a|wav|opus",
-        ))
+        .stdout(predicate::str::contains("official prepared MP3 endpoint"))
         .stdout(predicate::str::contains(
             "Suno Web exposes Pro download choices",
         ))
@@ -1476,9 +1506,7 @@ fn agent_info_reports_submit_wait_download_workflow() {
             "poll until the requested fields are visible",
         ))
         .stdout(predicate::str::contains("stream the file to S3"))
-        .stdout(predicate::str::contains(
-            "partial mutation or partial download",
-        ))
+        .stdout(predicate::str::contains("partial or ambiguous mutation"))
         .stdout(predicate::str::contains(
             "not the same as Suno Web Pro Get Stems export",
         ))

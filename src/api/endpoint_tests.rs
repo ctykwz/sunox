@@ -1120,6 +1120,8 @@ async fn clip_info_fetches_song_page_supplemental_contract() {
             video_url: None,
             image_url: None,
             created_at: "2026-07-03T00:00:00Z".into(),
+            is_trashed: None,
+            action_config: None,
             play_count: 0,
             upvote_count: 0,
             metadata: Default::default(),
@@ -1180,6 +1182,8 @@ async fn clip_info_keeps_base_clip_when_supplemental_read_fails() {
             video_url: None,
             image_url: None,
             created_at: "2026-07-03T00:00:00Z".into(),
+            is_trashed: None,
+            action_config: None,
             play_count: 0,
             upvote_count: 0,
             metadata: Default::default(),
@@ -1220,6 +1224,8 @@ async fn clip_info_aborts_on_rate_limited_supplemental_read() {
             video_url: None,
             image_url: None,
             created_at: "2026-07-03T00:00:00Z".into(),
+            is_trashed: None,
+            action_config: None,
             play_count: 0,
             upvote_count: 0,
             metadata: Default::default(),
@@ -1248,6 +1254,8 @@ async fn clip_info_aborts_on_auth_expired_supplemental_read() {
             video_url: None,
             image_url: None,
             created_at: "2026-07-03T00:00:00Z".into(),
+            is_trashed: None,
+            action_config: None,
             play_count: 0,
             upvote_count: 0,
             metadata: Default::default(),
@@ -1604,10 +1612,12 @@ async fn prepared_generation_submits_detected_turnstile_provider_without_second_
 }
 
 #[tokio::test]
-async fn generate_preserves_existing_user_tier_without_billing_lookup() {
-    let server = MockServer::json(
+async fn generate_preserves_existing_user_tier_while_revalidating_the_model() {
+    let billing = billing_info_response("replacement-tier");
+    let server = MockServer::json_sequence(&[
+        billing.as_str(),
         r#"{"clips":[{"id":"clip-1","title":"Demo","status":"submitted","model_name":"chirp-v4-5","created_at":"2026-06-30T00:00:00Z"}]}"#,
-    )
+    ])
     .await;
     let client = server.client();
     let mut generate = GenerateRequest::new("chirp-v4-5", "custom");
@@ -1617,10 +1627,12 @@ async fn generate_preserves_existing_user_tier_without_billing_lookup() {
     let clips = client.generate(&generate).await.expect("generate");
 
     assert_eq!(clips[0].id, "clip-1");
-    let request = server.captured().await;
-    assert_eq!(request.method, "POST");
-    assert_eq!(request.path, "/api/generate/v2-web/");
-    let body = serde_json::from_str::<serde_json::Value>(&request.body).expect("request json");
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].path, "/api/billing/info/");
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[1].path, "/api/generate/v2-web/");
+    let body = serde_json::from_str::<serde_json::Value>(&requests[1].body).expect("request json");
     assert_eq!(body["metadata"]["user_tier"], "existing-tier");
 }
 
@@ -2154,6 +2166,63 @@ async fn auto_model_uses_the_web_constant_only_for_a_transport_outage() {
 }
 
 #[tokio::test]
+async fn auto_model_with_duration_fails_closed_during_a_billing_transport_outage() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("reserve unused port");
+    let address = listener.local_addr().expect("unused address");
+    drop(listener);
+    let client = SunoClient::new_for_tests(
+        format!("http://{address}"),
+        AuthState {
+            jwt: Some("test-jwt".into()),
+            ..AuthState::default()
+        },
+    )
+    .expect("test client");
+    let mut generate = GenerateRequest::new("auto", "custom");
+    generate.duration = Some(120.0);
+
+    let error = client
+        .prepare_generation_request(&mut generate)
+        .await
+        .expect_err("duration requires an exactly validated v5.5 account model");
+
+    assert!(
+        matches!(error, CliError::Config(message) if message.contains("duration") && message.contains("billing"))
+    );
+    assert_eq!(generate.mv, "auto");
+}
+
+#[tokio::test]
+async fn explicit_model_selector_fails_closed_during_a_billing_transport_outage() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("reserve unused port");
+    let address = listener.local_addr().expect("unused address");
+    drop(listener);
+    let client = SunoClient::new_for_tests(
+        format!("http://{address}"),
+        AuthState {
+            jwt: Some("test-jwt".into()),
+            ..AuthState::default()
+        },
+    )
+    .expect("test client");
+    let mut generate = GenerateRequest::new("account-model-7", "custom");
+
+    let error = client
+        .prepare_generation_request(&mut generate)
+        .await
+        .expect_err("explicit selectors require exact account validation");
+
+    assert!(
+        matches!(error, CliError::Config(message) if message.contains("exact billing validation"))
+    );
+    assert_eq!(generate.mv, "account-model-7");
+}
+
+#[tokio::test]
 async fn cover_fails_closed_when_billing_transport_cannot_validate_and_map_the_base_model() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -2221,7 +2290,12 @@ async fn generate_propagates_rate_limit_from_billing_without_submitting() {
 
 #[tokio::test]
 async fn generation_challenge_invalid_token_stays_a_structured_api_error() {
-    let server = MockServer::json_status_sequence(&[(403, r#"{"detail":"invalid token"}"#)]).await;
+    let billing = billing_info_response("tier-pro");
+    let server = MockServer::json_status_sequence(&[
+        (200, billing.as_str()),
+        (403, r#"{"detail":"invalid token"}"#),
+    ])
+    .await;
     let client = server.client();
     let mut generate = GenerateRequest::new("chirp-fenix", "custom");
     generate.metadata.user_tier = "tier-pro".into();
@@ -2240,9 +2314,11 @@ async fn generation_challenge_invalid_token_stays_a_structured_api_error() {
             ..
         }
     ));
-    let request = server.captured().await;
-    assert_eq!(request.method, "POST");
-    assert_eq!(request.path, "/api/generate/v2-web/");
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].path, "/api/billing/info/");
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[1].path, "/api/generate/v2-web/");
 }
 
 #[tokio::test]
@@ -2288,8 +2364,101 @@ async fn generate_auto_model_uses_the_accounts_usable_default() {
 }
 
 #[tokio::test]
+async fn generation_preflight_resolves_account_model_id_to_external_key() {
+    let billing = billing_info_with_models(
+        "tier-pro",
+        serde_json::json!([{
+            "id": "account-model-7",
+            "name": "My Custom Model",
+            "external_key": "chirp-custom-7",
+            "can_use": true,
+            "is_default_model": false,
+            "description": "custom account model",
+            "capabilities": ["all"],
+            "badges": ["custom"],
+            "max_lengths": {}
+        }]),
+    );
+    let server = MockServer::json(&billing).await;
+    let client = server.client();
+    let mut request = GenerateRequest::new("account-model-7", "custom");
+
+    client
+        .prepare_generation_request(&mut request)
+        .await
+        .expect("account model ID");
+
+    assert_eq!(request.mv, "chirp-custom-7");
+    assert_eq!(server.captured().await.path, "/api/billing/info/");
+}
+
+#[tokio::test]
+async fn cover_preflight_resolves_account_model_id_before_reference_mapping() {
+    let billing = billing_info_with_models(
+        "tier-pro",
+        serde_json::json!([{
+            "id": "account-cover-model",
+            "name": "Account Cover Model",
+            "external_key": "chirp-v4",
+            "can_use": true,
+            "is_default_model": false,
+            "description": "cover account model",
+            "capabilities": ["cover"],
+            "allowed_condition_combinations": [["cover"]],
+            "max_lengths": {}
+        }]),
+    );
+    let server = MockServer::json(&billing).await;
+    let client = server.client();
+    let mut request = GenerateRequest::new("account-cover-model", "simple");
+    request.task = Some("cover".into());
+
+    client
+        .prepare_generation_request(&mut request)
+        .await
+        .expect("cover account model ID");
+
+    assert_eq!(request.mv, "chirp-v4-tau");
+    assert_eq!(server.captured().await.path, "/api/billing/info/");
+}
+
+#[tokio::test]
+async fn generation_preflight_validates_v55_duration_against_account_limit() {
+    let billing = billing_info_with_models(
+        "tier-pro",
+        serde_json::json!([{
+            "name": "v5.5",
+            "external_key": "chirp-fenix",
+            "can_use": true,
+            "is_default_model": true,
+            "description": "v5.5",
+            "capabilities": ["all"],
+            "badges": ["custom"],
+            "max_lengths": {"duration": 480}
+        }]),
+    );
+    let server = MockServer::json(&billing).await;
+    let client = server.client();
+    let mut request = GenerateRequest::new("V5.5", "simple");
+    request.duration = Some(481.0);
+
+    let error = client
+        .prepare_generation_request(&mut request)
+        .await
+        .expect_err("duration over account limit");
+
+    assert!(
+        matches!(error, CliError::Config(message) if message.contains("exceeds the current account limit"))
+    );
+    assert_eq!(server.captured().await.path, "/api/billing/info/");
+}
+
+#[tokio::test]
 async fn generate_without_token_stops_when_challenge_is_required() {
-    let server = MockServer::json(r#"{"required":true,"captcha_version":1}"#).await;
+    let billing = billing_info_response("tier-pro");
+    let server =
+        MockServer::json_sequence(&[billing.as_str(), r#"{"required":true,"captcha_version":1}"#])
+            .await;
     let client = server.client();
     let mut generate = GenerateRequest::new("chirp-fenix", "custom");
     generate.metadata.user_tier = "tier-pro".into();
@@ -2300,9 +2469,11 @@ async fn generate_without_token_stops_when_challenge_is_required() {
         .expect_err("challenge error");
 
     assert!(err.to_string().contains("generation challenge"));
-    let request = server.captured().await;
-    assert_eq!(request.method, "POST");
-    assert_eq!(request.path, "/api/c/check");
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].path, "/api/billing/info/");
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[1].path, "/api/c/check");
 }
 
 #[tokio::test]
@@ -2447,6 +2618,20 @@ async fn cover_with_challenge_token_posts_generate_without_preflight_contract() 
 
 #[tokio::test]
 async fn remaster_posts_generate_v2_remaster_contract() {
+    let source = serde_json::json!({
+        "id": "clip-a",
+        "title": "Source",
+        "status": "complete",
+        "model_name": "chirp-carp",
+        "created_at": "2026-06-30T00:00:00Z",
+        "is_trashed": false,
+        "metadata": {"duration": 180.0, "infill": false},
+        "action_config": {"actions": [{
+            "action_type": "remaster",
+            "visible": true,
+            "disabled": false
+        }]}
+    });
     let raw = serde_json::json!({
         "clips": [{
             "id": "remaster-1",
@@ -2459,14 +2644,16 @@ async fn remaster_posts_generate_v2_remaster_contract() {
         "status": "submitted",
         "upstream_metadata": {"request_id": "remaster-request-1"}
     });
-    let server = MockServer::json(&raw.to_string()).await;
+    let source_body = source.to_string();
+    let raw_body = raw.to_string();
+    let server = MockServer::json_sequence(&[&source_body, &raw_body]).await;
     let client = server.client();
 
     let result = client
         .remaster(
             "clip-a",
             "chirp-flounder",
-            crate::api::types::RemasterVariation::High,
+            Some(crate::api::types::RemasterVariation::High),
         )
         .await
         .expect("remaster");
@@ -2477,11 +2664,14 @@ async fn remaster_posts_generate_v2_remaster_contract() {
         raw,
         "remaster must preserve the exact upstream response envelope"
     );
-    let request = server.captured().await;
-    assert_eq!(request.method, "POST");
-    assert_eq!(request.path, "/api/generate/upsample");
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].path, "/api/clip/clip-a");
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[1].path, "/api/generate/upsample");
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&request.body).expect("request json"),
+        serde_json::from_str::<serde_json::Value>(&requests[1].body).expect("request json"),
         serde_json::json!({
             "clip_id": "clip-a",
             "model_name": "chirp-flounder",
@@ -2492,24 +2682,58 @@ async fn remaster_posts_generate_v2_remaster_contract() {
 
 #[tokio::test]
 async fn remaster_default_variation_posts_normal() {
+    let source = r#"{"id":"clip-a","title":"Source","status":"complete","model_name":"chirp-carp","created_at":"2026-06-30T00:00:00Z","is_trashed":false,"metadata":{"duration":180.0},"action_config":{"actions":[{"action_type":"remaster","visible":true,"disabled":false}]}}"#;
+    let generated = r#"{"clips":[{"id":"remaster-1","title":"Remaster","status":"submitted","model_name":"chirp-flounder","created_at":"2026-06-30T00:00:00Z"}]}"#;
+    let server = MockServer::json_sequence(&[source, generated]).await;
+    let client = server.client();
+
+    client
+        .remaster("clip-a", "chirp-flounder", None)
+        .await
+        .expect("remaster");
+
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+    let body = serde_json::from_str::<serde_json::Value>(&requests[1].body).expect("request json");
+    assert_eq!(body["variation_category"], "normal");
+}
+
+#[tokio::test]
+async fn remaster_v45_plus_omits_variation_category() {
+    let source = r#"{"id":"clip-a","title":"Source","status":"complete","model_name":"chirp-carp","created_at":"2026-06-30T00:00:00Z","is_trashed":false,"metadata":{"duration":180.0},"action_config":{"actions":[{"action_type":"remaster","visible":true,"disabled":false}]}}"#;
+    let generated = r#"{"clips":[{"id":"remaster-1","title":"Remaster","status":"submitted","model_name":"chirp-bass","created_at":"2026-06-30T00:00:00Z"}]}"#;
+    let server = MockServer::json_sequence(&[source, generated]).await;
+    let client = server.client();
+
+    client
+        .remaster("clip-a", "chirp-bass", None)
+        .await
+        .expect("v4.5+ remaster");
+
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+    let body = serde_json::from_str::<serde_json::Value>(&requests[1].body).expect("request json");
+    assert!(body.get("variation_category").is_none());
+}
+
+#[tokio::test]
+async fn remaster_fails_closed_when_the_detail_route_returns_a_different_clip() {
     let server = MockServer::json(
-        r#"{"clips":[{"id":"remaster-1","title":"Remaster","status":"submitted","model_name":"chirp-flounder","created_at":"2026-06-30T00:00:00Z"}]}"#,
+        r#"{"id":"clip-b","title":"Other","status":"complete","model_name":"chirp-carp","created_at":"2026-06-30T00:00:00Z","is_trashed":false,"metadata":{"duration":180.0},"action_config":{"actions":[{"action_type":"remaster","visible":true,"disabled":false}]}}"#,
     )
     .await;
     let client = server.client();
 
-    client
-        .remaster(
-            "clip-a",
-            "chirp-flounder",
-            crate::api::types::RemasterVariation::default(),
-        )
+    let error = client
+        .remaster("clip-a", "chirp-flounder", None)
         .await
-        .expect("remaster");
+        .expect_err("mismatched source must not be submitted");
 
-    let request = server.captured().await;
-    let body = serde_json::from_str::<serde_json::Value>(&request.body).expect("request json");
-    assert_eq!(body["variation_category"], "normal");
+    assert!(matches!(error, CliError::NotFound(_)));
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].path, "/api/clip/clip-a");
 }
 
 #[tokio::test]
@@ -2681,7 +2905,7 @@ async fn crop_waits_for_the_result_clip_to_complete() {
 }
 
 #[tokio::test]
-async fn crop_deadline_bounds_an_in_flight_action_poll() {
+async fn crop_deadline_after_submit_is_ambiguous() {
     let server = MockServer::delayed_response_sequence(vec![
         (
             200,
@@ -2715,7 +2939,12 @@ async fn crop_deadline_bounds_an_in_flight_action_poll() {
     .expect("configured deadline must bound the action request")
     .expect_err("delayed action request must time out");
 
-    assert!(matches!(error, CliError::GenerationFailed(message) if message.contains("timed out")));
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("ambiguity details");
+    assert_eq!(details["operation"], "crop");
+    assert_eq!(details["action_clip_id"], "crop-1");
+    assert_eq!(details["stage"], "action_poll");
+    assert_eq!(details["cause"]["code"], "generation_failed");
 }
 
 #[tokio::test]
@@ -4725,4 +4954,616 @@ async fn upload_presigned_audio_form_posts_s3_multipart_contract() {
     assert!(request.body.contains("name=\"file\""));
     assert!(request.body.contains("filename=\"demo.mp3\""));
     assert!(request.body.contains("audio-bytes"));
+}
+
+#[tokio::test]
+async fn generation_submit_reports_an_ambiguous_accepted_response_body() {
+    let server = MockServer::json("{").await;
+    let client = server.client();
+    let mut request = GenerateRequest::new("chirp-fenix", "custom");
+    request.metadata.user_tier = "tier-pro".into();
+    request.set_challenge_token(Some("captcha-token".into()));
+    let transaction_uuid = request.transaction_uuid.clone();
+
+    let error = client
+        .submit_prepared_generation_after_challenge(&request)
+        .await
+        .expect_err("an unreadable accepted response must be ambiguous");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("ambiguity details");
+    assert_eq!(details["operation"], "generation_submit");
+    assert_eq!(details["transaction_uuid"], transaction_uuid);
+    assert_eq!(details["stage"], "response_body");
+    assert_eq!(details["recovery"]["resumable"], false);
+    assert!(error.suggestion().contains("Do not blindly retry"));
+    assert_eq!(server.captured().await.path, "/api/generate/v2-web/");
+}
+
+#[tokio::test]
+async fn generation_submit_reports_ambiguous_missing_clips_after_success() {
+    let server = MockServer::json(r#"{"status":"submitted"}"#).await;
+    let client = server.client();
+    let mut request = GenerateRequest::new("chirp-fenix", "custom");
+    request.metadata.user_tier = "tier-pro".into();
+    request.set_challenge_token(Some("captcha-token".into()));
+
+    let error = client
+        .submit_prepared_generation_after_challenge(&request)
+        .await
+        .expect_err("a successful response without clips must be ambiguous");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("ambiguity details");
+    assert_eq!(details["transaction_uuid"], request.transaction_uuid);
+    assert_eq!(details["stage"], "response_schema");
+    assert_eq!(details["cause"]["code"], "schema_drift");
+    assert_eq!(details["recovery"]["resumable"], false);
+}
+
+#[tokio::test]
+async fn generation_submit_rejects_a_blank_clip_id_as_ambiguous_schema_drift() {
+    let server = MockServer::json(
+        r#"{"clips":[{"id":"   ","title":"Untethered","status":"submitted","model_name":"chirp-fenix","created_at":"2026-08-24T00:00:00Z"}]}"#,
+    )
+    .await;
+    let client = server.client();
+    let mut request = GenerateRequest::new("chirp-fenix", "custom");
+    request.metadata.user_tier = "tier-pro".into();
+    request.set_challenge_token(Some("captcha-token".into()));
+
+    let error = client
+        .submit_prepared_generation_after_challenge(&request)
+        .await
+        .expect_err("a generated clip without a recovery ID must be ambiguous");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("ambiguity details");
+    assert_eq!(details["transaction_uuid"], request.transaction_uuid);
+    assert_eq!(details["stage"], "response_schema");
+    assert_eq!(details["cause"]["code"], "schema_drift");
+    assert_eq!(details["recovery"]["resumable"], false);
+}
+
+#[tokio::test]
+async fn generation_submit_reports_an_ambiguous_send_failure() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind unused loopback address");
+    let addr = listener.local_addr().expect("unused loopback address");
+    drop(listener);
+    let client = SunoClient::new_for_tests(
+        format!("http://{addr}"),
+        AuthState {
+            jwt: Some("test-jwt".into()),
+            ..AuthState::default()
+        },
+    )
+    .expect("test client");
+    let mut request = GenerateRequest::new("chirp-fenix", "custom");
+    request.metadata.user_tier = "tier-pro".into();
+    request.set_challenge_token(Some("captcha-token".into()));
+
+    let error = client
+        .submit_prepared_generation_after_challenge(&request)
+        .await
+        .expect_err("send failure must be treated as ambiguous");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("ambiguity details");
+    assert_eq!(details["transaction_uuid"], request.transaction_uuid);
+    assert_eq!(details["stage"], "request_send");
+}
+
+#[tokio::test]
+async fn generation_submit_keeps_an_explicit_server_error_non_ambiguous() {
+    let server = MockServer::json_status_sequence(&[(
+        500,
+        r#"{"detail":"generation rejected","retryable":false}"#,
+    )])
+    .await;
+    let client = server.client();
+    let mut request = GenerateRequest::new("chirp-fenix", "custom");
+    request.metadata.user_tier = "tier-pro".into();
+    request.set_challenge_token(Some("captcha-token".into()));
+
+    let error = client
+        .submit_prepared_generation_after_challenge(&request)
+        .await
+        .expect_err("explicit failure must be preserved");
+
+    assert!(matches!(
+        error,
+        CliError::SunoApi {
+            status: 500,
+            retryable: Some(false),
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn crop_poll_transport_failure_keeps_the_returned_action_id() {
+    let server = MockServer::json_sequence(&[r#"{"action_clip_id":"crop-1"}"#, "{"]).await;
+    let client = server.client();
+
+    let error = client
+        .crop_clip(
+            "clip-a",
+            1.0,
+            2.0,
+            false,
+            "Crop",
+            super::PollingOptions {
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_millis(1),
+            },
+        )
+        .await
+        .expect_err("post-submit poll failure must be ambiguous");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("ambiguity details");
+    assert_eq!(details["operation"], "crop");
+    assert_eq!(details["action_clip_id"], "crop-1");
+    assert_eq!(details["stage"], "action_poll");
+    assert_eq!(details["recovery"]["resumable"], true);
+    assert_eq!(server.captured_all().await.len(), 2);
+}
+
+#[tokio::test]
+async fn crop_submit_response_body_loss_is_ambiguous_without_replay() {
+    let server = MockServer::json("{").await;
+    let client = server.client();
+
+    let error = client
+        .crop_clip(
+            "clip-a",
+            1.0,
+            2.0,
+            false,
+            "Crop",
+            super::PollingOptions {
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_millis(1),
+            },
+        )
+        .await
+        .expect_err("an unreadable accepted crop response must be ambiguous");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("ambiguity details");
+    assert_eq!(details["operation"], "crop");
+    assert_eq!(details["source_clip_id"], "clip-a");
+    assert_eq!(details["stage"], "response_body");
+    assert_eq!(details["recovery"]["resumable"], false);
+    assert!(
+        details["operation_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+    );
+    assert_eq!(server.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
+async fn crop_submit_rejects_a_blank_action_id_as_non_resumable_ambiguity() {
+    let server = MockServer::json(r#"{"action_clip_id":"   "}"#).await;
+    let client = server.client();
+
+    let error = client
+        .crop_clip(
+            "clip-a",
+            1.0,
+            2.0,
+            false,
+            "Crop",
+            super::PollingOptions {
+                timeout: Duration::from_millis(20),
+                interval: Duration::from_millis(1),
+            },
+        )
+        .await
+        .expect_err("a blank server action id cannot support safe polling recovery");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("ambiguity details");
+    assert_eq!(details["operation"], "crop");
+    assert_eq!(details["stage"], "response_body");
+    assert_eq!(details["recovery"]["resumable"], false);
+    assert_eq!(server.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
+async fn reverse_submit_send_failure_has_a_local_non_resumable_operation_id() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind unused loopback address");
+    let addr = listener.local_addr().expect("unused loopback address");
+    drop(listener);
+    let client = SunoClient::new_for_tests(
+        format!("http://{addr}"),
+        AuthState {
+            jwt: Some("test-jwt".into()),
+            ..AuthState::default()
+        },
+    )
+    .expect("test client");
+
+    let error = client
+        .reverse_clip("clip-a", "Reversed")
+        .await
+        .expect_err("an uncertain reverse send must not invite replay");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("ambiguity details");
+    assert_eq!(details["operation"], "reverse");
+    assert_eq!(details["source_clip_id"], "clip-a");
+    assert_eq!(details["stage"], "request_send");
+    assert_eq!(details["recovery"]["resumable"], false);
+    assert!(
+        details["operation_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+    );
+}
+
+#[tokio::test]
+async fn reverse_submit_rejects_a_blank_clip_id_as_non_resumable_ambiguity() {
+    let server = MockServer::json(
+        r#"{"id":"   ","title":"Reversed","status":"processing","model_name":"chirp-fenix","created_at":"2026-08-24T00:00:00Z"}"#,
+    )
+    .await;
+    let client = server.client();
+
+    let error = client
+        .reverse_clip("clip-a", "Reversed")
+        .await
+        .expect_err("a reverse result without a recovery ID must be ambiguous");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("ambiguity details");
+    assert_eq!(details["operation"], "reverse");
+    assert_eq!(details["source_clip_id"], "clip-a");
+    assert_eq!(details["stage"], "response_schema");
+    assert_eq!(details["cause"]["code"], "schema_drift");
+    assert_eq!(details["recovery"]["resumable"], false);
+    assert!(
+        details["operation_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+    );
+    assert_eq!(server.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
+async fn fade_poll_api_error_keeps_the_returned_action_id() {
+    let server = MockServer::json_status_sequence(&[
+        (200, r#"{"action_clip_id":"fade-1"}"#),
+        (500, r#"{"detail":"poll unavailable"}"#),
+    ])
+    .await;
+    let client = server.client();
+
+    let error = client
+        .fade_clip(
+            "clip-a",
+            Some(1.0),
+            None,
+            "Fade In",
+            super::PollingOptions {
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_millis(1),
+            },
+        )
+        .await
+        .expect_err("a poll API error must preserve the submitted action identity");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("ambiguity details");
+    assert_eq!(details["operation"], "fade");
+    assert_eq!(details["action_clip_id"], "fade-1");
+    assert_eq!(details["stage"], "action_poll");
+    assert_eq!(details["recovery"]["resumable"], true);
+    assert_eq!(server.captured_all().await.len(), 2);
+}
+
+#[tokio::test]
+async fn wav_no_convert_fails_closed_after_reading_the_existing_url() {
+    let server = MockServer::json(r#"{"wav_file_url":null}"#).await;
+    let client = server.client();
+
+    let error = client
+        .download_url_with_conversion_policy(
+            "clip-a",
+            super::download::DownloadFormat::Wav,
+            super::PollingOptions {
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_millis(1),
+            },
+            false,
+        )
+        .await
+        .expect_err("no-convert must refuse a conversion POST");
+
+    assert!(matches!(error, CliError::Download(message) if message.contains("refused")));
+    let request = server.captured().await;
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.path, "/api/gen/clip-a/wav_file/");
+}
+
+#[tokio::test]
+async fn opus_no_convert_fails_closed_after_reading_the_existing_url() {
+    let server = MockServer::json(r#"{"opus_file_url":null}"#).await;
+    let client = server.client();
+
+    let error = client
+        .download_url_with_conversion_policy(
+            "clip-a",
+            super::download::DownloadFormat::Opus,
+            super::PollingOptions {
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_millis(1),
+            },
+            false,
+        )
+        .await
+        .expect_err("no-convert must refuse a conversion POST");
+
+    assert!(matches!(error, CliError::Download(message) if message.contains("refused")));
+    let request = server.captured().await;
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.path, "/api/gen/clip-a/opus_file/");
+}
+
+#[tokio::test]
+async fn conversion_poll_transport_failure_is_ambiguous_after_submit() {
+    let server = MockServer::json_sequence(&[r#"{"wav_file_url":null}"#, "{}", "{"]).await;
+    let client = server.client();
+
+    let error = client
+        .download_url(
+            "clip-a",
+            super::download::DownloadFormat::Wav,
+            super::PollingOptions {
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_millis(1),
+            },
+        )
+        .await
+        .expect_err("post-submit conversion poll failure must be ambiguous");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("ambiguity details");
+    assert_eq!(details["operation"], "convert_wav");
+    assert_eq!(details["clip_id"], "clip-a");
+    assert_eq!(details["stage"], "file_poll");
+    assert_eq!(server.captured_all().await.len(), 3);
+}
+
+#[tokio::test]
+async fn conversion_poll_api_error_is_ambiguous_after_submit() {
+    let server = MockServer::json_status_sequence(&[
+        (200, r#"{"wav_file_url":null}"#),
+        (200, "{}"),
+        (500, r#"{"detail":"conversion poll unavailable"}"#),
+    ])
+    .await;
+    let client = server.client();
+
+    let error = client
+        .download_url(
+            "clip-a",
+            super::download::DownloadFormat::Wav,
+            super::PollingOptions {
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_millis(1),
+            },
+        )
+        .await
+        .expect_err("a post-submit poll API error must remain ambiguous");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("ambiguity details");
+    assert_eq!(details["operation"], "convert_wav");
+    assert_eq!(details["clip_id"], "clip-a");
+    assert_eq!(details["stage"], "file_poll");
+    assert_eq!(details["recovery"]["resumable"], true);
+    assert_eq!(server.captured_all().await.len(), 3);
+}
+
+#[tokio::test]
+async fn conversion_poll_timeout_is_ambiguous_after_submit() {
+    let server =
+        MockServer::json_sequence(&[r#"{"wav_file_url":null}"#, "{}", r#"{"wav_file_url":null}"#])
+            .await;
+    let client = server.client();
+
+    let error = client
+        .download_url(
+            "clip-a",
+            super::download::DownloadFormat::Wav,
+            super::PollingOptions {
+                timeout: Duration::from_millis(50),
+                interval: Duration::from_secs(1),
+            },
+        )
+        .await
+        .expect_err("post-submit conversion timeout must be ambiguous");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("ambiguity details");
+    assert_eq!(details["operation"], "convert_wav");
+    assert_eq!(details["stage"], "file_poll");
+    assert_eq!(details["cause"]["code"], "download_error");
+    assert_eq!(server.captured_all().await.len(), 3);
+}
+
+#[tokio::test]
+async fn conversion_keeps_an_explicit_server_error_non_ambiguous() {
+    let server = MockServer::json_status_sequence(&[
+        (200, r#"{"wav_file_url":null}"#),
+        (500, r#"{"detail":"conversion rejected"}"#),
+    ])
+    .await;
+    let client = server.client();
+
+    let error = client
+        .download_url(
+            "clip-a",
+            super::download::DownloadFormat::Wav,
+            super::PollingOptions {
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_millis(1),
+            },
+        )
+        .await
+        .expect_err("explicit conversion failure must be preserved");
+
+    assert!(matches!(error, CliError::SunoApi { status: 500, .. }));
+}
+
+#[tokio::test]
+async fn existing_aligned_lyrics_is_get_only() {
+    let server = MockServer::json(
+        r#"{"aligned_words":[{"word":"Hello","start_s":0.0,"end_s":0.5,"success":true}]}"#,
+    )
+    .await;
+    let client = server.client();
+
+    let words = client
+        .existing_aligned_lyrics(
+            "clip-a",
+            super::PollingOptions {
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_millis(1),
+            },
+        )
+        .await
+        .expect("existing aligned lyrics");
+
+    assert_eq!(words[0].word, "Hello");
+    let request = server.captured().await;
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.path, "/api/gen/clip-a/aligned_lyrics/v2");
+}
+
+#[tokio::test]
+async fn remaster_submit_reports_an_ambiguous_accepted_response_body() {
+    let source = r#"{"id":"clip-a","title":"Source","status":"complete","model_name":"chirp-carp","created_at":"2026-08-24T00:00:00Z","is_trashed":false,"metadata":{"duration":180.0},"action_config":{"actions":[{"action_type":"remaster","visible":true,"disabled":false}]}}"#;
+    let server = MockServer::json_sequence(&[source, "{"]).await;
+    let client = server.client();
+
+    let error = client
+        .remaster(
+            "clip-a",
+            "chirp-flounder",
+            Some(crate::api::types::RemasterVariation::High),
+        )
+        .await
+        .expect_err("an unreadable accepted response must be ambiguous");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("ambiguity details");
+    assert_eq!(details["operation"], "remaster");
+    assert_eq!(details["source_clip_id"], "clip-a");
+    assert_eq!(details["stage"], "response_body");
+    assert_eq!(details["recovery"]["resumable"], false);
+    assert!(
+        details["operation_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+    );
+    assert_eq!(server.captured_all().await.len(), 2);
+}
+
+#[tokio::test]
+async fn remaster_submit_reports_ambiguous_valid_json_schema_drift() {
+    let source = r#"{"id":"clip-a","title":"Source","status":"complete","model_name":"chirp-carp","created_at":"2026-08-24T00:00:00Z","is_trashed":false,"metadata":{"duration":180.0},"action_config":{"actions":[{"action_type":"remaster","visible":true,"disabled":false}]}}"#;
+    let server = MockServer::json_sequence(&[source, r#"{"clips":[{"id":17}]}"#]).await;
+    let client = server.client();
+
+    let error = client
+        .remaster("clip-a", "chirp-flounder", None)
+        .await
+        .expect_err("an accepted response with an unusable clip schema must be ambiguous");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("ambiguity details");
+    assert_eq!(details["operation"], "remaster");
+    assert_eq!(details["source_clip_id"], "clip-a");
+    assert_eq!(details["stage"], "response_schema");
+    assert_eq!(details["cause"]["code"], "json_error");
+    assert_eq!(details["recovery"]["resumable"], false);
+}
+
+#[tokio::test]
+async fn remaster_submit_rejects_an_empty_clip_list_as_ambiguous_schema_drift() {
+    let source = r#"{"id":"clip-a","title":"Source","status":"complete","model_name":"chirp-carp","created_at":"2026-08-24T00:00:00Z","is_trashed":false,"metadata":{"duration":180.0},"action_config":{"actions":[{"action_type":"remaster","visible":true,"disabled":false}]}}"#;
+    let server = MockServer::json_sequence(&[source, r#"{"clips":[]}"#]).await;
+    let client = server.client();
+
+    let error = client
+        .remaster("clip-a", "chirp-flounder", None)
+        .await
+        .expect_err("an accepted Remaster response without a recovery clip must be ambiguous");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("ambiguity details");
+    assert_eq!(details["operation"], "remaster");
+    assert_eq!(details["source_clip_id"], "clip-a");
+    assert_eq!(details["stage"], "response_schema");
+    assert_eq!(details["cause"]["code"], "schema_drift");
+    assert_eq!(details["recovery"]["resumable"], false);
+    assert_eq!(server.captured_all().await.len(), 2);
+}
+
+#[tokio::test]
+async fn remaster_submit_rejects_a_blank_clip_id_as_ambiguous_schema_drift() {
+    let source = r#"{"id":"clip-a","title":"Source","status":"complete","model_name":"chirp-carp","created_at":"2026-08-24T00:00:00Z","is_trashed":false,"metadata":{"duration":180.0},"action_config":{"actions":[{"action_type":"remaster","visible":true,"disabled":false}]}}"#;
+    let result = r#"{"clips":[{"id":"  ","title":"Remaster","status":"submitted","model_name":"chirp-flounder","created_at":"2026-08-24T00:00:00Z"}]}"#;
+    let server = MockServer::json_sequence(&[source, result]).await;
+    let client = server.client();
+
+    let error = client
+        .remaster("clip-a", "chirp-flounder", None)
+        .await
+        .expect_err("an accepted Remaster clip without a recovery ID must be ambiguous");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("ambiguity details");
+    assert_eq!(details["operation"], "remaster");
+    assert_eq!(details["stage"], "response_schema");
+    assert_eq!(details["cause"]["code"], "schema_drift");
+    assert_eq!(details["recovery"]["resumable"], false);
+    assert!(
+        details["operation_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+    );
+    assert_eq!(server.captured_all().await.len(), 2);
+}
+
+#[tokio::test]
+async fn remaster_submit_keeps_an_explicit_server_error_non_ambiguous() {
+    let source = r#"{"id":"clip-a","title":"Source","status":"complete","model_name":"chirp-carp","created_at":"2026-08-24T00:00:00Z","is_trashed":false,"metadata":{"duration":180.0},"action_config":{"actions":[{"action_type":"remaster","visible":true,"disabled":false}]}}"#;
+    let server = MockServer::json_status_sequence(&[
+        (200, source),
+        (500, r#"{"detail":"remaster rejected","retryable":false}"#),
+    ])
+    .await;
+    let client = server.client();
+
+    let error = client
+        .remaster("clip-a", "chirp-flounder", None)
+        .await
+        .expect_err("explicit failure must be preserved");
+
+    assert!(matches!(
+        error,
+        CliError::SunoApi {
+            status: 500,
+            retryable: Some(false),
+            ..
+        }
+    ));
 }

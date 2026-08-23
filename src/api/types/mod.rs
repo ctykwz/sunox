@@ -14,8 +14,8 @@ mod playlist;
 mod prompts;
 mod upload;
 
-pub use account::{BillingInfo, MaxLengths, Model, RemasterModelInfo};
-pub use clip::Clip;
+pub use account::{AccessibleFeatures, BillingInfo, MaxLengths, Model, RemasterModelInfo};
+pub use clip::{Clip, ClipActionConfig};
 pub use clip_info::{
     ClipAttribution, ClipComments, ClipInfo, ClipInfoSupplementalError, RemixCountResponse,
     SimilarClipsResponse,

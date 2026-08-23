@@ -1,4 +1,4 @@
-use crate::api::types::{Clip, ClipInfo, ClipInfoSupplementalError};
+use crate::api::types::{Clip, ClipActionConfig, ClipInfo, ClipInfoSupplementalError};
 
 use super::{base_table, dynamic_table};
 
@@ -27,6 +27,38 @@ pub fn clips(clips: &[Clip]) {
             tags,
         ]);
     }
+    println!("{table}");
+}
+
+pub fn clip_actions(clip_id: &str, config: Option<&ClipActionConfig>) {
+    let mut table = dynamic_table();
+    table.set_header(vec!["Clip ID", "Action", "Visible", "Disabled", "Details"]);
+
+    let actions = config
+        .map(|config| config.actions.as_slice())
+        .unwrap_or_default();
+    if actions.is_empty() {
+        table.add_row(vec![clip_id, "-", "-", "-", "-"]);
+    } else {
+        for action in actions {
+            let action_type = action.action_type.as_deref().unwrap_or("<unknown>");
+            let visible = action
+                .visible
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".into());
+            let disabled = action
+                .disabled
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".into());
+            let details = if action.extra.is_empty() {
+                "-".to_string()
+            } else {
+                serde_json::to_string(&action.extra).unwrap_or_else(|_| "-".into())
+            };
+            table.add_row(vec![clip_id, action_type, &visible, &disabled, &details]);
+        }
+    }
+
     println!("{table}");
 }
 
@@ -141,6 +173,8 @@ mod tests {
             video_url: None,
             image_url: None,
             created_at: "2026-07-03T00:00:00Z".into(),
+            is_trashed: None,
+            action_config: None,
             play_count: 0,
             upvote_count: 0,
             metadata: Default::default(),

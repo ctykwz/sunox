@@ -293,8 +293,7 @@ impl GenerationResult {
 impl GenerateResponse {
     pub fn into_result(self, raw: Value) -> Result<GenerationResult, crate::core::CliError> {
         match self.clips {
-            Some(clips) if !clips.is_empty() => Ok(GenerationResult { clips, raw }),
-            clips => Err(crate::core::CliError::SunoApi {
+            Some(clips) if clips.is_empty() => Err(crate::core::CliError::SunoApi {
                 code: "schema_drift",
                 status: 200,
                 message: "HTTP 200 generation response did not contain any clips".into(),
@@ -302,9 +301,38 @@ impl GenerateResponse {
                 details: Some(serde_json::json!({
                     "http_status": 200,
                     "response_field": "clips",
-                    "field_state": if clips.is_some() { "empty" } else { "missing" }
+                    "field_state": "empty"
                 })),
             }),
+            None => Err(crate::core::CliError::SunoApi {
+                code: "schema_drift",
+                status: 200,
+                message: "HTTP 200 generation response did not contain any clips".into(),
+                retryable: Some(false),
+                details: Some(serde_json::json!({
+                    "http_status": 200,
+                    "response_field": "clips",
+                    "field_state": "missing"
+                })),
+            }),
+            Some(clips) => {
+                if let Some(index) = clips.iter().position(|clip| clip.id.trim().is_empty()) {
+                    return Err(crate::core::CliError::SunoApi {
+                        code: "schema_drift",
+                        status: 200,
+                        message: format!(
+                            "HTTP 200 generation response contained an empty clip ID at index {index}"
+                        ),
+                        retryable: Some(false),
+                        details: Some(serde_json::json!({
+                            "http_status": 200,
+                            "response_field": format!("clips[{index}].id"),
+                            "field_state": "empty_or_whitespace"
+                        })),
+                    });
+                }
+                Ok(GenerationResult { clips, raw })
+            }
         }
     }
 }

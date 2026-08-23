@@ -6,7 +6,7 @@ pub struct ConcatRequest {
     pub is_infill: bool,
 }
 
-#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, Serialize)]
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RemasterVariation {
     Subtle,

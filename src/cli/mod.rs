@@ -31,7 +31,7 @@ pub use library::{
     RestoreArgs, SearchArgs, SetArgs, StatusArgs,
 };
 pub use media::{DownloadArgs, DownloadFormat, TimedLyricsArgs, UploadArgs, UploadStatusArgs};
-pub use models::{CoverModel, ModelVersion, RemasterModel, VocalGender};
+pub use models::{RemasterModel, VocalGender};
 pub use persona::{
     PersonaArgs, PersonaClipsArgs, PersonaCommand, PersonaCreateArgs, PersonaDeleteArgs,
     PersonaInfoArgs, PersonaListArgs, PersonaListKind, PersonaLoveArgs, PersonaPublishArgs,
@@ -79,6 +79,10 @@ pub struct Cli {
     /// Allow this invocation to run Suno write requests concurrently with other sunox processes
     #[arg(long, global = true)]
     pub parallel: bool,
+
+    /// Refuse Suno account mutations while still allowing read-only requests
+    #[arg(long, global = true)]
+    pub read_only: bool,
 }
 
 #[derive(Subcommand)]
@@ -92,7 +96,7 @@ pub enum Commands {
     /// Add clip(s) to a playlist
     Add(AddArgs),
 
-    /// Generate lyrics using current Cowrite models and the July-captured submit contract
+    /// Generate lyrics using current Cowrite model discovery and submit contract
     Lyrics(LyricsArgs),
 
     /// Manage clips
@@ -109,6 +113,9 @@ pub enum Commands {
 
     /// List available models
     Models,
+
+    /// Compare live account entitlements, models, and limits with CLI support
+    Capabilities,
 
     /// Set up authentication
     Auth(AuthArgs),
@@ -144,7 +151,7 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn remaster_defaults_to_normal_variation() {
+    fn remaster_preserves_an_omitted_variation_for_model_specific_encoding() {
         let cli = Cli::try_parse_from(["sunox", "clip", "remaster", "clip-a"])
             .expect("valid remaster command");
 
@@ -154,6 +161,100 @@ mod tests {
         let ClipCommand::Remaster(args) = clip.command else {
             panic!("expected remaster command");
         };
-        assert!(matches!(args.variation, RemasterVariation::Normal));
+        assert!(args.variation.is_none());
+    }
+
+    #[test]
+    fn remaster_preserves_an_explicit_variation() {
+        let cli =
+            Cli::try_parse_from(["sunox", "clip", "remaster", "clip-a", "--variation", "high"])
+                .expect("valid remaster command");
+
+        let Some(Commands::Clip(clip)) = cli.command else {
+            panic!("expected clip command");
+        };
+        let ClipCommand::Remaster(args) = clip.command else {
+            panic!("expected remaster command");
+        };
+        assert!(matches!(args.variation, Some(RemasterVariation::High)));
+    }
+
+    #[test]
+    fn remaster_accepts_the_reported_external_key_alias() {
+        let cli = Cli::try_parse_from([
+            "sunox",
+            "clip",
+            "remaster",
+            "clip-a",
+            "--model",
+            "chirp-flounder",
+        ])
+        .expect("reported remaster selector must be accepted");
+
+        let Some(Commands::Clip(clip)) = cli.command else {
+            panic!("expected clip command");
+        };
+        let ClipCommand::Remaster(args) = clip.command else {
+            panic!("expected remaster command");
+        };
+        assert_eq!(
+            args.model.expect("explicit model").to_api_key(),
+            "chirp-flounder"
+        );
+    }
+
+    #[test]
+    fn clip_actions_accepts_an_exact_clip_id() {
+        let cli = Cli::try_parse_from(["sunox", "clip", "actions", "clip-a"])
+            .expect("valid clip actions command");
+
+        let Some(Commands::Clip(clip)) = cli.command else {
+            panic!("expected clip command");
+        };
+        let ClipCommand::Actions(args) = clip.command else {
+            panic!("expected actions command");
+        };
+        assert_eq!(args.id, "clip-a");
+    }
+
+    #[test]
+    fn create_accepts_account_model_selector_and_duration() {
+        let cli = Cli::try_parse_from([
+            "sunox",
+            "create",
+            "future bass",
+            "--model",
+            "My Custom Model",
+            "--duration",
+            "245.5",
+        ])
+        .expect("dynamic generation model selector");
+
+        let Some(Commands::Create(args)) = cli.command else {
+            panic!("expected create command");
+        };
+        assert_eq!(args.model.as_deref(), Some("My Custom Model"));
+        assert_eq!(args.duration, Some(245.5));
+    }
+
+    #[test]
+    fn cover_accepts_account_model_id() {
+        let cli = Cli::try_parse_from([
+            "sunox",
+            "clip",
+            "cover",
+            "clip-a",
+            "--model",
+            "model-account-7",
+        ])
+        .expect("dynamic cover model selector");
+
+        let Some(Commands::Clip(clip)) = cli.command else {
+            panic!("expected clip command");
+        };
+        let ClipCommand::Cover(args) = clip.command else {
+            panic!("expected cover command");
+        };
+        assert_eq!(args.model.as_deref(), Some("model-account-7"));
     }
 }

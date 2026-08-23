@@ -11,10 +11,10 @@ pub struct BillingInfo {
     pub monthly_limit: u64,
     pub is_active: bool,
     pub plan: Plan,
-    /// Current Web uses an array here for plan-gated actions. Preserve the raw
-    /// shape because older/account-specific responses have also used objects.
+    /// Current Web uses a string array here for plan-gated actions. The typed
+    /// wrapper also preserves older objects and unknown future shapes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub accessible_features: Option<Value>,
+    pub accessible_features: Option<AccessibleFeatures>,
     pub models: Vec<Model>,
     pub period: String,
     pub renews_on: Option<String>,
@@ -22,6 +22,74 @@ pub struct BillingInfo {
     pub remaster_model_types: Vec<RemasterModelInfo>,
     #[serde(default, flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+/// Account-scoped feature gates returned by billing info.
+///
+/// Suno has returned both a current string array and legacy keyed objects.
+/// Keeping the raw value makes account readback forward-compatible while the
+/// `contains` helper centralizes fail-closed feature checks.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct AccessibleFeatures(Value);
+
+impl AccessibleFeatures {
+    pub fn contains(&self, name: &str) -> bool {
+        self.enabled_names().any(|candidate| candidate == name)
+    }
+
+    pub fn enabled_names(&self) -> impl Iterator<Item = &str> {
+        let mut names = Vec::new();
+        match &self.0 {
+            Value::Array(features) => {
+                for feature in features {
+                    match feature {
+                        Value::String(name) => names.push(name.as_str()),
+                        Value::Object(fields) if feature_object_is_enabled(fields) => {
+                            if let Some(name) = fields.get("name").and_then(Value::as_str) {
+                                names.push(name);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Value::Object(features) => {
+                for (name, enabled) in features {
+                    if enabled.as_bool() == Some(true) {
+                        names.push(name.as_str());
+                    }
+                }
+            }
+            _ => {}
+        }
+        names.into_iter()
+    }
+}
+
+fn feature_object_is_enabled(fields: &serde_json::Map<String, Value>) -> bool {
+    for flag in [
+        "enabled",
+        "is_enabled",
+        "can_use",
+        "accessible",
+        "available",
+        "is_available",
+    ] {
+        if let Some(value) = fields.get(flag)
+            && value.as_bool() != Some(true)
+        {
+            return false;
+        }
+    }
+    for flag in ["disabled", "is_disabled"] {
+        if let Some(value) = fields.get(flag)
+            && value.as_bool() != Some(false)
+        {
+            return false;
+        }
+    }
+    true
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -252,6 +320,20 @@ mod tests {
         .expect("deserialize current billing response");
 
         assert!(billing.models[0].supports_web_feature("sound"));
+        assert!(
+            billing
+                .accessible_features
+                .as_ref()
+                .expect("legacy feature object")
+                .contains("personas")
+        );
+        assert!(
+            !billing
+                .accessible_features
+                .as_ref()
+                .expect("legacy feature object")
+                .contains("remaster")
+        );
 
         let output = serde_json::to_value(billing).expect("serialize billing response");
         assert_eq!(output["accessible_features"]["personas"], true);
@@ -267,6 +349,55 @@ mod tests {
         assert_eq!(output["models"][0]["major_version"], 5);
         assert_eq!(output["models"][0]["max_lengths"]["duration"], 480);
         assert!(output.get("extra").is_none());
+    }
+
+    #[test]
+    fn accessible_features_support_current_string_arrays_and_preserve_unknown_entries() {
+        let billing: BillingInfo = serde_json::from_value(serde_json::json!({
+            "credits": 10,
+            "total_credits_left": 20,
+            "monthly_usage": 1,
+            "monthly_limit": 100,
+            "is_active": true,
+            "plan": {
+                "name": "Pro",
+                "plan_key": "pro",
+                "usage_plan_features": []
+            },
+            "models": [],
+            "period": "monthly",
+            "renews_on": null,
+            "accessible_features": [
+                "remaster",
+                {"name": "future_feature", "minimum_tier": "pro"},
+                {"name": "enabled_feature", "enabled": true},
+                {"name": "disabled_feature", "enabled": false},
+                {"name": "blocked_feature", "disabled": true},
+                {"name": "malformed_feature", "can_use": "yes"},
+                42
+            ]
+        }))
+        .expect("deserialize current feature list");
+
+        let features = billing
+            .accessible_features
+            .as_ref()
+            .expect("accessible features");
+        assert!(features.contains("remaster"));
+        assert!(features.contains("future_feature"));
+        assert!(features.contains("enabled_feature"));
+        assert!(!features.contains("disabled_feature"));
+        assert!(!features.contains("blocked_feature"));
+        assert!(!features.contains("malformed_feature"));
+        assert!(!features.contains("missing"));
+        assert_eq!(
+            features.enabled_names().collect::<Vec<_>>(),
+            vec!["remaster", "future_feature", "enabled_feature"]
+        );
+
+        let output = serde_json::to_value(billing).expect("serialize feature list");
+        assert_eq!(output["accessible_features"][6], 42);
+        assert_eq!(output["accessible_features"][1]["minimum_tier"], "pro");
     }
 
     #[test]

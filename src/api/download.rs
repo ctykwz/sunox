@@ -5,7 +5,7 @@ use serde::Deserialize;
 use tokio::time::Instant;
 
 use super::{PollingOptions, SunoClient};
-use crate::core::{CliError, run_before_deadline, sleep_before_deadline};
+use crate::core::{CliError, MutationAmbiguity, run_before_deadline, sleep_before_deadline};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum DownloadFormat {
@@ -53,6 +53,17 @@ impl SunoClient {
         format: DownloadFormat,
         polling: PollingOptions,
     ) -> Result<String, CliError> {
+        self.download_url_with_conversion_policy(clip_id, format, polling, true)
+            .await
+    }
+
+    pub async fn download_url_with_conversion_policy(
+        &self,
+        clip_id: &str,
+        format: DownloadFormat,
+        polling: PollingOptions,
+        allow_conversion: bool,
+    ) -> Result<String, CliError> {
         let deadline = polling.deadline()?;
         match format {
             DownloadFormat::Mp3 | DownloadFormat::M4a => {
@@ -60,12 +71,22 @@ impl SunoClient {
                     .await
             }
             DownloadFormat::Wav => {
-                self.generated_or_existing_wav_url(clip_id, deadline, polling.interval)
-                    .await
+                self.generated_or_existing_wav_url(
+                    clip_id,
+                    deadline,
+                    polling.interval,
+                    allow_conversion,
+                )
+                .await
             }
             DownloadFormat::Opus => {
-                self.generated_or_existing_opus_url(clip_id, deadline, polling.interval)
-                    .await
+                self.generated_or_existing_opus_url(
+                    clip_id,
+                    deadline,
+                    polling.interval,
+                    allow_conversion,
+                )
+                .await
             }
         }
     }
@@ -120,16 +141,22 @@ impl SunoClient {
         poll_interval: Duration,
     ) -> Result<String, CliError> {
         let path = format!("/api/gen/{clip_id}/convert_wav/");
+        let operation_id = uuid::Uuid::new_v4().to_string();
         run_before_deadline(
             deadline,
             self.with_auth_retry(|| async {
-                let resp = self.post(&path).send().await?;
+                let resp = self.post(&path).send().await.map_err(|error| {
+                    ambiguous_conversion(&operation_id, clip_id, "wav", "request_send", error)
+                })?;
                 self.check_response(resp).await?;
                 Ok(())
             }),
             download_timeout("WAV file", clip_id),
         )
-        .await?;
+        .await
+        .map_err(|error| {
+            ambiguous_conversion_submit_outcome(&operation_id, clip_id, "wav", "submit_wait", error)
+        })?;
 
         loop {
             let file = run_before_deadline(
@@ -137,14 +164,27 @@ impl SunoClient {
                 self.wav_file(clip_id),
                 download_timeout("WAV file", clip_id),
             )
-            .await?;
+            .await
+            .map_err(|error| {
+                ambiguous_conversion_from_cli_error(
+                    &operation_id,
+                    clip_id,
+                    "wav",
+                    "file_poll",
+                    error,
+                )
+            })?;
             if let Some(url) = file.wav_file_url {
                 return Ok(url);
             }
             if !sleep_before_deadline(deadline, poll_interval).await {
-                return Err(CliError::Download(format!(
-                    "timed out waiting for WAV file for clip {clip_id}"
-                )));
+                return Err(ambiguous_conversion_from_cli_error(
+                    &operation_id,
+                    clip_id,
+                    "wav",
+                    "file_poll",
+                    download_timeout("WAV file", clip_id),
+                ));
             }
         }
     }
@@ -156,16 +196,28 @@ impl SunoClient {
         poll_interval: Duration,
     ) -> Result<String, CliError> {
         let path = format!("/api/gen/{clip_id}/convert_opus");
+        let operation_id = uuid::Uuid::new_v4().to_string();
         run_before_deadline(
             deadline,
             self.with_auth_retry(|| async {
-                let resp = self.post(&path).send().await?;
+                let resp = self.post(&path).send().await.map_err(|error| {
+                    ambiguous_conversion(&operation_id, clip_id, "opus", "request_send", error)
+                })?;
                 self.check_response(resp).await?;
                 Ok(())
             }),
             download_timeout("OPUS file", clip_id),
         )
-        .await?;
+        .await
+        .map_err(|error| {
+            ambiguous_conversion_submit_outcome(
+                &operation_id,
+                clip_id,
+                "opus",
+                "submit_wait",
+                error,
+            )
+        })?;
 
         loop {
             let file = run_before_deadline(
@@ -173,14 +225,27 @@ impl SunoClient {
                 self.opus_file(clip_id),
                 download_timeout("OPUS file", clip_id),
             )
-            .await?;
+            .await
+            .map_err(|error| {
+                ambiguous_conversion_from_cli_error(
+                    &operation_id,
+                    clip_id,
+                    "opus",
+                    "file_poll",
+                    error,
+                )
+            })?;
             if let Some(url) = file.opus_file_url {
                 return Ok(url);
             }
             if !sleep_before_deadline(deadline, poll_interval).await {
-                return Err(CliError::Download(format!(
-                    "timed out waiting for OPUS file for clip {clip_id}"
-                )));
+                return Err(ambiguous_conversion_from_cli_error(
+                    &operation_id,
+                    clip_id,
+                    "opus",
+                    "file_poll",
+                    download_timeout("OPUS file", clip_id),
+                ));
             }
         }
     }
@@ -190,6 +255,7 @@ impl SunoClient {
         clip_id: &str,
         deadline: Instant,
         poll_interval: Duration,
+        allow_conversion: bool,
     ) -> Result<String, CliError> {
         let existing = run_before_deadline(
             deadline,
@@ -200,6 +266,9 @@ impl SunoClient {
         if let Some(url) = existing {
             return Ok(url);
         }
+        if !allow_conversion {
+            return Err(conversion_disabled("OPUS", clip_id));
+        }
         self.generated_opus_url(clip_id, deadline, poll_interval)
             .await
     }
@@ -209,6 +278,7 @@ impl SunoClient {
         clip_id: &str,
         deadline: Instant,
         poll_interval: Duration,
+        allow_conversion: bool,
     ) -> Result<String, CliError> {
         let existing = run_before_deadline(
             deadline,
@@ -218,6 +288,9 @@ impl SunoClient {
         .await?;
         if let Some(url) = existing {
             return Ok(url);
+        }
+        if !allow_conversion {
+            return Err(conversion_disabled("WAV", clip_id));
         }
         self.generated_wav_url(clip_id, deadline, poll_interval)
             .await
@@ -242,6 +315,85 @@ impl SunoClient {
         })
         .await
     }
+}
+
+fn conversion_disabled(format: &str, clip_id: &str) -> CliError {
+    CliError::Download(format!(
+        "no existing {format} file is available for clip {clip_id}; --no-convert/read-only mode refused to start server-side conversion"
+    ))
+}
+
+fn ambiguous_conversion_submit_outcome(
+    operation_id: &str,
+    clip_id: &str,
+    format: &'static str,
+    stage: &'static str,
+    error: CliError,
+) -> CliError {
+    if !matches!(error, CliError::Download(_)) {
+        return error;
+    }
+    ambiguous_conversion_from_cli_error(operation_id, clip_id, format, stage, error)
+}
+
+fn ambiguous_conversion(
+    operation_id: &str,
+    clip_id: &str,
+    format: &'static str,
+    stage: &'static str,
+    error: reqwest::Error,
+) -> CliError {
+    ambiguous_conversion_details(
+        operation_id,
+        clip_id,
+        format,
+        stage,
+        "http_error",
+        error.to_string(),
+    )
+}
+
+fn ambiguous_conversion_from_cli_error(
+    operation_id: &str,
+    clip_id: &str,
+    format: &'static str,
+    stage: &'static str,
+    error: CliError,
+) -> CliError {
+    let code = error.error_code();
+    let message = error.to_string();
+    ambiguous_conversion_details(operation_id, clip_id, format, stage, code, message)
+}
+
+fn ambiguous_conversion_details(
+    operation_id: &str,
+    clip_id: &str,
+    format: &'static str,
+    stage: &'static str,
+    cause_code: &'static str,
+    cause_message: String,
+) -> CliError {
+    MutationAmbiguity::new(
+        format!(
+            "{format} conversion operation {operation_id} did not reach a reliable terminal result during {stage}; conversion may still complete"
+        ),
+        format!("convert_{format}"),
+        operation_id,
+        stage,
+        cause_code,
+        cause_message,
+        true,
+        "inspect the existing converted-file URL; do not start conversion again while the outcome is unknown",
+        vec![format!(
+            "sunox clip download {clip_id} --format {format} --no-convert --json"
+        )],
+    )
+    .with_context(
+        "clip_id",
+        serde_json::Value::String(clip_id.to_string()),
+    )
+    .with_context("format", serde_json::Value::String(format.to_string()))
+    .into_error()
 }
 
 fn download_timeout(format: &str, clip_id: &str) -> CliError {

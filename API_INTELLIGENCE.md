@@ -1,4 +1,4 @@
-# Suno API Intelligence — Reverse-Engineered April 6, 2026
+# Suno API Intelligence — Reverse-Engineered through August 24, 2026
 
 Implementation notes in this file were refreshed for the Rust CLI structure on
 June 30, 2026. Non-Studio page-load traffic was recaptured from the user's
@@ -9,7 +9,7 @@ and download contracts, then the complete non-Studio endpoint and generation
 payload surface was rescanned on July 26, 2026. Live endpoint behavior can
 drift; recapture requests before changing schemas.
 
-The `/create` bundle was checked again on August 23, 2026. The generation
+The `/create` bundle was checked again on August 23–24, 2026. The generation
 route and response envelope remain stable, while the request builder now uses
 the actual `/create` pathname, distinguishes uploaded-audio continuation as
 `task: "upload_extend"`, exposes Cowrite model discovery at
@@ -302,10 +302,12 @@ the length limits below are the values returned by that response.
 Returns full account info, credits, plan, models, features, limits.
 
 ### POST /api/generate/cowrite-lyrics/
-Standalone whole-lyrics compatibility route captured in the July 26, 2026 Web
-bundle and a live authenticated request. It was not re-confirmed in the
-downloaded August 23 create graph, so this section is historical compatibility
-evidence, not a current-protocol claim. The July editor called its empty state
+Standalone whole-lyrics route captured in the July 26, 2026 Web bundle and a
+live authenticated request, then re-confirmed by the current first-party
+interaction chunk and one authorized minimal submission during the preceding
+August 24 protocol audit. That submission predates this 0.3.0 implementation
+pass; implementation and verification for this release made no account writes.
+The editor calls its empty UI state
 `fresh_generate`, but that value was not an API mode: the final request sent the
 user's request as `instruction` with `mode: "apply_user_request"`:
 
@@ -339,8 +341,8 @@ Sunox standalone lyrics generation does not use either legacy transport.
 
 The current Web bundle and live API expose
 `GET /api/generate/cowrite-lyrics/models/`. Each model includes `id`,
-`display_name`, `family`, and `supports_thinking`. Before using the July-captured
-submit compatibility route, Sunox resolves the requested model against that
+`display_name`, `family`, and `supports_thinking`. Before using the current
+submit route, Sunox resolves the requested model against that
 current response, preserves the Web literal `default` selection when no model
 is requested, and refuses `--thinking` for a model that does not advertise
 support.
@@ -533,12 +535,13 @@ Current web remaster route, captured from
   "variation_category": "normal"
 }
 ```
-The July 15, 2026 first-party web bundle still posts the selected value as
-`variation_category`. Suno's current official UI exposes Subtle, Normal
-(default), and High; sunox sends the corresponding lowercase values
-`subtle|normal|high`. The existing HAR directly captures `normal`; the other
-two values were verified from the current first-party UI plus its direct
-pass-through code path, without submitting a paid remaster job.
+For `chirp-flounder` and `chirp-carp`, current Web posts the selected
+`variation_category`; Suno exposes Subtle, Normal (default), and High. The
+`chirp-bass` request omits that field entirely. Before submitting, current Web
+also requires a complete, non-trashed, non-infill source no longer than 960
+seconds whose server `action_config` exposes Remaster as visible and enabled.
+Sunox mirrors these gates and rejects an explicit `--variation` for
+`chirp-bass`.
 Response shape matches generation response with two submitted remaster clips,
 top-level `metadata`, `status`, `batch_size`, and `created_at`.
 
@@ -955,8 +958,9 @@ POST /api/gen/{clip_id}/convert_opus
 MP3 and M4A return a prepared download response with `download_url` and can be
 `processing`; WAV uses convert-then-poll for `wav_file_url`; OPUS reads an
 existing `opus_file_url` first and starts conversion only when absent. The CLI
-defaults to the existing `audio_url` MP3, while explicit
-`--format mp3|m4a|wav|opus` uses these official format routes. Preparation and
+uses the official prepared MP3 route by default, while
+`--format mp3|m4a|wav|opus` selects among these routes. `--no-convert` (and
+global `--read-only`) refuses a missing WAV/OPUS conversion. Preparation and
 edit-action polling use the configured `poll_timeout_secs` and
 `poll_interval_secs`; CDN file transfer has a bounded connection timeout but
 no total body deadline, while a 60-second no-progress timeout prevents a
@@ -1310,7 +1314,7 @@ processing is not.
 ## Key Insights for Rust CLI
 
 1. **Captcha/challenge is conditional** — `POST /api/c/check` with `{"ctype":"generation"}` decides whether generation needs a solved token. The CLI mirrors this preflight before `/api/generate/v2-web/` submits. If the preflight reports a challenge and stored Clerk refresh material exists, the CLI refreshes the JWT once and repeats the preflight. A remaining challenge is solved silently using hCaptcha/provider 1 or Cloudflare Turnstile/provider 2 according to `captcha_version`; normal authenticated submits omit `token` and `token_provider`.
-2. **Standalone lyrics uses Cowrite** — the model-discovery GET is current-confirmed. The synchronous JWT-authenticated `POST /api/generate/cowrite-lyrics/` remains a compatibility contract from the July 26 live capture and was not re-confirmed in the August 23 bundle; capture a current submit before changing it or claiming renewed parity. The CLI does not promise that it is free or permanently exempt from server-side anti-abuse checks.
+2. **Standalone lyrics uses Cowrite** — both model discovery and the synchronous JWT-authenticated `POST /api/generate/cowrite-lyrics/` body/response are current-confirmed by the August 24 interaction chunk and a minimal submission. The CLI does not promise that it is free or permanently exempt from server-side anti-abuse checks.
 3. **JWT refresh** — need Clerk cookie exchange or session keepalive
 4. **Browser-token header** — dynamically generated from current timestamp, base64-encoded
 5. **Browser environment** — browser-cookie extraction records a stable browser source id (`chrome`, `arc`, `brave`, `firefox`, or `edge`) and best-effort public profile settings such as `accept-language`; it does not fabricate a `user-agent` from that label. Interactive login captures stable runtime headers such as `user-agent` and `accept-language`. API calls reuse captured fields independently, derive Chromium client hints from the selected `user-agent`, send the stable browser fetch metadata headers observed in HARs, and fall back field-by-field when unavailable.

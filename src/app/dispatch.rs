@@ -9,7 +9,13 @@ use crate::core::CliError;
 
 pub async fn run() -> Result<(), CliError> {
     let cli = Cli::parse();
-    let ctx = AppContext::new(cli.json, cli.quiet, cli.parallel, &cli.config_overrides)?;
+    let ctx = AppContext::new(
+        cli.json,
+        cli.quiet,
+        cli.parallel,
+        cli.read_only,
+        &cli.config_overrides,
+    )?;
     let Cli {
         prompt, command, ..
     } = cli;
@@ -50,6 +56,7 @@ async fn dispatch_command(
                     lyrics: None,
                     lyrics_file: None,
                     model: None,
+                    duration: None,
                     vocal: None,
                     weirdness: None,
                     style_influence: None,
@@ -85,6 +92,7 @@ async fn dispatch_command(
         Some(Commands::Auth(args)) => commands::auth::run(args, ctx).await,
         Some(Commands::Credits) => commands::account::credits(ctx).await,
         Some(Commands::Models) => commands::account::models(ctx).await,
+        Some(Commands::Capabilities) => commands::account::capabilities(ctx).await,
         Some(Commands::Lyrics(args)) => commands::create::lyrics(args, ctx).await,
         Some(Commands::Persona(args)) => commands::persona::run(args, ctx).await,
         Some(Commands::Playlist(args)) => commands::playlist::run(args, ctx).await,
@@ -103,6 +111,7 @@ async fn run_clip(command: ClipCommand, ctx: &AppContext) -> Result<(), CliError
         ClipCommand::List(args) => commands::library::list(args, ctx).await,
         ClipCommand::Search(args) => commands::library::search(args, ctx).await,
         ClipCommand::Info(args) => commands::library::info(args, ctx).await,
+        ClipCommand::Actions(args) => commands::library::actions(args, ctx).await,
         ClipCommand::Status(args) => commands::library::status(args, ctx).await,
         ClipCommand::Wait(args) => commands::wait::run(args, ctx).await,
         ClipCommand::Download(args) => commands::media::download(args, ctx).await,

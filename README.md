@@ -78,6 +78,7 @@ sunox create \
   --tags "dream pop, synth, female vocal" \
   --exclude "metal, aggressive" \
   --lyrics-file lyrics.txt \
+  --duration 180 \
   --weirdness 35 \
   --style-influence 70
 ```
@@ -110,10 +111,11 @@ sunox clip wait <clip_id_1> <clip_id_2>
 sunox download <clip_id_1> <clip_id_2> --output ./songs
 ```
 
-The default download is the existing CDN MP3. Sunox writes available plain and timed lyrics into
-the file's ID3 tags. Use `--format mp3|m4a|wav|opus` only when you want Suno's prepared-format
-workflow; WAV and OPUS reuse an existing converted file before requesting a conversion. Use
-`--video` for an available MP4.
+The default download uses Suno's prepared MP3 endpoint. Sunox writes available plain and timed
+lyrics into the file's ID3 tags. Use `--format mp3|m4a|wav|opus` to choose another prepared format;
+WAV and OPUS reuse an existing converted file before requesting a conversion. Add `--no-convert`
+to refuse that server-side conversion POST, or use `--video` for an available MP4. Suno may meter
+prepared downloads according to the account plan.
 
 ## Common commands
 
@@ -125,6 +127,7 @@ sunox lyrics                      Generate lyrics only
 sunox clip list                   List your songs
 sunox clip search <query>         Search your songs
 sunox clip info <id>              Show clip details
+sunox clip actions <id>           Show server-enabled actions for a clip
 sunox clip wait <ids>             Wait for generation to finish
 sunox download <ids>              Download completed clips
 
@@ -148,6 +151,7 @@ sunox persona create <clip_id>    Create a persona from a clip
 sunox clip upload <file>          Upload local audio
 sunox credits                     Show credits and plan information
 sunox models                      Show models available to the account
+sunox capabilities                Compare account entitlements with CLI coverage
 sunox doctor --network            Check DNS, TCP, and HTTPS access
 sunox doctor --browser-bridge     Check Bridge transport without running a challenge
 sunox update                      Install the latest GitHub release
@@ -160,11 +164,23 @@ display name with `sunox lyrics --prompt "..." --model <model>`, and add
 `--enhance-tags` only when you want the same optional style-enhance action used
 by the current Web editor before submission.
 
+Generation and Cover models are also resolved from the current account instead of a compiled-in
+version list. `--model` accepts an exact external key, account model ID, or an unambiguous display
+name; unavailable and ambiguous selectors fail closed. `--duration <seconds>` is supported only
+when the selector resolves to the current v5.5 `chirp-fenix` model and is checked against that
+account model's advertised duration limit when present. Use `sunox capabilities --json` for the
+plan, live selectors, limits, and an entitlement-by-entitlement CLI coverage matrix.
+
 `clip remaster` follows Suno Web's separate account contract: the current
 account must expose the `remaster` feature, and the selected model must appear
 in `remaster_model_types`. Without `--model`, Sunox uses the first model in that
-current Web list. The legacy per-model `can_use` value remains visible in JSON
-for diagnostics but is not treated as a Web eligibility gate.
+current Web list whose request shape this CLI understands; an account exposing
+only future unknown models fails closed. `--model` accepts each supported row's display name or
+external key exactly as reported by `capabilities`. The legacy per-model `can_use` value remains visible in JSON
+for diagnostics but is not treated as a Web eligibility gate. Before submitting, Sunox also
+requires an exact complete, non-trashed, non-infill source of at most 960 seconds whose current
+`action_config` exposes an enabled Remaster action. The v4.5+ `chirp-bass` payload omits
+`variation_category`; passing `--variation` with that model is rejected locally.
 
 Run `sunox --help` or `sunox <command> --help` for the complete set of options.
 
@@ -316,7 +332,11 @@ For machine-readable command and workflow discovery:
 
 ```bash
 sunox agent-info --json
+sunox capabilities --json
 ```
+
+`agent-info` is the static CLI contract; `capabilities` is an authenticated, read-only view of
+the current account and should be refreshed whenever Suno changes models or plan entitlements.
 
 To install the bundled usage skill for a coding agent:
 
@@ -344,6 +364,11 @@ such as `SUNOX_OUTPUT_DIR`, `SUNOX_DEFAULT_MODEL`, `SUNOX_CHALLENGE_BROWSER`, an
 Write operations are serialized per account by default. `--parallel` disables that protection for
 one command; use it only when same-account concurrent writes are intentional.
 
+Pass global `--read-only` to reject account writes before the first write request. Read-only mode
+still allows account reads and prepared downloads; those downloads can be plan-metered. It also
+prevents timed-lyrics augmentation and missing WAV/OPUS conversion while continuing to return an
+already existing alignment or converted file when available.
+
 ## Limits and safety
 
 Sunox covers non-Studio workflows that can be verified against the current Suno Web application.
@@ -352,6 +377,12 @@ Suno Studio features are intentionally out of scope.
 Some commands create paid resources or change remote state. Sunox keeps created clips, playlists,
 and personas private unless a command explicitly requests public visibility. Destructive commands
 require `-y` or `--yes`.
+
+[Suno has announced](https://about.suno.com/blog/suno-updates-tos) that on September 3, 2026, Pro
+accounts will be limited to 20 downloads per month (Premier: 60; Premier Studio exports are
+excluded). Sunox uses the official prepared-download
+workflow and does not attempt to bypass plan accounting. The CLI reports only limits returned by
+the live billing response; it does not hard-code or guess remaining download allowance.
 
 ## Development
 

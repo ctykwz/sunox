@@ -56,6 +56,10 @@ pub struct DownloadArgs {
     /// Audio format to download through Suno's web download endpoints
     #[arg(long, value_enum)]
     pub format: Option<DownloadFormat>,
+
+    /// Refuse to start server-side WAV/OPUS conversion when no converted file exists
+    #[arg(long, conflicts_with = "video")]
+    pub no_convert: bool,
 }
 
 #[derive(clap::Args)]

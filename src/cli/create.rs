@@ -1,4 +1,4 @@
-use super::{CoverModel, ModelVersion, RemasterModel, RemasterVariation, VocalGender};
+use super::{RemasterModel, RemasterVariation, VocalGender};
 
 #[derive(clap::Args)]
 pub struct CreateArgs {
@@ -27,9 +27,13 @@ pub struct CreateArgs {
     #[arg(long)]
     pub lyrics_file: Option<String>,
 
-    /// Model version
+    /// Generation model display name, external key, or account model ID
     #[arg(short, long)]
-    pub model: Option<ModelVersion>,
+    pub model: Option<String>,
+
+    /// Requested song duration in seconds (current v5.5 model only)
+    #[arg(long)]
+    pub duration: Option<f64>,
 
     /// Vocal gender
     #[arg(long)]
@@ -92,9 +96,13 @@ pub struct GenerateArgs {
     #[arg(long)]
     pub lyrics_file: Option<String>,
 
-    /// Model version
+    /// Generation model display name, external key, or account model ID
     #[arg(short, long)]
-    pub model: Option<ModelVersion>,
+    pub model: Option<String>,
+
+    /// Requested song duration in seconds (current v5.5 model only)
+    #[arg(long)]
+    pub duration: Option<f64>,
 
     /// Vocal gender
     #[arg(long)]
@@ -152,9 +160,13 @@ pub struct DescribeArgs {
     #[arg(long)]
     pub exclude: Option<String>,
 
-    /// Model version
+    /// Generation model display name, external key, or account model ID
     #[arg(short, long)]
-    pub model: Option<ModelVersion>,
+    pub model: Option<String>,
+
+    /// Requested song duration in seconds (current v5.5 model only)
+    #[arg(long)]
+    pub duration: Option<f64>,
 
     /// Vocal gender
     #[arg(long)]
@@ -269,9 +281,9 @@ pub struct CoverArgs {
     #[arg(long)]
     pub tags: Option<String>,
 
-    /// Model version for the cover
+    /// Cover model display name, external key, or account model ID
     #[arg(short, long)]
-    pub model: Option<CoverModel>,
+    pub model: Option<String>,
 
     /// Challenge token (overrides the built-in solver)
     #[arg(long)]
@@ -350,8 +362,8 @@ pub struct RemasterArgs {
     pub model: Option<RemasterModel>,
 
     /// How strongly the remaster may vary from the source
-    #[arg(long, value_enum, default_value_t)]
-    pub variation: RemasterVariation,
+    #[arg(long, value_enum)]
+    pub variation: Option<RemasterVariation>,
 }
 
 #[derive(clap::Args)]

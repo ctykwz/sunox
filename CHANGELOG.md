@@ -11,6 +11,44 @@ backward-compatible features, upstream protocol adaptations, and fixes.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-24
+
+### Added
+
+- Added authenticated `sunox capabilities` output that combines the live plan, usable generation
+  and Remaster selectors, safe account-limit fields, and an entitlement-by-entitlement CLI
+  coverage matrix. Added read-only `sunox clip actions <id>` for source eligibility inspection.
+- Added account-driven generation and Cover model selectors by display name, external key, or
+  account model ID, plus v5.5 `--duration` validation against the live account model limit.
+- Added global `--read-only` enforcement and `--no-convert` for GET-only WAV/OPUS retrieval.
+
+### Changed
+
+- Use Suno's prepared MP3 endpoint for the default download instead of bypassing the official
+  format workflow through `clip.audio_url`. Downloads can therefore follow current plan metering.
+- Match model-specific Remaster bodies: v5/v5.5 default to Normal when omitted, while v4.5+
+  `chirp-bass` omits `variation_category` and rejects an explicit variation. Future unknown
+  Remaster request shapes are never guessed or auto-selected.
+
+### Fixed
+
+- Fail Remaster locally unless the exact source is complete, explicitly outside trash, not an
+  infill, at most 960 seconds, and exposes a visible, enabled Remaster action in current
+  `action_config`.
+- Report response loss after generation, Remaster, conversion, and submitted edit work as
+  `ambiguous_mutation` with operation identity and safe recovery guidance instead of suggesting a
+  blind replay that could duplicate clips or consume credits twice.
+- Preserve current and legacy `accessible_features` response shapes behind one fail-closed typed
+  feature check.
+- Preflight local download destinations before any prepared-format or conversion request, preserve
+  all batch destinations before the first such request, preserve nested recovery details for
+  partial batch failures, and strictly sanitize capability limits.
+
+### Security
+
+- Updated `h2` to a release that fixes RUSTSEC-2026-0258 and updated `event-listener` past its
+  affected unsound release.
+
 ## [0.2.2] - 2026-08-04
 
 ### Fixed

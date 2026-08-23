@@ -1,9 +1,8 @@
 use crate::app::AppContext;
 use crate::cli::{
-    ConcatArgs, CoverArgs, CoverModel, CropArgs, FadeArgs, RemasterArgs, ReverseArgs, SpeedArgs,
-    StemsArgs,
+    ConcatArgs, CoverArgs, CropArgs, FadeArgs, RemasterArgs, ReverseArgs, SpeedArgs, StemsArgs,
 };
-use crate::core::{AppConfig, CliError};
+use crate::core::{AppConfig, CliError, normalize_generation_model_selector};
 
 use super::support::{
     ChallengeMode, execute_generation_submission, output_clips, output_generation,
@@ -26,7 +25,6 @@ pub async fn cover(args: CoverArgs, ctx: &AppContext) -> Result<(), CliError> {
     }
     let challenge_mode = ChallengeMode::from_flags(args.captcha, args.no_captcha);
     let token = args.token.clone();
-    let model = model.to_string();
     let clips = execute_generation_submission(token, challenge_mode, ctx, move || async move {
         let client = ctx.client().await?;
         let mut req = client
@@ -40,18 +38,16 @@ pub async fn cover(args: CoverArgs, ctx: &AppContext) -> Result<(), CliError> {
     Ok(())
 }
 
-fn cover_model_api_key<'a>(
-    model: Option<&'a CoverModel>,
-    config: &'a AppConfig,
-) -> Result<&'a str, CliError> {
-    if let Some(model) = model {
-        return Ok(model.to_api_key());
-    }
-    Ok(config.default_model.as_str())
+fn cover_model_api_key(model: Option<&String>, config: &AppConfig) -> Result<String, CliError> {
+    normalize_generation_model_selector(
+        model
+            .map(String::as_str)
+            .unwrap_or(config.default_model.as_str()),
+    )
 }
 
-fn cover_model_label<'a>(model: Option<&'a CoverModel>, config: &'a AppConfig) -> &'a str {
-    model.map(CoverModel::display_name).unwrap_or_else(|| {
+fn cover_model_label<'a>(model: Option<&'a String>, config: &'a AppConfig) -> &'a str {
+    model.map(String::as_str).unwrap_or_else(|| {
         if config.default_model == "auto" {
             "account default"
         } else {
@@ -87,12 +83,7 @@ fn ensure_remaster_plan_access(info: &crate::api::types::BillingInfo) -> Result<
     let has_access = info
         .accessible_features
         .as_ref()
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|features| {
-            features.iter().any(|feature| {
-                feature.get("name").and_then(serde_json::Value::as_str) == Some("remaster")
-            })
-        });
+        .is_some_and(|features| features.contains("remaster"));
     if !has_access {
         return Err(CliError::Config(
             "Suno does not expose Remaster in the current account's accessible_features".into(),
@@ -115,14 +106,24 @@ fn select_remaster_model(
             .iter()
             .find(|model| model.external_key == requested.to_api_key())
     } else {
-        models.first()
+        models
+            .iter()
+            .find(|model| crate::cli::RemasterModel::supports_api_key(&model.external_key))
     };
     let selected = selected.ok_or_else(|| {
-        let requested = requested
-            .map(|model| model.display_name())
-            .unwrap_or("an account default remaster model");
+        if let Some(requested) = requested {
+            return CliError::Config(format!(
+                "Suno account does not report {} as an available remaster model; run `sunox models --json`",
+                requested.display_name()
+            ));
+        }
+        let reported = models
+            .iter()
+            .map(|model| model.external_key.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
         CliError::Config(format!(
-            "Suno account does not report {requested} as an available remaster model; run `sunox models --json`"
+            "Suno account reports no supported remaster models; reported keys: {reported}. Supported keys are chirp-flounder, chirp-carp, and chirp-bass"
         ))
     })?;
     Ok(selected.external_key.clone())
@@ -325,8 +326,15 @@ mod tests {
     }
 
     #[test]
-    fn remaster_auto_uses_first_web_listed_model_without_filtering_can_use() {
+    fn remaster_auto_uses_first_supported_web_model_without_filtering_can_use() {
         let models = vec![
+            RemasterModelInfo {
+                name: "future".into(),
+                external_key: "chirp-future".into(),
+                is_default_model: true,
+                can_use: Some(true),
+                extra: Default::default(),
+            },
             RemasterModelInfo {
                 name: "v5".into(),
                 external_key: "chirp-carp".into(),
@@ -344,9 +352,26 @@ mod tests {
         ];
 
         assert_eq!(
-            select_remaster_model(&models, None).expect("first Web-listed model"),
+            select_remaster_model(&models, None).expect("first supported Web-listed model"),
             "chirp-carp"
         );
+    }
+
+    #[test]
+    fn remaster_auto_rejects_an_account_list_with_only_unknown_models() {
+        let models = vec![RemasterModelInfo {
+            name: "future".into(),
+            external_key: "chirp-future".into(),
+            is_default_model: true,
+            can_use: Some(true),
+            extra: Default::default(),
+        }];
+
+        let error = select_remaster_model(&models, None)
+            .expect_err("unknown Remaster payloads must not be guessed");
+
+        assert!(error.to_string().contains("supported remaster models"));
+        assert!(error.to_string().contains("chirp-future"));
     }
 
     #[test]
@@ -368,10 +393,13 @@ mod tests {
 
     #[test]
     fn remaster_plan_access_uses_current_top_level_features() {
-        let pro = billing_fixture(Some(serde_json::json!([{"name": "remaster"}])));
+        let pro = billing_fixture(Some(serde_json::json!(["remaster"])));
         ensure_remaster_plan_access(&pro).expect("Pro Remaster feature");
 
-        let basic = billing_fixture(Some(serde_json::json!([{"name": "tag_upsample"}])));
+        let legacy_pro = billing_fixture(Some(serde_json::json!({"remaster": true})));
+        ensure_remaster_plan_access(&legacy_pro).expect("legacy Pro Remaster feature");
+
+        let basic = billing_fixture(Some(serde_json::json!(["tag_upsample"])));
         let error = ensure_remaster_plan_access(&basic)
             .expect_err("current accessible features must gate Remaster");
         assert!(error.to_string().contains("accessible_features"));
@@ -382,10 +410,11 @@ mod tests {
         for info in [
             billing_fixture(None),
             billing_fixture(Some(serde_json::json!([]))),
-            billing_fixture(Some(serde_json::json!({"remaster": true}))),
+            billing_fixture(Some(serde_json::json!({"remaster": false}))),
+            billing_fixture(Some(serde_json::json!("remaster"))),
         ] {
             let error = ensure_remaster_plan_access(&info)
-                .expect_err("only the current Web feature-list shape can authorize Remaster");
+                .expect_err("unknown or disabled feature shapes must not authorize Remaster");
             assert!(error.to_string().contains("accessible_features"));
         }
     }

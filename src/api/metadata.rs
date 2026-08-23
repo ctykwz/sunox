@@ -124,6 +124,17 @@ impl SunoClient {
         self.aligned_lyrics_v2(clip_id, polling, deadline).await
     }
 
+    /// Read an already available alignment without starting the v3 alignment
+    /// workflow. This method only uses the v2 GET compatibility route.
+    pub async fn existing_aligned_lyrics(
+        &self,
+        clip_id: &str,
+        polling: PollingOptions,
+    ) -> Result<Vec<AlignedWord>, CliError> {
+        let deadline = polling.deadline()?;
+        self.aligned_lyrics_v2(clip_id, polling, deadline).await
+    }
+
     async fn aligned_lyrics_v3(
         &self,
         clip_id: &str,
