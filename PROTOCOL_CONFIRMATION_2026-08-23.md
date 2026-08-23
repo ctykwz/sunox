@@ -11,8 +11,9 @@
 | Persona mutation | **create/edit/visibility/love/trash/restore/purge 均有当前一方源码** | 否 |
 | Inspiration tag upsample | **当前 Web 为显式 Enhance 操作，不是 Inspiration 的必经步骤；Sunox 当前可选 `--enhance-tags` 与之相符** | 否 |
 | MP3/M4A/WAV/OPUS download | **当前一方源码完整确认，包括 WAV/OPUS 都是 GET-first、缺失才转码** | 否；只有验证某个账号下的实际转码结果才需要 mutation |
+| Remaster 资格与模型选择 | **生效 Pro 的 feature 与源 clip action 均放行；当前 Web 不用 model `can_use` 门控，CLI 假阴性已修复** | 资格无需；只有验证生成结果与实际扣费才需一次 mutation |
 
-因此，五组协议均不应再标为“缺当前协议证据”。Persona Advanced 不仅已有一方源码映射，还完成了 rootless Vox 的账号端到端验证；唯一仍有条件性不确定的是：如果继续保留复核前的 `create/describe --persona` 短 payload，它是否仍被后端作为兼容输入接受。这个问题只涉及旧短路径，不影响当前 Advanced 适配结论。
+因此，原五组协议均不应再标为“缺当前协议证据”，Remaster 的套餐/模型资格判断也已关闭。Persona Advanced 不仅已有一方源码映射，还完成了 rootless Vox 的账号端到端验证；唯一仍有条件性不确定的是：如果继续保留复核前的 `create/describe --persona` 短 payload，它是否仍被后端作为兼容输入接受。这个问题只涉及旧短路径，不影响当前 Advanced 适配结论。Remaster 目前只缺一次需要明确授权的真实生成结果与扣费闭环，不影响“Pro 具备权限”及当前请求协议结论。
 
 本轮经用户授权执行了两类受控写：一次最小 Cowrite submit（成功，观察到 credits delta = 0）和一次私有 rootless Vox Advanced generation。后者按修复后的 contract 提交，使用 v5.5（`chirp-fenix`）与 `task: "vox"`，返回两个 `complete`、带 `audio_url`、`is_public:false` 且 `persona_id` 匹配的 clip；即时 credits 从 2107 降到 2097，精确 delta = 10。随后 paginated Persona clips 只读回查也确认两个结果已持久化。报告不记录账号、Persona 或 clip 标识；没有上传、Persona/clip/playlist 元数据修改、可见性/发布、关注/收藏、删除或 WAV/OPUS 转码。
 
@@ -35,6 +36,10 @@
 | [`2x-65bipljzoj.js`](https://suno.com/_next/static/immutable/chunks/2x-65bipljzoj.js) | `476de78ecc690115872d049af7e1030b1f6e52f38e380982dfc5dad0dee3fcd9` | Persona edit mutation hook |
 | [`3iglu18q2jo7v.js`](https://suno.com/_next/static/immutable/chunks/3iglu18q2jo7v.js) | `012286bf7496160dc099ac988d1ffe8d5fce44881714b03e18481d870c78e063` | 完整 Persona edit body |
 | [`24xq6d54vzip9.js`](https://suno.com/_next/static/immutable/chunks/24xq6d54vzip9.js) | `e5c54cdc72714aa9e5eeed5fade6c47929671df1b23c4939b76c3f5c7472c6fb` | `/voice` 页面 visibility 与轻量 edit |
+| [`1dj8w_ebqiles.js`](https://suno.com/_next/static/immutable/chunks/1dj8w_ebqiles.js) | `0e399b9b5ff5045324c7c4a68ca4508f04c857aa5449e17d494d7eb193750488` | 顶层 `accessible_features` 与 Remaster model list |
+| [`3teie_t7wfp1a.js`](https://suno.com/_next/static/immutable/chunks/3teie_t7wfp1a.js) | `54681826d888baef51cf581e686bf69641140a5f3f405e83943b66552d5b8f38` | `PlanFeature.Remaster` 与 feature helper |
+| [`2meib9yq1qhch.js`](https://suno.com/_next/static/immutable/chunks/2meib9yq1qhch.js) | `44d6998bee09ac9350a5f1ce19545db2c2f2557ef07cccba40217f662d2edec7` | Remaster selector 原样使用 model list，不读取 `can_use` |
+| [`1vw1tt48qlmdn.js`](https://suno.com/_next/static/immutable/chunks/1vw1tt48qlmdn.js) | `2c7dc982024a406bec64a5e4ff167b13e32b53bfccae3782fdefe28d10acd0d0` | `clip_id/model_name/variation_category` 与 `/api/generate/upsample` |
 
 ## 1. Cowrite submit：当前协议已确认
 
@@ -258,4 +263,4 @@ MP3/M4A 当前都走 prepared-download GET。Web 对 MP3 在特定 gate 关闭�
 
 此前 `get-persona-paginated` 在 JWT refresh 后出现过间歇 transport reset，普通 detail 对照也同时失败；随后 bounded retry/再读已经成功，并解码非空页面及两个新结果。因此该只读 live 边界已关闭，早期 reset 只保留为可用性证据，不再被解释为 route/schema 不兼容。
 
-Remaster 仍是账号资格边界：当前账号所有可见 Remaster model 均为 `can_use:false`，CLI 在 POST 前正确阻断。本轮没有绕过资格、没有调用 Remaster mutation，也不声称 live Remaster 成功；只有具备 `can_use:true` 的账号才适合做后续端到端验证。
+Remaster 的待确认资格边界已经通过只读证据关闭：当前账号是生效中的 Pro，顶层 `accessible_features` 和 plan features 都包含 `remaster`；一条自有、私有、已完成源 clip 的服务端 `action_config` 也返回 Remaster `visible:true, disabled:false`。虽然 `remaster_model_types` 的旧字段均为 `can_use:false`，当前 Web 只按套餐 feature 开启入口，并原样使用完整 model list，不读取或过滤该字段。CLI 先前因此产生了假阴性，现已改为与 Web 一致的判定。官方也明确说明 Pro/Premier 可使用 Remaster：[Remaster 说明](https://help.suno.com/en/articles/8105281)、[旧歌曲 Remaster](https://help.suno.com/en/articles/3591617)。本轮没有调用 Remaster POST、没有扣除相关额度，也不声称生成结果已做 live 闭环；如需验证结果与实际扣费，仍须单独授权一次生成型提交。

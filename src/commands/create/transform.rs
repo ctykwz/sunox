@@ -78,13 +78,27 @@ fn resolve_remaster_model(
     billing: Result<crate::api::types::BillingInfo, CliError>,
     requested: Option<&crate::cli::RemasterModel>,
 ) -> Result<String, CliError> {
-    match billing {
-        Ok(info) => select_remaster_model(&info.remaster_model_types, requested),
-        Err(error) if crate::api::generate::is_transient_billing_transport(&error) => Ok(requested
-            .map(|model| model.to_api_key().to_string())
-            .unwrap_or_else(|| "chirp-flounder".into())),
-        Err(error) => Err(error),
+    let info = billing?;
+    ensure_remaster_plan_access(&info)?;
+    select_remaster_model(&info.remaster_model_types, requested)
+}
+
+fn ensure_remaster_plan_access(info: &crate::api::types::BillingInfo) -> Result<(), CliError> {
+    let has_access = info
+        .accessible_features
+        .as_ref()
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|features| {
+            features.iter().any(|feature| {
+                feature.get("name").and_then(serde_json::Value::as_str) == Some("remaster")
+            })
+        });
+    if !has_access {
+        return Err(CliError::Config(
+            "Suno does not expose Remaster in the current account's accessible_features".into(),
+        ));
     }
+    Ok(())
 }
 
 fn select_remaster_model(
@@ -101,10 +115,7 @@ fn select_remaster_model(
             .iter()
             .find(|model| model.external_key == requested.to_api_key())
     } else {
-        models
-            .iter()
-            .find(|model| model.is_default_model && model.can_use != Some(false))
-            .or_else(|| models.iter().find(|model| model.can_use != Some(false)))
+        models.first()
     };
     let selected = selected.ok_or_else(|| {
         let requested = requested
@@ -114,12 +125,6 @@ fn select_remaster_model(
             "Suno account does not report {requested} as an available remaster model; run `sunox models --json`"
         ))
     })?;
-    if selected.can_use == Some(false) {
-        return Err(CliError::Config(format!(
-            "Suno account reports remaster model {} as unavailable",
-            selected.external_key
-        )));
-    }
     Ok(selected.external_key.clone())
 }
 
@@ -287,26 +292,65 @@ mod tests {
     use crate::cli::RemasterModel;
     use crate::core::CliError;
 
-    use super::{resolve_remaster_model, select_remaster_model};
+    use super::{ensure_remaster_plan_access, resolve_remaster_model, select_remaster_model};
+
+    fn billing_fixture(
+        accessible_features: Option<serde_json::Value>,
+    ) -> crate::api::types::BillingInfo {
+        let mut value = serde_json::json!({
+            "credits": 100,
+            "total_credits_left": 100,
+            "monthly_usage": 0,
+            "monthly_limit": 2500,
+            "is_active": true,
+            "plan": {
+                "name": "Pro Plan",
+                "plan_key": "pro",
+                "usage_plan_features": [{"name": "remaster"}]
+            },
+            "models": [],
+            "period": "month",
+            "renews_on": null,
+            "remaster_model_types": [{
+                "name": "v5.5",
+                "external_key": "chirp-flounder",
+                "is_default_model": true,
+                "can_use": false
+            }]
+        });
+        if let Some(features) = accessible_features {
+            value["accessible_features"] = features;
+        }
+        serde_json::from_value(value).expect("billing fixture")
+    }
 
     #[test]
-    fn remaster_auto_uses_account_default_without_treating_unknown_as_unavailable() {
-        let models = vec![RemasterModelInfo {
-            name: "v5".into(),
-            external_key: "chirp-carp".into(),
-            is_default_model: true,
-            can_use: None,
-            extra: Default::default(),
-        }];
+    fn remaster_auto_uses_first_web_listed_model_without_filtering_can_use() {
+        let models = vec![
+            RemasterModelInfo {
+                name: "v5".into(),
+                external_key: "chirp-carp".into(),
+                is_default_model: false,
+                can_use: Some(false),
+                extra: Default::default(),
+            },
+            RemasterModelInfo {
+                name: "v5.5".into(),
+                external_key: "chirp-flounder".into(),
+                is_default_model: true,
+                can_use: Some(true),
+                extra: Default::default(),
+            },
+        ];
 
         assert_eq!(
-            select_remaster_model(&models, None).expect("account default"),
+            select_remaster_model(&models, None).expect("first Web-listed model"),
             "chirp-carp"
         );
     }
 
     #[test]
-    fn remaster_rejects_an_explicitly_unavailable_model() {
+    fn remaster_uses_a_web_listed_model_even_when_legacy_can_use_is_false() {
         let models = vec![RemasterModelInfo {
             name: "v5.5".into(),
             external_key: "chirp-flounder".into(),
@@ -315,11 +359,39 @@ mod tests {
             extra: Default::default(),
         }];
 
-        assert!(select_remaster_model(&models, Some(&RemasterModel::V55)).is_err());
+        assert_eq!(
+            select_remaster_model(&models, Some(&RemasterModel::V55))
+                .expect("current Web lists the model without filtering can_use"),
+            "chirp-flounder"
+        );
     }
 
     #[test]
-    fn remaster_propagates_billing_http_and_schema_errors_instead_of_guessing() {
+    fn remaster_plan_access_uses_current_top_level_features() {
+        let pro = billing_fixture(Some(serde_json::json!([{"name": "remaster"}])));
+        ensure_remaster_plan_access(&pro).expect("Pro Remaster feature");
+
+        let basic = billing_fixture(Some(serde_json::json!([{"name": "tag_upsample"}])));
+        let error = ensure_remaster_plan_access(&basic)
+            .expect_err("current accessible features must gate Remaster");
+        assert!(error.to_string().contains("accessible_features"));
+    }
+
+    #[test]
+    fn remaster_plan_access_fails_closed_when_current_top_level_features_are_missing_or_empty() {
+        for info in [
+            billing_fixture(None),
+            billing_fixture(Some(serde_json::json!([]))),
+            billing_fixture(Some(serde_json::json!({"remaster": true}))),
+        ] {
+            let error = ensure_remaster_plan_access(&info)
+                .expect_err("only the current Web feature-list shape can authorize Remaster");
+            assert!(error.to_string().contains("accessible_features"));
+        }
+    }
+
+    #[test]
+    fn remaster_propagates_billing_errors_instead_of_guessing() {
         let http_error = CliError::SunoApi {
             code: "server_error",
             status: 500,
@@ -337,6 +409,15 @@ mod tests {
         assert!(matches!(
             resolve_remaster_model(Err(schema_error), Some(&RemasterModel::V55)),
             Err(CliError::Json(_))
+        ));
+
+        let transport_error = CliError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "billing transport unavailable",
+        ));
+        assert!(matches!(
+            resolve_remaster_model(Err(transport_error), None),
+            Err(CliError::Io(_))
         ));
     }
 }

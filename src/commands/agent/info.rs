@@ -25,7 +25,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "v3.5": "chirp-v3-5",
             "v3": "chirp-v3-0",
         },
-        "model_selection": "Model availability, the account default, and max_lengths are account-specific. Generation reads `/api/billing/info/` directly; `sunox models --json` returns generation and remaster arrays from the same account data. default_model=auto selects a usable is_default_model, then a usable is_default_free_model, then the first model whose can_use field is true. If the billing read is unavailable it falls back to the Web constant chirp-auk-turbo; a successful empty model response is an error. An explicit --model or configured model is validated against current account model data.",
+        "model_selection": "Model availability, the account default, and max_lengths are account-specific. Generation reads `/api/billing/info/` directly; `sunox models --json` returns generation and remaster arrays from the same account data. Generation default_model=auto selects a usable is_default_model, then a usable is_default_free_model, then the first model whose can_use field is true. If the billing read is unavailable it falls back to the Web constant chirp-auk-turbo; a successful empty model response is an error. An explicit --model or configured generation model is validated against current account model data. Remaster follows the separate current Web contract: accessible_features must contain remaster, and the selected model must be present in remaster_model_types; without --model it uses the first Web-listed remaster model. The legacy per-model can_use field is preserved in JSON but is not a Web eligibility gate.",
         "remaster_models": {
             "v5.5": "chirp-flounder",
             "v5": "chirp-carp",
@@ -164,6 +164,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                     "variation_category": "subtle|normal|high"
                 },
                 "defaults": "--variation defaults to normal; use subtle to preserve more of the source or high for the strongest variation",
+                "eligibility": "matches current Web gating: the account's accessible_features must include remaster and the selected model must be listed in remaster_model_types. Do not treat remaster_model_types[].can_use=false as a denial; current Web does not read that field. The backend remains authoritative for source-clip restrictions.",
                 "response": "generation response with submitted clips"
             },
             "clip download": {

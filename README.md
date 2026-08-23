@@ -160,6 +160,12 @@ display name with `sunox lyrics --prompt "..." --model <model>`, and add
 `--enhance-tags` only when you want the same optional style-enhance action used
 by the current Web editor before submission.
 
+`clip remaster` follows Suno Web's separate account contract: the current
+account must expose the `remaster` feature, and the selected model must appear
+in `remaster_model_types`. Without `--model`, Sunox uses the first model in that
+current Web list. The legacy per-model `can_use` value remains visible in JSON
+for diagnostics but is not treated as a Web eligibility gate.
+
 Run `sunox --help` or `sunox <command> --help` for the complete set of options.
 
 ## Generation challenges

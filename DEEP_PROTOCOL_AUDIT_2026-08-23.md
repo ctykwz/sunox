@@ -65,9 +65,15 @@ new results were complete, private, `task:"vox"`, and linked to the selected
 Persona. Earlier transport resets therefore remain availability evidence, but
 the later bounded retry/read closes the route and non-empty schema live.
 
-The configured account also reports `can_use:false` for the available Remaster
-models, so Sunox correctly blocks before the Remaster POST. No eligibility was
-bypassed and no live Remaster result is claimed.
+The configured account is an active Pro plan whose top-level
+`accessible_features` and plan features both contain `remaster`. Its available
+Remaster models nevertheless report `can_use:false`. Current Web source gates
+the menu on the plan feature, passes the full `remaster_model_types` array to
+the selector, and never reads or filters the models by `can_use`. A live read of
+one owned, private, complete source clip also returned Remaster
+`action_config={visible:true,disabled:false}`. Sunox's former `can_use:false`
+pre-block was therefore a false negative and has been removed. No Remaster POST
+was sent and no Remaster result or credit cost is claimed.
 
 The authorized writes in this follow-up were the minimal Cowrite submit and one
 private rootless-Vox Advanced generation. Generation returned two complete
@@ -105,13 +111,15 @@ Relevant immutable bundle fingerprints:
 
 | Chunk | SHA-256 | Main evidence |
 |---|---|---|
-| `2vyct5q4gq553.js` | `7f54ece7f0888ff20c038a97931b78ba91e8aa8f3ae16e229159f678b2ac26ab` | generation builder, Persona picker/reference, tag upsample, edit and aligned-lyrics flows |
+| `2vyct5q4gq553.js` | `7f54ece7f0888ff20c038a97931b78ba91e8aa8f3ae16e229159f678b2ac26ab` | generation builder, Persona picker/reference, tag upsample, edit/aligned-lyrics flows, and Remaster menu/source gates |
 | `3glkvxw_k-y2j.js` | `581825334acf60efb854dde6f94e01375c93afabb7a49843f60515d82e50ceba` | current Cowrite submit handler |
 | `0psavgrakzykm.js` | `e2e001380b49d4620078290007dac6468e27f94b496fc5820455f9ea5e0b6b41` | MP3/M4A and GET-first WAV/OPUS helpers |
 | `3u1ycshr_o1-2.js` | `5ed94f918b62041bc63785bf83847f8decdfb478760223e710afddb54c623265` | v2 playlist mutations |
 | `0f_f8o2o_ba96.js` | `3a64a1de0dc5c543f4a26cafd5adba8f25c367596b8517430837d3e2e8c0fe3f` | audio upload workflow |
-| `1dj8w_ebqiles.js` | `0e399b9b5ff5045324c7c4a68ca4508f04c857aa5449e17d494d7eb193750488` | challenge preflight and provider selection |
-| `1vw1tt48qlmdn.js` | `2c7dc982024a406bec64a5e4ff167b13e32b53bfccae3782fdefe28d10acd0d0` | clip mutation, concat/remaster and polling store |
+| `1dj8w_ebqiles.js` | `0e399b9b5ff5045324c7c4a68ca4508f04c857aa5449e17d494d7eb193750488` | challenge preflight plus billing feature/remaster-model extraction |
+| `3teie_t7wfp1a.js` | `54681826d888baef51cf581e686bf69641140a5f3f405e83943b66552d5b8f38` | `PlanFeature.Remaster` and feature-list helper |
+| `2meib9yq1qhch.js` | `44d6998bee09ac9350a5f1ce19545db2c2f2557ef07cccba40217f662d2edec7` | Remaster modal model selector; no `can_use` read/filter |
+| `1vw1tt48qlmdn.js` | `2c7dc982024a406bec64a5e4ff167b13e32b53bfccae3782fdefe28d10acd0d0` | clip mutation, Remaster payload/POST, concat and polling store |
 | `2o55p_0ruo1em.js` | `abe3ea475ec66dfd8735d49d1a08c4c3fa9fcbab1299655323d4d9e9d5fd909e` | `GEN_ENDPOINT` and `EMPTY_UUID` constants |
 | `24l-fzxvb5otv.js` | `3d3a5a3a647b8cd60eb2f0ac0d4e536deec18f0fc9c3f2c5c892c19e3a4e21cf` | Persona bulk trash/restore/purge |
 | `3spz_3hruuf8x.js` | `fc8c28e1ea045b3380710a714bf6e1b8835479b273fd41c3683c49e89904e4dd` | Persona per-item trash/restore/purge |
@@ -147,7 +155,7 @@ do not use `studio-api-prod.suno.com` after the presign step.
 | Cowrite | `GET /api/generate/cowrite-lyrics/models/` | **LIVE-READ stable**; current model family and thinking fields decoded |
 | Cowrite | `POST /api/generate/cowrite-lyrics/` | **BUNDLE + LIVE-SUBMIT current**; minimal submit decoded, observed credits delta `0` |
 | Concat | `POST /api/generate/concat/v2/` | **BUNDLE stable**, mutation not live-tested |
-| Remaster | `POST /api/generate/upsample` | **BUNDLE stable**; LIVE-READ billing reports `can_use:false`, so the CLI blocked before POST and no result is claimed |
+| Remaster | `POST /api/generate/upsample` | **BUNDLE + LIVE-READ eligibility current**; Pro feature and source `action_config` are enabled, and CLI now matches Web by ignoring legacy model `can_use`; mutation not live-tested |
 | Speed | `POST /api/clips/adjust-speed/` | **BUNDLE payload stable**, mutation not live-tested |
 | Reverse | `POST /api/clips/reverse-clip/` | **BUNDLE payload stable**, mutation not live-tested |
 | Crop/cut | `POST /api/edit/crop/{id}/` | **BUNDLE payload stable**, mutation not live-tested |
@@ -615,8 +623,11 @@ cover art, clip permissions, project collaboration, and video upload/generation.
 - `capabilities`, `features`, and `allowed_condition_combinations`;
 - `max_lengths` for title, prompt, tags, negative tags, and one-box prompt;
 - richer model presentation metadata retained safely by `extra`;
-- remaster models with account-specific `can_use`; the configured account's
-  available Remaster entries were all `false`, so no Remaster POST was sent.
+- top-level `accessible_features` and plan features, both including `remaster`
+  for the active Pro account;
+- remaster models whose legacy `can_use` values were all `false`; current Web
+  does not use that field as a gate, so Sunox now treats presence in
+  `remaster_model_types` as model availability.
 
 Only the immediate `2107`/`2097` credit readings needed to establish the exact
 generation delta are recorded. No account identifier, model UUID, Persona ID,
@@ -667,8 +678,8 @@ destructive/public state change, so this audit did not probe them live:
 - other `/api/generate/v2-web/` variants, including non-Persona create, cover,
   extend, inspiration, stems, root-backed Persona and older-model fallback;
 - tag upsample, concat, speed, reverse, crop, fade, and timed-lyrics initiation;
-- Remaster submission: current billing returned `can_use:false`, and the CLI
-  correctly blocked instead of bypassing account eligibility;
+- Remaster submission: account and source eligibility were confirmed read-only,
+  but a generation-backed POST was not authorized merely to prove the fix;
 - audio/image upload and finalization;
 - clip/persona/playlist metadata, visibility, reactions, membership, trash,
   restore, or purge;
@@ -683,8 +694,9 @@ being represented here as a destructive or public live test.
 
 ## Follow-up order
 
-1. Exercise Remaster only with an account/model whose billing response says
-   `can_use:true`; do not force the current ineligible account past the guard.
+1. If an end-to-end Remaster result is required, explicitly authorize one
+   credit-bearing submission on the already confirmed eligible private source;
+   capture the returned clip IDs, completion, persistence, and credit delta.
 2. If the project wants to preserve a claim that the former bare *custom*
    Persona payload remains backend-compatible, capture one authorized paid
    generation with submit body, result, task interpretation, and credit delta.

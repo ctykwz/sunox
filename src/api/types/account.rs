@@ -11,6 +11,10 @@ pub struct BillingInfo {
     pub monthly_limit: u64,
     pub is_active: bool,
     pub plan: Plan,
+    /// Current Web uses an array here for plan-gated actions. Preserve the raw
+    /// shape because older/account-specific responses have also used objects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accessible_features: Option<Value>,
     pub models: Vec<Model>,
     pub period: String,
     pub renews_on: Option<String>,
@@ -201,8 +205,8 @@ pub struct RemasterModelInfo {
     pub name: String,
     pub external_key: String,
     pub is_default_model: bool,
-    /// Suno's billing/info response for remaster models does not include this
-    /// field, so keep it optional for deserialization.
+    /// Preserve this legacy account field for raw JSON compatibility. Current
+    /// Web lists remaster models without using it as an eligibility gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub can_use: Option<bool>,
     #[serde(default, flatten)]

@@ -53,22 +53,17 @@ pub fn models(models: &[Model]) {
 
 pub fn remaster_models(models: &[RemasterModelInfo]) {
     let mut table = base_table();
-    table.set_header(vec!["Remaster", "Key", "Default", "Availability"]);
-    for model in models {
-        let availability = match model.can_use {
-            Some(true) => "available",
-            Some(false) => "unavailable",
-            None => "not reported",
-        };
+    table.set_header(vec!["Remaster", "Key", "Web order", "Default flag"]);
+    for (index, model) in models.iter().enumerate() {
         table.add_row(vec![
             model.name.clone(),
             model.external_key.clone(),
+            (index + 1).to_string(),
             if model.is_default_model {
                 "yes".to_string()
             } else {
                 String::new()
             },
-            availability.to_string(),
         ]);
     }
     println!("{table}");
