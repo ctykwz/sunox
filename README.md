@@ -152,6 +152,11 @@ sunox doctor --browser-bridge     Check Bridge transport without running a chall
 sunox update                      Install the latest GitHub release
 ```
 
+Cowrite lyrics models are discovered from Suno at runtime. Select one by ID or
+display name with `sunox lyrics --prompt "..." --model <model>`, and add
+`--thinking` only when that model advertises support. For clip inspiration,
+`--audio-influence 0..100` controls the current Web `audio_weight` slider.
+
 Run `sunox --help` or `sunox <command> --help` for the complete set of options.
 
 ## Generation challenges

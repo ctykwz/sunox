@@ -20,6 +20,17 @@ pub struct CowriteLyricsResponse {
     pub extra: BTreeMap<String, Value>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CowriteLyricsModel {
+    pub id: String,
+    pub display_name: String,
+    pub family: String,
+    #[serde(default)]
+    pub supports_thinking: bool,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AlignedWord {
     pub word: String,

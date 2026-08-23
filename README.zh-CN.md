@@ -147,6 +147,11 @@ sunox update                       更新到最新 GitHub Release
 
 完整参数以 `sunox --help` 和 `sunox <命令> --help` 为准。
 
+Cowrite 歌词模型会在运行时从 Suno 查询。可用
+`sunox lyrics --prompt "..." --model <模型>` 按 ID 或展示名选择模型；只有模型声明支持时
+才使用 `--thinking`。`clip inspire` 可通过 `--audio-influence 0..100` 设置当前 Web
+协议中的 `audio_weight`。
+
 ## 生成验证
 
 每次调用生成类接口前，Sunox 都会先执行 Suno 网页端同款验证检查。不需要验证时，请求会直接

@@ -193,8 +193,20 @@ fn inspire_help_exposes_only_the_live_captured_inputs() {
         .stdout(predicate::str::contains("--title"))
         .stdout(predicate::str::contains("--tags"))
         .stdout(predicate::str::contains("--lyrics-file"))
+        .stdout(predicate::str::contains("--audio-influence"))
         .stdout(predicate::str::contains("--model").not())
         .stdout(predicate::str::contains("--instrumental").not());
+}
+
+#[test]
+fn lyrics_help_exposes_discovered_model_controls() {
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    cmd.args(["lyrics", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--model"))
+        .stdout(predicate::str::contains("--thinking"));
 }
 
 #[test]
@@ -861,6 +873,32 @@ fn inspire_rejects_out_of_range_weirdness_before_auth() {
         .failure()
         .stderr(predicate::str::contains("\"code\": \"config_error\""))
         .stderr(predicate::str::contains("finite number between 0 and 100"));
+}
+
+#[test]
+fn inspire_rejects_out_of_range_audio_influence_before_auth() {
+    let test_home = isolated_test_home("sunox-cli-invalid-inspire-audio-control-test");
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    with_isolated_home(&mut cmd, &test_home)
+        .args([
+            "clip",
+            "inspire",
+            "clip-a",
+            "--title",
+            "Title",
+            "--tags",
+            "pop",
+            "--lyrics",
+            "hello",
+            "--audio-influence",
+            "101",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("\"code\": \"config_error\""))
+        .stderr(predicate::str::contains("--audio-influence"));
 }
 
 #[test]

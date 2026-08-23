@@ -12,6 +12,7 @@ pub struct InspirationOptions<'a> {
     pub negative_tags: &'a str,
     pub lyrics: &'a str,
     pub weirdness: f64,
+    pub audio_influence: Option<f64>,
     pub challenge_token: Option<String>,
 }
 
@@ -42,6 +43,8 @@ impl SunoClient {
         req.metadata.control_sliders = Some(ControlSliders {
             weirdness_constraint: Some((options.weirdness / 100.0).clamp(0.0, 1.0)),
             style_weight: None,
+            audio_weight: options.audio_influence.map(|value| value / 100.0),
+            aug_creativity: None,
         });
         req.playlist_id = Some("inspiration".into());
         req.playlist_clip_ids = Some(vec![options.clip_id.to_string()]);

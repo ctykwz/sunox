@@ -9,6 +9,14 @@ and download contracts, then the complete non-Studio endpoint and generation
 payload surface was rescanned on July 26, 2026. Live endpoint behavior can
 drift; recapture requests before changing schemas.
 
+The `/create` bundle was checked again on August 23, 2026. The generation
+route and response envelope remain stable, while the request builder now uses
+the actual `/create` pathname, distinguishes uploaded-audio continuation as
+`task: "upload_extend"`, exposes Cowrite model discovery at
+`GET /api/generate/cowrite-lyrics/models/`, and supports `audio_weight` plus
+account-gated `aug_creativity` in `metadata.control_sliders`. Sunox implements
+the applicable `audio_weight` control and leaves the gated control unexposed.
+
 ## Capture Scope (June 30, 2026)
 
 Captured Chrome NetLog URL/method evidence from:
@@ -303,6 +311,13 @@ The synchronous response includes `edited_lyrics`, `lyrics_request_id`, `lyrics_
 The older `POST /api/generate/lyrics/` submit route no longer appears in the current Web bundle.
 `GET /api/generate/lyrics/{lyrics_id}` still exists for the separate lyrics-mashup polling flow;
 Sunox standalone lyrics generation does not use either legacy transport.
+
+Before submitting, the current Web client reads
+`GET /api/generate/cowrite-lyrics/models/`. Each model includes `id`,
+`display_name`, `family`, and `supports_thinking`. Sunox now resolves the
+requested model against that response, preserves the Web client's literal
+`default` selection when no model is requested, and refuses `--thinking` for
+a model that does not advertise support.
 
 ### POST /api/generate/v2-web/
 **Generate music**. Current CLI implementation posts to this route using

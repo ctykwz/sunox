@@ -198,6 +198,14 @@ pub struct LyricsArgs {
     /// What the song should be about
     #[arg(short, long)]
     pub prompt: String,
+
+    /// Cowrite lyrics model ID or display name. Defaults to Suno's current default.
+    #[arg(long)]
+    pub model: Option<String>,
+
+    /// Enable the selected Cowrite model's thinking mode.
+    #[arg(long)]
+    pub thinking: bool,
 }
 
 #[derive(clap::Args)]
@@ -310,6 +318,10 @@ pub struct InspireArgs {
     /// Weirdness level captured by the inspiration flow (0-100)
     #[arg(long, default_value_t = 40.0)]
     pub weirdness: f64,
+
+    /// How strongly the source audio should influence the result (0-100)
+    #[arg(long)]
+    pub audio_influence: Option<f64>,
 
     /// Challenge token (overrides the built-in solver)
     #[arg(long)]

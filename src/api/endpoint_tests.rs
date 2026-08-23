@@ -6,6 +6,7 @@ use tokio::time::{Duration, timeout};
 use super::SunoClient;
 use super::extend::ExtendClipOptions;
 use super::inspiration::InspirationOptions;
+use super::lyrics::CowriteLyricsOptions;
 use super::types::{
     Clip, ClipReaction, ControlSliders, CreateAudioUploadRequest, CreateAudioUploadSpec,
     CreateImageUploadRequest, CreatePersonaRequest, EditPersonaRequest, FeedFilters,
@@ -1370,7 +1371,7 @@ async fn generate_posts_current_web_contract() {
     assert_eq!(body["metadata"]["create_mode"], "custom");
     assert_eq!(body["metadata"]["is_max_mode"], false);
     assert!(body["metadata"].get("lyrics_model").is_none());
-    assert_eq!(body["metadata"]["web_client_pathname"], "/home/advanced");
+    assert_eq!(body["metadata"]["web_client_pathname"], "/create");
     assert_eq!(body["metadata"]["user_tier"], "tier-pro");
     assert!(
         body["transaction_uuid"]
@@ -1471,6 +1472,8 @@ async fn generate_rejects_control_sliders_for_a_model_without_the_web_capability
     generate.metadata.control_sliders = Some(ControlSliders {
         weirdness_constraint: Some(0.4),
         style_weight: Some(0.7),
+        audio_weight: None,
+        aug_creativity: None,
     });
     generate.set_challenge_token(Some("captcha-token".into()));
 
@@ -1580,6 +1583,7 @@ async fn inspiration_posts_live_captured_playlist_condition_contract() {
             negative_tags: "ballad",
             lyrics: "[Verse]\nNew words",
             weirdness: 40.0,
+            audio_influence: Some(60.0),
             challenge_token: None,
         })
         .await
@@ -1613,6 +1617,7 @@ async fn inspiration_posts_live_captured_playlist_condition_contract() {
         body["metadata"]["control_sliders"]["weirdness_constraint"],
         0.4
     );
+    assert_eq!(body["metadata"]["control_sliders"]["audio_weight"], 0.6);
     assert_eq!(
         body["metadata"]["last_tags_generation"]["request_id"],
         "request-inspire"
@@ -1654,6 +1659,7 @@ async fn inspiration_revalidates_upsampled_tags_against_the_resolved_model_limit
             negative_tags: "",
             lyrics: "[Verse]\nNew words",
             weirdness: 40.0,
+            audio_influence: None,
             challenge_token: None,
         })
         .await
@@ -1783,6 +1789,8 @@ async fn generate_preserves_a_billing_server_error_when_controls_were_requested(
     generate.metadata.control_sliders = Some(ControlSliders {
         weirdness_constraint: Some(0.4),
         style_weight: None,
+        audio_weight: None,
+        aug_creativity: None,
     });
 
     let error = client
@@ -2811,6 +2819,41 @@ async fn extend_fetches_source_clip_and_posts_string_title_contract() {
 }
 
 #[tokio::test]
+async fn extend_uses_upload_extend_task_for_uploaded_audio() {
+    let billing = billing_info_response("tier-pro");
+    let server = MockServer::json_sequence(&[
+        r#"{"id":"upload-a","title":"Uploaded Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z","metadata":{"type":"upload","tags":"ambient pop","negative_tags":"metal","prompt":"[Verse]\nOriginal words","make_instrumental":false}}"#,
+        billing.as_str(),
+        r#"{"required":false}"#,
+        r#"{"clips":[{"id":"extend-1","title":"Uploaded Song","status":"submitted","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z"}]}"#,
+    ])
+    .await;
+    let client = server.client();
+
+    client
+        .extend(ExtendClipOptions {
+            clip_id: "upload-a",
+            continue_at: 45.0,
+            tags: None,
+            negative_tags: None,
+            lyrics: None,
+            title: None,
+            instrumental: None,
+            challenge_token: None,
+        })
+        .await
+        .expect("extend uploaded audio");
+
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[3].path, "/api/generate/v2-web/");
+    let body = serde_json::from_str::<serde_json::Value>(&requests[3].body)
+        .expect("generation request json");
+    assert_eq!(body["task"], "upload_extend");
+    assert_eq!(body["continue_clip_id"], "upload-a");
+}
+
+#[tokio::test]
 async fn extend_propagates_rate_limit_from_metadata_enrichment_without_submitting() {
     let server = MockServer::json_status_sequence(&[
         (
@@ -2885,14 +2928,19 @@ async fn extend_metadata_fallback_does_not_merge_same_title_different_clip() {
 
 #[tokio::test]
 async fn lyrics_generation_uses_current_cowrite_contract() {
-    let server = MockServer::json(
+    let server = MockServer::json_sequence(&[
+        r#"[{"id":"lyrics-v2","display_name":"Lyrics v2","family":"remi","supports_thinking":true}]"#,
         r#"{"edited_lyrics":"[Verse]\nHello","lyrics_request_id":"request-1","lyrics_id":"lyrics-1","variants":null,"artist_to_tag_mapping":{"A":"pop"},"next_prompts":["add a chorus"],"generation_trace":"trace-1"}"#,
-    )
+    ])
     .await;
     let client = server.client();
 
     let result = client
-        .generate_lyrics("write a pop hook")
+        .generate_lyrics(CowriteLyricsOptions {
+            prompt: "write a pop hook",
+            model: Some("Lyrics v2"),
+            enable_thinking: true,
+        })
         .await
         .expect("lyrics");
 
@@ -2907,11 +2955,13 @@ async fn lyrics_generation_uses_current_cowrite_contract() {
     );
     assert_eq!(result.extra["generation_trace"], "trace-1");
     let requests = server.captured_all().await;
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].method, "POST");
-    assert_eq!(requests[0].path, "/api/generate/cowrite-lyrics/");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].path, "/api/generate/cowrite-lyrics/models/");
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[1].path, "/api/generate/cowrite-lyrics/");
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&requests[0].body).expect("request json"),
+        serde_json::from_str::<serde_json::Value>(&requests[1].body).expect("request json"),
         serde_json::json!({
             "selected": "",
             "context_before": "",
@@ -2924,13 +2974,63 @@ async fn lyrics_generation_uses_current_cowrite_contract() {
             "num_variants": null,
             "lyricist_id": null,
             "metadata": {
-                "lyrics_model": "default",
-                "enable_thinking": false
+                "lyrics_model": "lyrics-v2",
+                "enable_thinking": true
             },
             "create_session_token": null,
             "lyrics_project_id": null
         })
     );
+}
+
+#[tokio::test]
+async fn lyrics_generation_preserves_the_web_default_model_when_none_is_selected() {
+    let server = MockServer::json_sequence(&[
+        r#"[{"id":"lyrics-v2","display_name":"Lyrics v2","family":"remi","supports_thinking":true}]"#,
+        r#"{"edited_lyrics":"[Verse]\nHello"}"#,
+    ])
+    .await;
+    let client = server.client();
+
+    client
+        .generate_lyrics(CowriteLyricsOptions {
+            prompt: "write a pop hook",
+            model: None,
+            enable_thinking: false,
+        })
+        .await
+        .expect("default Cowrite lyrics");
+
+    let requests = server.captured_all().await;
+    let body =
+        serde_json::from_str::<serde_json::Value>(&requests[1].body).expect("Cowrite request json");
+    assert_eq!(body["metadata"]["lyrics_model"], "default");
+    assert_eq!(body["metadata"]["enable_thinking"], false);
+}
+
+#[tokio::test]
+async fn lyrics_generation_rejects_thinking_when_the_discovered_model_does_not_support_it() {
+    let server = MockServer::json(
+        r#"[{"id":"lyrics-fast","display_name":"Lyrics Fast","family":"remi","supports_thinking":false}]"#,
+    )
+    .await;
+    let client = server.client();
+
+    let error = client
+        .generate_lyrics(CowriteLyricsOptions {
+            prompt: "write a pop hook",
+            model: Some("Lyrics Fast"),
+            enable_thinking: true,
+        })
+        .await
+        .expect_err("unsupported thinking must stop before Cowrite submit");
+
+    assert!(
+        matches!(error, CliError::Config(message) if message.contains("does not support thinking"))
+    );
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/api/generate/cowrite-lyrics/models/");
 }
 
 #[tokio::test]

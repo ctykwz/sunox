@@ -38,6 +38,8 @@ pub fn build_control_sliders(
         // Normalize 0-100 to 0.0-1.0.
         weirdness_constraint: weirdness.map(|w| w / 100.0),
         style_weight: style_influence.map(|s| s / 100.0),
+        audio_weight: None,
+        aug_creativity: None,
     }))
 }
 

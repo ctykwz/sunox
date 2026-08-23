@@ -7,6 +7,9 @@ use super::support::{ChallengeMode, execute_generation_submission, output_genera
 
 pub async fn inspire(args: InspireArgs, ctx: &AppContext) -> Result<(), CliError> {
     ensure_percentage("--weirdness", args.weirdness)?;
+    if let Some(audio_influence) = args.audio_influence {
+        ensure_percentage("--audio-influence", audio_influence)?;
+    }
     let lyrics = match (args.lyrics, args.lyrics_file) {
         (Some(lyrics), _) => lyrics,
         (_, Some(path)) => std::fs::read_to_string(path)?,
@@ -33,6 +36,7 @@ pub async fn inspire(args: InspireArgs, ctx: &AppContext) -> Result<(), CliError
                 negative_tags: &negative_tags,
                 lyrics: &lyrics,
                 weirdness: args.weirdness,
+                audio_influence: args.audio_influence,
                 challenge_token: None,
             })
             .await?;

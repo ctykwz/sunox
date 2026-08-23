@@ -25,7 +25,7 @@ pub use feed::{FeedFilters, FeedResponse, FeedV3Request};
 pub use generation::{
     ControlSliders, GenerateRequest, GenerateResponse, GenerationResult, LastTagsGeneration,
 };
-pub use lyrics::{AlignedWord, CowriteLyricsResponse};
+pub use lyrics::{AlignedWord, CowriteLyricsModel, CowriteLyricsResponse};
 pub use metadata::{SetMetadataRequest, SetVisibilityRequest};
 pub use operations::{ConcatRequest, RemasterVariation};
 pub use persona::{

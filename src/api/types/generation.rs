@@ -6,7 +6,7 @@ use crate::api::challenge::ChallengeProvider;
 use super::clip::Clip;
 use super::prompts::PromptUpsampleResponse;
 
-const WEB_CLIENT_PATHNAME: &str = "/home/advanced";
+const WEB_CLIENT_PATHNAME: &str = "/create";
 const GENERATION_TYPE_TEXT: &str = "TEXT";
 const TAG_UPSAMPLE_PERSONALIZATION_ENABLED: bool = true;
 
@@ -39,6 +39,12 @@ pub struct GenerateRequest {
     pub token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edit_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub creation_source: Option<String>,
     pub generation_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -48,6 +54,12 @@ pub struct GenerateRequest {
     pub negative_tags: String,
     pub mv: String,
     pub prompt: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lyrics_project_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lyricist_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gpt_description_prompt: Option<String>,
     pub make_instrumental: bool,
@@ -75,6 +87,8 @@ pub struct GenerateRequest {
     pub stem_type_group_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stem_task: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stem_name: Option<String>,
     /// Random UUID generated per request.
     pub transaction_uuid: String,
     pub token_provider: Option<u8>,
@@ -89,12 +103,18 @@ impl GenerateRequest {
         Self {
             token: None,
             task: None,
+            edit_session_id: None,
+            project_id: None,
+            creation_source: None,
             generation_type: GENERATION_TYPE_TEXT.to_string(),
             title: None,
             tags: None,
             negative_tags: String::new(),
             mv: mv.to_string(),
             prompt: String::new(),
+            duration: None,
+            lyrics_project_id: None,
+            lyricist_id: None,
             gpt_description_prompt: None,
             make_instrumental: false,
             user_uploaded_images_b64: None,
@@ -115,6 +135,7 @@ impl GenerateRequest {
             stem_type_id: None,
             stem_type_group_name: None,
             stem_task: None,
+            stem_name: None,
             transaction_uuid: uuid::Uuid::new_v4().to_string(),
             token_provider: None,
         }
@@ -138,16 +159,24 @@ impl GenerateRequest {
 pub struct GenerateMetadata {
     pub web_client_pathname: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub create_surface: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub is_max_mode: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_mumble: Option<bool>,
     pub create_mode: String,
     pub user_tier: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_studio_project_id: Option<String>,
     /// Random UUID generated per request.
     pub create_session_token: String,
     pub disable_volume_normalization: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vocal_gender: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_speech: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backing_music: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub control_sliders: Option<ControlSliders>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -158,24 +187,37 @@ pub struct GenerateMetadata {
     pub lyrics_updated: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_tags_generation: Option<LastTagsGeneration>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch_offset: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recreated_from_clip_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sound_configs: Option<Value>,
 }
 
 impl GenerateMetadata {
     fn new_with_context(create_mode: &str, context: &GenerationWebContext) -> Self {
         Self {
             web_client_pathname: WEB_CLIENT_PATHNAME.to_string(),
+            create_surface: None,
             is_max_mode: Some(false),
             is_mumble: None,
             create_mode: create_mode.to_string(),
             user_tier: context.user_tier_value(),
+            from_studio_project_id: None,
             create_session_token: uuid::Uuid::new_v4().to_string(),
             disable_volume_normalization: false,
             vocal_gender: None,
+            is_speech: None,
+            backing_music: None,
             control_sliders: None,
             lyrics_model: None,
             is_remix: None,
             lyrics_updated: None,
             last_tags_generation: None,
+            batch_offset: None,
+            recreated_from_clip_id: None,
+            sound_configs: None,
         }
     }
 }
@@ -209,6 +251,12 @@ pub struct ControlSliders {
     /// Style weight: 0.0-1.0 (maps from 0-100 in this CLI)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub style_weight: Option<f64>,
+    /// Audio reference influence: 0.0-1.0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_weight: Option<f64>,
+    /// Account-gated Web control; callers must not fabricate a value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aug_creativity: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -274,7 +322,7 @@ mod tests {
         let body = serde_json::to_value(request).expect("request json");
 
         assert_eq!(body["generation_type"], "TEXT");
-        assert_eq!(body["metadata"]["web_client_pathname"], "/home/advanced");
+        assert_eq!(body["metadata"]["web_client_pathname"], "/create");
         assert_eq!(body["metadata"]["user_tier"], "tier-pro");
         assert!(body["metadata"]["create_session_token"].as_str().is_some());
         assert!(body["transaction_uuid"].as_str().is_some());
@@ -354,6 +402,50 @@ mod tests {
         let body = serde_json::to_value(request).expect("request body");
         assert_eq!(body["token"], "turnstile-token");
         assert_eq!(body["token_provider"], 2);
+    }
+
+    #[test]
+    fn generation_request_serializes_current_optional_web_context() {
+        let mut request = GenerateRequest::new("chirp-fenix", "custom");
+        request.edit_session_id = Some("edit-1".into());
+        request.project_id = Some("project-1".into());
+        request.creation_source = Some("cli".into());
+        request.duration = Some(120.0);
+        request.lyrics_project_id = Some("lyrics-project-1".into());
+        request.lyricist_id = Some("lyricist-1".into());
+        request.stem_name = Some("Vocals".into());
+        request.metadata.create_surface = Some("persistent_panel".into());
+        request.metadata.from_studio_project_id = Some("studio-1".into());
+        request.metadata.is_speech = Some(true);
+        request.metadata.backing_music = Some(false);
+        request.metadata.batch_offset = Some(2);
+        request.metadata.recreated_from_clip_id = Some("clip-source".into());
+        request.metadata.sound_configs = Some(serde_json::json!({"seed": 7}));
+        request.metadata.control_sliders = Some(ControlSliders {
+            weirdness_constraint: Some(0.4),
+            style_weight: Some(0.7),
+            audio_weight: Some(0.6),
+            aug_creativity: Some(0.25),
+        });
+
+        let body = serde_json::to_value(request).expect("request json");
+
+        assert_eq!(body["edit_session_id"], "edit-1");
+        assert_eq!(body["project_id"], "project-1");
+        assert_eq!(body["creation_source"], "cli");
+        assert_eq!(body["duration"], 120.0);
+        assert_eq!(body["lyrics_project_id"], "lyrics-project-1");
+        assert_eq!(body["lyricist_id"], "lyricist-1");
+        assert_eq!(body["stem_name"], "Vocals");
+        assert_eq!(body["metadata"]["create_surface"], "persistent_panel");
+        assert_eq!(body["metadata"]["from_studio_project_id"], "studio-1");
+        assert_eq!(body["metadata"]["is_speech"], true);
+        assert_eq!(body["metadata"]["backing_music"], false);
+        assert_eq!(body["metadata"]["batch_offset"], 2);
+        assert_eq!(body["metadata"]["recreated_from_clip_id"], "clip-source");
+        assert_eq!(body["metadata"]["sound_configs"]["seed"], 7);
+        assert_eq!(body["metadata"]["control_sliders"]["audio_weight"], 0.6);
+        assert_eq!(body["metadata"]["control_sliders"]["aug_creativity"], 0.25);
     }
 
     #[test]
