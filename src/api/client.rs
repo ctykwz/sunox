@@ -1,6 +1,7 @@
 use std::sync::Mutex;
 
 use reqwest::Client;
+use serde::de::DeserializeOwned;
 
 use crate::auth::AuthState;
 use crate::core::CliError;
@@ -10,7 +11,7 @@ pub(crate) const BASE_URL: &str = "https://studio-api-prod.suno.com";
 
 pub struct SunoClient {
     pub(crate) client: Client,
-    persona_client: Client,
+    http1_read_client: Client,
     base_url: String,
     /// Auth state behind a sync mutex so `&self` methods can transparently
     /// refresh the JWT mid-request when Suno returns
@@ -30,7 +31,7 @@ impl SunoClient {
 
         Ok(Self {
             client,
-            persona_client: http::browser_http1_client()?,
+            http1_read_client: http::browser_http1_client()?,
             base_url: BASE_URL.to_string(),
             auth: Mutex::new(auth),
             device_override: Mutex::new(None),
@@ -43,7 +44,7 @@ impl SunoClient {
     pub(crate) fn new_for_auth_validation(auth: AuthState) -> Result<Self, CliError> {
         Ok(Self {
             client: http::browser_client()?,
-            persona_client: http::browser_http1_client()?,
+            http1_read_client: http::browser_http1_client()?,
             base_url: BASE_URL.to_string(),
             auth: Mutex::new(auth),
             device_override: Mutex::new(None),
@@ -54,7 +55,7 @@ impl SunoClient {
     pub(crate) fn new_for_tests(base_url: String, auth: AuthState) -> Result<Self, CliError> {
         Ok(Self {
             client: http::browser_client()?,
-            persona_client: http::browser_http1_client()?,
+            http1_read_client: http::browser_http1_client()?,
             base_url: base_url.trim_end_matches('/').to_string(),
             auth: Mutex::new(auth),
             device_override: Mutex::new(None),
@@ -89,25 +90,113 @@ impl SunoClient {
         self.client.patch(self.url(path)).headers(self.headers())
     }
 
+    pub(crate) fn put(&self, path: &str) -> reqwest::RequestBuilder {
+        self.client.put(self.url(path)).headers(self.headers())
+    }
+
     pub(crate) fn delete(&self, path: &str) -> reqwest::RequestBuilder {
         self.client.delete(self.url(path)).headers(self.headers())
     }
 
-    pub(crate) fn persona_get(&self, path: &str) -> reqwest::RequestBuilder {
-        self.persona_client
-            .get(self.url(path))
-            .headers(self.headers())
+    /// Retry explicitly idempotent reads after transient resets observed with
+    /// both normal negotiation and forced HTTP/1.1. The alternate transport is
+    /// a bounded recovery attempt, not a route-specific protocol claim. Never
+    /// use this for account mutations.
+    pub(crate) async fn read_json_with_transport_retry<T>(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<T, CliError>
+    where
+        T: DeserializeOwned,
+    {
+        let request = request.build()?;
+        if request.method() != reqwest::Method::GET {
+            return Err(CliError::Config(format!(
+                "idempotent read fallback cannot send {} requests",
+                request.method()
+            )));
+        }
+        let http1_request = request.try_clone();
+        let final_default_request = request.try_clone();
+
+        match self.execute_json_read(&self.client, request).await {
+            Ok(value) => Ok(value),
+            Err(JsonReadError::Fatal(error)) => Err(error),
+            Err(JsonReadError::Retryable(primary_error)) => {
+                if let Some(http1_request) = http1_request {
+                    match self
+                        .execute_json_read(&self.http1_read_client, http1_request)
+                        .await
+                    {
+                        Ok(value) => return Ok(value),
+                        Err(JsonReadError::Fatal(error)) => return Err(error),
+                        Err(JsonReadError::Retryable(_)) => {}
+                    }
+                }
+                if let Some(final_default_request) = final_default_request {
+                    return self
+                        .execute_json_read(&self.client, final_default_request)
+                        .await
+                        .map_err(JsonReadError::into_cli_error);
+                }
+                Err(primary_error)
+            }
+        }
     }
 
-    pub(crate) fn persona_post(&self, path: &str) -> reqwest::RequestBuilder {
-        self.persona_client
-            .post(self.url(path))
-            .headers(self.headers())
+    async fn execute_json_read<T>(
+        &self,
+        client: &Client,
+        request: reqwest::Request,
+    ) -> Result<T, JsonReadError>
+    where
+        T: DeserializeOwned,
+    {
+        let response = client
+            .execute(request)
+            .await
+            .map_err(|error| JsonReadError::Retryable(error.into()))?;
+        let response = self
+            .check_response(response)
+            .await
+            .map_err(JsonReadError::Fatal)?;
+        match response.json::<T>().await {
+            Ok(value) => Ok(value),
+            Err(error) if is_response_body_transport_error(&error) => {
+                Err(JsonReadError::Retryable(error.into()))
+            }
+            Err(error) => Err(JsonReadError::Fatal(error.into())),
+        }
+    }
+}
+
+fn is_response_body_transport_error(error: &reqwest::Error) -> bool {
+    if error.is_body() {
+        return true;
     }
 
-    pub(crate) fn persona_put(&self, path: &str) -> reqwest::RequestBuilder {
-        self.persona_client
-            .put(self.url(path))
-            .headers(self.headers())
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        if cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_body)
+        {
+            return true;
+        }
+        source = cause.source();
+    }
+    false
+}
+
+enum JsonReadError {
+    Retryable(CliError),
+    Fatal(CliError),
+}
+
+impl JsonReadError {
+    fn into_cli_error(self) -> CliError {
+        match self {
+            Self::Retryable(error) | Self::Fatal(error) => error,
+        }
     }
 }

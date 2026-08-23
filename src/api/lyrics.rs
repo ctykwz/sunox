@@ -13,17 +13,13 @@ pub struct CowriteLyricsOptions<'a> {
 impl SunoClient {
     pub async fn cowrite_lyrics_models(&self) -> Result<Vec<CowriteLyricsModel>, CliError> {
         self.with_auth_retry(|| async {
-            let resp = self
-                .get("/api/generate/cowrite-lyrics/models/")
-                .send()
-                .await?;
-            let resp = self.check_response(resp).await?;
-            Ok(resp.json().await?)
+            self.read_json_with_transport_retry(self.get("/api/generate/cowrite-lyrics/models/"))
+                .await
         })
         .await
     }
 
-    /// Generate fresh lyrics through Suno's current Cowrite endpoint.
+    /// Generate fresh lyrics through the Cowrite submit contract captured on 2026-07-26.
     pub async fn generate_lyrics(
         &self,
         options: CowriteLyricsOptions<'_>,

@@ -92,7 +92,7 @@ pub enum Commands {
     /// Add clip(s) to a playlist
     Add(AddArgs),
 
-    /// Generate lyrics with Suno's current Cowrite flow
+    /// Generate lyrics using current Cowrite models and the July-captured submit contract
     Lyrics(LyricsArgs),
 
     /// Manage clips

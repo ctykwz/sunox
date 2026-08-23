@@ -200,6 +200,66 @@ impl MockServer {
         }
     }
 
+    async fn resets_then_json(reset_count: usize, response_body: &str) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let addr = listener.local_addr().expect("mock server address");
+        let (tx, rx) = oneshot::channel();
+        let response_body = response_body.to_string();
+
+        tokio::spawn(async move {
+            let mut captured = Vec::with_capacity(reset_count + 1);
+
+            for _ in 0..reset_count {
+                let (mut reset_stream, _) = listener.accept().await.expect("accept reset request");
+                captured.push(read_request(&mut reset_stream).await);
+                drop(reset_stream);
+            }
+
+            let (stream, _) = listener.accept().await.expect("accept fallback request");
+            captured.push(capture_request(stream, &response_body).await);
+            let _ = tx.send(captured);
+        });
+
+        Self {
+            base_url: format!("http://{addr}"),
+            requests: rx,
+            idle_timeout: MOCK_SERVER_IDLE_TIMEOUT,
+        }
+    }
+
+    async fn truncated_json_then_json(response_body: &str) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let addr = listener.local_addr().expect("mock server address");
+        let (tx, rx) = oneshot::channel();
+        let response_body = response_body.to_string();
+
+        tokio::spawn(async move {
+            let mut captured = Vec::with_capacity(2);
+
+            let (mut truncated_stream, _) = listener
+                .accept()
+                .await
+                .expect("accept truncated response request");
+            captured.push(read_request(&mut truncated_stream).await);
+            write_truncated_json_response(&mut truncated_stream, &response_body).await;
+            drop(truncated_stream);
+
+            let (stream, _) = listener.accept().await.expect("accept fallback request");
+            captured.push(capture_request(stream, &response_body).await);
+            let _ = tx.send(captured);
+        });
+
+        Self {
+            base_url: format!("http://{addr}"),
+            requests: rx,
+            idle_timeout: MOCK_SERVER_IDLE_TIMEOUT,
+        }
+    }
+
     fn client(&self) -> SunoClient {
         self.client_with_auth(AuthState {
             jwt: Some("test-jwt".into()),
@@ -268,6 +328,26 @@ async fn capture_request_with_status_inner(
     status: u16,
     response_body: &str,
 ) -> CapturedRequest {
+    let captured = read_request(stream).await;
+    let reason = match status {
+        200 => "OK",
+        500 => "Internal Server Error",
+        _ => "Status",
+    };
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        response_body.len(),
+        response_body
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .expect("write response");
+
+    captured
+}
+
+async fn read_request(stream: &mut TcpStream) -> CapturedRequest {
     let mut data = Vec::new();
     let mut buf = [0_u8; 1024];
 
@@ -303,27 +383,109 @@ async fn capture_request_with_status_inner(
     }
 
     let body = String::from_utf8_lossy(&data[header_end..header_end + content_length]).into();
-    let reason = match status {
-        200 => "OK",
-        500 => "Internal Server Error",
-        _ => "Status",
-    };
-    let response = format!(
-        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-        response_body.len(),
-        response_body
-    );
-    stream
-        .write_all(response.as_bytes())
-        .await
-        .expect("write response");
-
     CapturedRequest {
         method,
         path,
         headers,
         body,
     }
+}
+
+async fn write_truncated_json_response(stream: &mut TcpStream, full_body: &str) {
+    let partial_body = &full_body.as_bytes()[..full_body.len() / 2];
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        full_body.len()
+    );
+    stream
+        .write_all(headers.as_bytes())
+        .await
+        .expect("write truncated response headers");
+    stream
+        .write_all(partial_body)
+        .await
+        .expect("write truncated response body");
+}
+
+#[tokio::test]
+async fn idempotent_read_retries_after_a_transport_reset() {
+    let server = MockServer::resets_then_json(1, r#"{"ok":true}"#).await;
+    let client = server.client();
+
+    let response: serde_json::Value = client
+        .read_json_with_transport_retry(client.get("/read-only"))
+        .await
+        .expect("fallback read");
+    assert_eq!(response, serde_json::json!({"ok": true}));
+
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.method == "GET" && request.path == "/read-only")
+    );
+}
+
+#[tokio::test]
+async fn idempotent_read_retries_when_a_json_body_is_truncated() {
+    let server = MockServer::truncated_json_then_json(r#"{"ok":true}"#).await;
+    let client = server.client();
+
+    let response: serde_json::Value = client
+        .read_json_with_transport_retry(client.get("/read-only"))
+        .await
+        .expect("fallback after truncated body");
+    assert_eq!(response, serde_json::json!({"ok": true}));
+
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.method == "GET" && request.path == "/read-only")
+    );
+}
+
+#[tokio::test]
+async fn idempotent_read_uses_final_normal_retry_after_two_resets() {
+    let server = MockServer::resets_then_json(2, r#"{"ok":true}"#).await;
+    let client = server.client();
+
+    let response: serde_json::Value = client
+        .read_json_with_transport_retry(client.get("/read-only"))
+        .await
+        .expect("final normal fallback read");
+    assert_eq!(response, serde_json::json!({"ok": true}));
+
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.method == "GET" && request.path == "/read-only")
+    );
+}
+
+#[tokio::test]
+async fn idempotent_read_rejects_mutation_methods_before_network_io() {
+    let client = SunoClient::new_for_tests(
+        "http://127.0.0.1:9".into(),
+        AuthState {
+            jwt: Some("test-jwt".into()),
+            ..AuthState::default()
+        },
+    )
+    .expect("test client");
+
+    let result: Result<serde_json::Value, CliError> = client
+        .read_json_with_transport_retry(client.post("/must-not-send"))
+        .await;
+    let error = result.expect_err("mutation requests must never enter read fallback");
+
+    assert!(
+        matches!(error, CliError::Config(message) if message.contains("cannot send POST requests"))
+    );
 }
 
 #[tokio::test]
@@ -2968,7 +3130,7 @@ async fn extend_metadata_fallback_does_not_merge_same_title_different_clip() {
 }
 
 #[tokio::test]
-async fn lyrics_generation_uses_current_cowrite_contract() {
+async fn lyrics_generation_uses_july_captured_cowrite_submit_contract() {
     let server = MockServer::json_sequence(&[
         r#"[{"id":"lyrics-v2","display_name":"Lyrics v2","family":"remi","supports_thinking":true}]"#,
         r#"{"edited_lyrics":"[Verse]\nHello","lyrics_request_id":"request-1","lyrics_id":"lyrics-1","variants":null,"artist_to_tag_mapping":{"A":"pop"},"next_prompts":["add a chorus"],"generation_trace":"trace-1"}"#,

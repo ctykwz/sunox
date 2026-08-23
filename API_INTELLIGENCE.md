@@ -25,10 +25,20 @@ task plus condition compatibility before submission. Uploaded playlist covers
 send only `metadata.cover_image_s3_id`, flat cover fields no longer duplicate
 normalized JSON keys, and audio uploads reject formats outside
 `mp3,m4a,wav,flac,ogg,aac` or sizes above 524,288,000 bytes before presign.
-Authenticated Persona APIs use a Persona-scoped HTTP/1 client because current
-live list requests reset on the normal transport; mine/loved/followed lists
-decoded after that workaround, while detail and paginated clips remained
-transport-inaccessible and were not re-routed without evidence.
+Authenticated readback showed intermittent resets in both protocol directions:
+some GETs reset under normal negotiation and succeeded over HTTP/1.1, while
+later probes did the reverse. Timing was not controlled, so this establishes
+recoverability by retry rather than a causal protocol preference. Explicitly
+idempotent Persona, playlist, billing/model, and Cowrite-model GETs therefore
+use a bounded transport fallback rather than a route-family downgrade. Mutation
+transports retain normal negotiation because no account write was performed to
+justify changing them.
+Persona mine/loved/followed, detail, and paginated-clips responses all decoded
+successfully during the audit, although later Persona commands occasionally
+exhausted the bounded retries before the same route succeeded again. The retry
+boundary includes the complete JSON body read, and a runtime method guard
+rejects non-GET requests before any network I/O; it does not claim deterministic
+upstream availability.
 
 ## Capture Scope (June 30, 2026)
 
@@ -292,10 +302,12 @@ the length limits below are the values returned by that response.
 Returns full account info, credits, plan, models, features, limits.
 
 ### POST /api/generate/cowrite-lyrics/
-Current standalone whole-lyrics generation route, confirmed in the July 26, 2026 Web bundle and a
-live authenticated request. The editor calls its empty state `fresh_generate`, but that value is
-not an API mode: the final request sends the user's request as `instruction` with
-`mode: "apply_user_request"`:
+Standalone whole-lyrics compatibility route captured in the July 26, 2026 Web
+bundle and a live authenticated request. It was not re-confirmed in the
+downloaded August 23 create graph, so this section is historical compatibility
+evidence, not a current-protocol claim. The July editor called its empty state
+`fresh_generate`, but that value was not an API mode: the final request sent the
+user's request as `instruction` with `mode: "apply_user_request"`:
 
 ```json
 {
@@ -325,12 +337,13 @@ The older `POST /api/generate/lyrics/` submit route no longer appears in the cur
 `GET /api/generate/lyrics/{lyrics_id}` still exists for the separate lyrics-mashup polling flow;
 Sunox standalone lyrics generation does not use either legacy transport.
 
-Before submitting, the current Web client reads
+The current Web bundle and live API expose
 `GET /api/generate/cowrite-lyrics/models/`. Each model includes `id`,
-`display_name`, `family`, and `supports_thinking`. Sunox now resolves the
-requested model against that response, preserves the Web client's literal
-`default` selection when no model is requested, and refuses `--thinking` for
-a model that does not advertise support.
+`display_name`, `family`, and `supports_thinking`. Before using the July-captured
+submit compatibility route, Sunox resolves the requested model against that
+current response, preserves the Web literal `default` selection when no model
+is requested, and refuses `--thinking` for a model that does not advertise
+support.
 
 ### POST /api/generate/v2-web/
 **Generate music**. Current CLI implementation posts to this route using
@@ -752,7 +765,7 @@ Body: {"playlist_id": "...", "name": "...", "description": "...", "image_url": "
 
 PATCH /api/playlist/v2/{playlist_id}
 Body for uploaded playlist covers:
-{"metadata":{"cover_url":"https://cdn2.suno.ai/image_<upload_id>.jpeg","cover_image_s3_id":"image_<upload_id>","cover_is_user_set":true}}
+{"metadata":{"cover_image_s3_id":"image_<upload_id>"}}
 
 POST /api/playlist/v2/{playlist_id}/tracks/add
 Body: {"clip_ids": ["..."]}
@@ -1228,8 +1241,8 @@ finish with
 `moderation_status: "approved"`. Clip cover replacement uses
 `POST /api/gen/{clip_id}/set_metadata/` with
 `{"image_url":"https://cdn2.suno.ai/image_<upload_id>.jpeg"}`. Playlist cover
-replacement uses the same CDN URL plus `cover_image_s3_id:
-"image_<upload_id>"` in the playlist v2 patch above. The legacy
+replacement extracts that upload identity and sends only
+`cover_image_s3_id: "image_<upload_id>"` in the playlist v2 patch above. The legacy
 `POST /api/playlist/set_metadata` `image_url` path can return `Failed to upload
 image` for freshly uploaded Suno images. Clip `remove_video_cover: true` was
 also live-verified through `POST /api/gen/{clip_id}/set_metadata/`.
@@ -1297,7 +1310,7 @@ processing is not.
 ## Key Insights for Rust CLI
 
 1. **Captcha/challenge is conditional** — `POST /api/c/check` with `{"ctype":"generation"}` decides whether generation needs a solved token. The CLI mirrors this preflight before `/api/generate/v2-web/` submits. If the preflight reports a challenge and stored Clerk refresh material exists, the CLI refreshes the JWT once and repeats the preflight. A remaining challenge is solved silently using hCaptcha/provider 1 or Cloudflare Turnstile/provider 2 according to `captcha_version`; normal authenticated submits omit `token` and `token_provider`.
-2. **Standalone lyrics uses Cowrite** — `POST /api/generate/cowrite-lyrics/` is synchronous and JWT-authenticated. The CLI does not promise that it is free or permanently exempt from server-side anti-abuse checks.
+2. **Standalone lyrics uses Cowrite** — the model-discovery GET is current-confirmed. The synchronous JWT-authenticated `POST /api/generate/cowrite-lyrics/` remains a compatibility contract from the July 26 live capture and was not re-confirmed in the August 23 bundle; capture a current submit before changing it or claiming renewed parity. The CLI does not promise that it is free or permanently exempt from server-side anti-abuse checks.
 3. **JWT refresh** — need Clerk cookie exchange or session keepalive
 4. **Browser-token header** — dynamically generated from current timestamp, base64-encoded
 5. **Browser environment** — browser-cookie extraction records a stable browser source id (`chrome`, `arc`, `brave`, `firefox`, or `edge`) and best-effort public profile settings such as `accept-language`; it does not fabricate a `user-agent` from that label. Interactive login captures stable runtime headers such as `user-agent` and `accept-language`. API calls reuse captured fields independently, derive Chromium client hints from the selected `user-agent`, send the stable browser fetch metadata headers observed in HARs, and fall back field-by-field when unavailable.

@@ -38,6 +38,16 @@ source clip and time range. An agentic bare-Persona path also exists, so this is
 not yet proof that Sunox's request is rejected; confirming the intended contract
 requires an authorized credit-consuming generation capture.
 
+A second implementation review and authenticated readback also tightened four
+edges: Persona mutations were restored to normal transport negotiation because
+only reads had evidence; nullable `allowed_condition_combinations` now follows
+the Web `?? []` behavior; Cowrite POST evidence is labelled as the older
+2026-07-26 compatibility capture rather than current confirmation; and the
+machine-readable playlist-cover guidance now matches the S3-ID-only payload.
+Intermittent resets were observed on both negotiated HTTP/2 and forced HTTP/1.1,
+so the transport mitigation is a bounded fallback for explicit idempotent GETs,
+not a protocol downgrade for any mutation.
+
 No generation, upload, metadata change, deletion, reaction, playlist mutation,
 or credit-consuming endpoint was called during this pass.
 
@@ -108,10 +118,10 @@ do not use `studio-api-prod.suno.com` after the presign step.
 | Download | `GET /api/download/clip/{id}?format=mp3|m4a` | Same-day read-only API evidence exists; current Web also has gated/presigned helpers and response `media_urls` |
 | Download WAV | `POST convert_wav`, then `GET wav_file` | Current Web still has the WAV init/poll helper; conversion not live-tested here |
 | Download OPUS | `GET opus_file`, optional `POST convert_opus` | Backend compatibility route; not found in this create chunk graph and not live-tested here |
-| Playlist list | `GET /api/playlist/me?page=N` | **LIVE-READ stable**, flat response shape exposed a normalization bug |
+| Playlist list | `GET /api/playlist/me?page=N` | **LIVE-READ observed-compatible**; flat cover fields decode to one normalized key after the fix |
 | Playlist detail | `GET /api/playlist/v2/{id}` | **LIVE-READ stable**, v2 metadata/relationship/stats envelope decoded |
 | Playlist create | `POST /api/playlist/create/` | Present in bundle, mutation not live-tested |
-| Playlist metadata | `PATCH /api/playlist/v2/{id}` | **BUNDLE method stable**; uploaded-cover body differs |
+| Playlist metadata | `PATCH /api/playlist/v2/{id}` | **BUNDLE method/body matched after fix**; mutation not live-tested |
 | Playlist legacy metadata | `POST /api/playlist/set_metadata` | Present as Web compatibility branch |
 | Playlist reaction | `POST /api/playlist_reaction/{id}/update_reaction_type/` | Present as legacy branch; v2 like/save uses `POST .../save` |
 | Playlist save | `POST /api/playlist/v2/{id}/save` | **BUNDLE stable** |
@@ -119,12 +129,12 @@ do not use `studio-api-prod.suno.com` after the presign step.
 | Playlist tracks | `POST .../tracks/add|remove` | **BUNDLE stable**, body remains `{clip_ids:[...]}` |
 | Playlist reorder | `POST .../tracks/reorder-by-index` | **BUNDLE stable**, body remains `{positions:[...]}` |
 | Playlist trash | `POST /api/playlist/v2/{id}/trash` | **BUNDLE stable**, body remains `{undo:boolean}` |
-| Persona list | `GET get-personas|get-loved-personas|get-followed-personas` | **LIVE-READ stable** for mine/loved/followed through a Persona-scoped HTTP/1 client; page/token responses decoded |
-| Persona detail | `GET /api/persona/get-persona/{id}/` | Route remains in bundle; current environment reset the GET even over HTTP/1, while HTTP/1 HEAD returned 405 rather than 404 |
-| Persona clips | `GET /api/persona/get-persona-paginated/{id}/?page=N` | Route remains test-covered; current environment reset the live GET, so response compatibility is unconfirmed |
+| Persona list | `GET get-personas|get-loved-personas|get-followed-personas` | **LIVE-READ observed-compatible** for mine/loved/followed; page/token responses decoded through bounded idempotent-GET fallback |
+| Persona detail | `GET /api/persona/get-persona/{id}/` | **LIVE-READ observed-compatible** for one owned Persona; identity, visibility, and source-range fields decoded |
+| Persona clips | `GET /api/persona/get-persona-paginated/{id}/?page=N` | **LIVE-READ envelope compatible** for an empty page; non-empty clip-item schema not live-verified |
 | Persona create/edit/visibility/trash | `POST`, `PUT` persona routes | Mutation routes not live-tested; see suspected drift below |
 | Persona love | `POST /api/persona/{id}/toggle_love/` | **BUNDLE stable**, mutation not live-tested |
-| Audio upload | `POST /api/uploads/audio/`, S3 form, `POST upload-finish`, `GET status`, `POST initialize-clip` | **BUNDLE endpoint/body stable**; validation gap exists |
+| Audio upload | `POST /api/uploads/audio/`, S3 form, `POST upload-finish`, `GET status`, `POST initialize-clip` | **BUNDLE endpoint/body and local format/size validation matched after fix**; upload not live-tested |
 | Image upload | `POST /api/uploads/image/`, S3 form, `POST upload-finish` | Routes remain in bundle; mutation not live-tested |
 
 ## Confirmed stable contracts
@@ -376,18 +386,41 @@ Older live evidence in `API_INTELLIGENCE.md` observed
 `PUT /api/persona/bulk-trash-personas/`, while Sunox uses per-persona
 `PUT /api/persona/trash-persona/{id}/`.
 
-List pagination is currently healthy, but mutation route parity needs a
-DevTools capture. No persona was changed for this audit.
+List pagination is response-compatible but intermittently transport-flaky;
+mutation route parity still needs a DevTools capture. No persona was changed
+for this audit.
 
-### Persona reads require a scoped HTTP/1 transport in this environment
+### Read transport resets are intermittent and recoverable
 
-Authenticated Persona list GETs repeatedly reset when sent through the normal
-client, while the same list contracts decoded over an HTTP/1-only client.
-Sunox now scopes that transport workaround to Persona GET/POST/PUT calls rather
-than downgrading every API request. Mine, loved, and followed lists succeeded
-serially after the change. Detail and paginated-clip GETs still reset in the
-current environment; the detail route is not a 404 (HTTP/1 HEAD returned 405),
-so changing its path would be unsupported by the evidence.
+Authenticated Persona and playlist GETs intermittently reset. In separate
+probes, both directions occurred: a request could reset over negotiated HTTP/2
+and succeed over HTTP/1.1, then later reset over HTTP/1.1 and succeed over
+HTTP/2. Because the probes occurred at different times, this proves only that
+both transports can intermittently reset and a retry can recover; it does not
+attribute recovery causally to the protocol switch or show that a route family
+permanently requires one protocol.
+
+The final-binary account readback made the remaining availability limit
+visible: two Persona commands exhausted all three attempts, while a later
+followed-list request and then the same non-empty mine-list request succeeded.
+An independent authenticated HTTP/1.1 GET with the same browser-facing headers
+also returned 200 during the failing interval. This supports an intermittent
+upstream/transport diagnosis, not a persistent route or schema break. The
+bounded retry improves recovery but does not claim to make upstream
+availability deterministic.
+
+Sunox now retries only explicitly idempotent GETs with a bounded sequence:
+normal negotiation, HTTP/1.1 fallback after a transport error, then one final
+normal attempt if the fallback also fails. HTTP status errors are not retried
+by this mechanism. Persona, playlist, billing/model, and Cowrite-model reads use
+it. Mutation calls use the normal negotiated client; their endpoints, methods,
+and payloads are unchanged. A local server regression test drops the first
+completed GET without a response and verifies that the same GET succeeds on the
+fallback request. Additional fault injection truncates a success JSON body and
+drops the first two requests, verifying respectively that body reads remain
+inside the retry boundary and that the final normal attempt is exercised. A
+separate runtime guard test proves that a POST is rejected before network I/O if
+a future caller accidentally passes it to the read helper.
 
 ### Download behavior now has multiple Web paths
 
@@ -464,13 +497,16 @@ chunk set.
   `num_total_results`, `current_page`, and flat playlist items.
 - `GET /api/playlist/v2/{id}` returned the v2
   `metadata`/`relationship`/`stats` envelope and decoded successfully.
-- Persona mine/loved/followed list GETs returned their page envelopes after the
-  Persona-scoped HTTP/1 workaround. Mine included `personas`, `total_results`,
-  `current_page`, nullable `continuation_token`, and current quota counters.
+- Persona mine/loved/followed list GETs returned their page envelopes. Mine
+  included `personas`, `total_results`, `current_page`, nullable
+  `continuation_token`, and current quota counters.
+- One owned Persona detail decoded identity, visibility, and source-range
+  fields; its paginated clips route decoded a valid empty page. This confirms
+  the empty envelope, not the schema of a non-empty clip item.
 
-The playlist and Persona list contracts are stable. Playlist flat-item
-normalization was corrected; Persona detail and clips remain transport-blocked
-in the current environment.
+The observed playlist responses and Persona list/detail/empty-page envelopes
+are compatible under the bounded GET fallback. Playlist flat-item
+normalization was also corrected.
 
 ## Not safely verified
 

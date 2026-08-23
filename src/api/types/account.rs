@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -50,7 +50,7 @@ pub struct Model {
     pub description: String,
     #[serde(default)]
     pub capabilities: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub allowed_condition_combinations: Vec<Vec<String>>,
     #[serde(default)]
     pub features: Vec<String>,
@@ -60,6 +60,14 @@ pub struct Model {
     pub max_lengths: MaxLengths,
     #[serde(default, flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 impl Model {
@@ -324,5 +332,22 @@ mod tests {
         .expect("deserialize bluejay model");
         assert!(bluejay.supports_web_conditions(&["cover"]));
         assert!(bluejay.supports_web_conditions(&["playlist"]));
+    }
+
+    #[test]
+    fn null_allowed_condition_combinations_matches_the_web_empty_fallback() {
+        let model: Model = serde_json::from_value(serde_json::json!({
+            "name": "v4.5+",
+            "external_key": "chirp-bluejay",
+            "can_use": true,
+            "is_default_model": true,
+            "description": "nullable current-field fixture",
+            "capabilities": ["all"],
+            "allowed_condition_combinations": null
+        }))
+        .expect("Web treats null allowed conditions as an empty list");
+
+        assert!(model.allowed_condition_combinations.is_empty());
+        assert!(model.supports_web_conditions(&["playlist"]));
     }
 }

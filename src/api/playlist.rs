@@ -15,13 +15,10 @@ impl SunoClient {
     /// GET /api/playlist/me?page={page}
     pub async fn list_playlists(&self, page: u32) -> Result<PlaylistListResponse, CliError> {
         self.with_auth_retry(|| async {
-            let resp = self
-                .get("/api/playlist/me")
-                .query(&[("page", page)])
-                .send()
-                .await?;
-            let resp = self.check_response(resp).await?;
-            Ok(resp.json().await?)
+            self.read_json_with_transport_retry(
+                self.get("/api/playlist/me").query(&[("page", page)]),
+            )
+            .await
         })
         .await
     }
@@ -30,12 +27,12 @@ impl SunoClient {
     /// GET /api/playlist/v2/{playlist_id}
     pub async fn get_playlist(&self, playlist_id: &str) -> Result<PlaylistInfo, CliError> {
         self.with_auth_retry(|| async {
-            let resp = self
-                .get(&format!("/api/playlist/v2/{playlist_id}"))
-                .send()
+            let raw = self
+                .read_json_with_transport_retry(
+                    self.get(&format!("/api/playlist/v2/{playlist_id}")),
+                )
                 .await?;
-            let resp = self.check_response(resp).await?;
-            decode_playlist(resp.json().await?)
+            decode_playlist(raw)
         })
         .await
     }

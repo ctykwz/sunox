@@ -340,8 +340,8 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                     "playlist delete"
                 ],
                 "metadata_status": "playlist set uses PATCH /api/playlist/v2/{id} with metadata.name and bio.description as the primary contract; arbitrary external image URLs alone retain the legacy set_metadata compatibility route because v2 requires an uploaded S3 cover id",
-                "cover_status": "playlist set/create support --image-file for local image upload; uploaded covers use POST /api/uploads/image/, presigned S3 form upload, POST /api/uploads/image/{id}/upload-finish/, then PATCH /api/playlist/v2/{id} with metadata.cover_url, metadata.cover_image_s3_id, and metadata.cover_is_user_set=true",
-                "cover_url_status": "playlist set --image-url accepts existing Suno uploaded image URLs such as https://cdn2.suno.ai/image_<upload_id>.jpeg and maps them to the same v2 cover metadata patch; arbitrary external URLs still use the legacy set_metadata route",
+                "cover_status": "playlist set/create support --image-file for local image upload; uploaded covers use POST /api/uploads/image/, presigned S3 form upload, POST /api/uploads/image/{id}/upload-finish/, then PATCH /api/playlist/v2/{id} with only metadata.cover_image_s3_id",
+                "cover_url_status": "playlist set --image-url accepts existing Suno uploaded image URLs such as https://cdn2.suno.ai/image_<upload_id>.jpeg and extracts the upload identity for the same cover_image_s3_id-only v2 patch; arbitrary external URLs still use the legacy set_metadata route",
                 "info_json_shape": "playlist info keeps normalized top-level fields for compatibility and also preserves the complete metadata, relationship, and stats objects from the v2 response; unknown top-level response fields remain under extra",
                 "multi_step_failure": "playlist create/set expose completed_steps, playlist_id, and failed.step/code/message through partial_mutation when an earlier server mutation succeeded",
                 "remove_status": "playlist remove accepts multiple clip IDs but submits one POST /api/playlist/v2/{playlist_id}/tracks/remove request per clip ID because larger batch remove requests can return Suno 500s. If a later item fails, the command returns partial_mutation with error.details containing requested_clip_ids, succeeded_clip_ids, failed, and not_attempted_clip_ids."
@@ -398,10 +398,10 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
         "table_output": "uses parsed clip fields"
     });
     info["command_notes"]["lyrics"] = serde_json::json!({
-        "route": "GET /api/generate/cowrite-lyrics/models/ then POST /api/generate/cowrite-lyrics/",
+        "route": "current-confirmed GET /api/generate/cowrite-lyrics/models/ followed by the POST /api/generate/cowrite-lyrics/ compatibility route captured live on 2026-07-26 but not re-confirmed in the 2026-08-23 bundle",
         "mode": "apply_user_request",
-        "request_contract": "models expose id, display_name, family, and supports_thinking; --model resolves by ID or display name, otherwise the Web literal default is used; --thinking is rejected unless supported; selected, context_before, and context_after are empty strings; the user prompt is sent as instruction; title and style are empty strings; references is empty; no legacy submit/status polling is used",
-        "response_contract": "returns the current edited_lyrics, lyrics_request_id, lyrics_id, variants, artist_to_tag_mapping, next_prompts, and any additional response fields without mapping them back to the removed text/title/status/tags shape"
+        "request_contract": "current model discovery exposes id, display_name, family, and supports_thinking; --model resolves by ID or display name, otherwise the Web literal default is used; --thinking is rejected unless supported. The POST compatibility body is based on the 2026-07-26 live capture: selected, context_before, and context_after are empty strings; the user prompt is sent as instruction; title and style are empty strings; references is empty; no submit/status polling is used. Capture a current Cowrite submit before changing or claiming renewed parity for the POST",
+        "response_contract": "the 2026-07-26 compatibility response returns edited_lyrics, lyrics_request_id, lyrics_id, variants, artist_to_tag_mapping, next_prompts, and any additional response fields without mapping them back to the removed text/title/status/tags shape; capture a current submit before treating this POST response as renewed current evidence"
     });
     println!("{}", serde_json::to_string_pretty(&info)?);
     Ok(())

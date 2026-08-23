@@ -28,9 +28,9 @@ pub fn browser_client() -> Result<Client, CliError> {
     .map_err(|e| CliError::Config(format!("HTTP client: {e}")))
 }
 
-/// Persona endpoints reset in the currently observed production transport
-/// when reqwest negotiates HTTP/2. Keep a dedicated HTTP/1 pool for that API
-/// family without downgrading unrelated APIs.
+/// Keep a dedicated HTTP/1 pool as one bounded recovery attempt for explicitly
+/// idempotent reads. Both transports have shown intermittent resets, so this is
+/// not evidence that a route requires HTTP/1. Mutation transports never use it.
 pub fn browser_http1_client() -> Result<Client, CliError> {
     crate::net::proxy::apply_to_client_builder(
         Client::builder()
