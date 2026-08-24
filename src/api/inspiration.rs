@@ -9,10 +9,13 @@ pub struct InspirationOptions<'a> {
     pub clip_id: &'a str,
     pub title: &'a str,
     pub tags: &'a str,
+    pub enhance_tags: bool,
     pub negative_tags: &'a str,
     pub lyrics: &'a str,
     pub weirdness: f64,
+    pub audio_influence: Option<f64>,
     pub challenge_token: Option<String>,
+    pub model: &'a str,
 }
 
 impl SunoClient {
@@ -33,7 +36,7 @@ impl SunoClient {
             ));
         }
         let lyrics = options.lyrics.trim();
-        let mut req = GenerateRequest::new("chirp-fenix", "custom");
+        let mut req = GenerateRequest::new(options.model, "custom");
         req.task = Some("playlist_condition".into());
         req.title = Some(options.title.to_string());
         req.tags = Some(original_tags.to_string());
@@ -42,28 +45,35 @@ impl SunoClient {
         req.metadata.control_sliders = Some(ControlSliders {
             weirdness_constraint: Some((options.weirdness / 100.0).clamp(0.0, 1.0)),
             style_weight: None,
+            audio_weight: options.audio_influence.map(|value| value / 100.0),
+            aug_creativity: None,
         });
         req.playlist_id = Some("inspiration".into());
         req.playlist_clip_ids = Some(vec![options.clip_id.to_string()]);
         req.set_challenge_token(options.challenge_token);
-        let limits = self
-            .prepare_generation_request_with_features(&mut req, &[TAG_UPSAMPLE_FEATURE])
-            .await?;
-
-        let upsampled = self
-            .upsample_tags(PromptUpsampleRequest {
-                original_tags,
-                lyrics: (!lyrics.is_empty()).then_some(lyrics),
-                is_instrumental: false,
-                user_guidance: None,
-            })
-            .await?;
-        req.tags = Some(upsampled.upsampled.clone());
-        req.metadata.last_tags_generation = Some(LastTagsGeneration::from_upsample_response(
-            original_tags.to_string(),
-            upsampled,
-        ));
-        validate_generation_lengths_with_limits(&req, &limits)?;
+        if options.enhance_tags {
+            let limits = self
+                .prepare_generation_request_with_features(&mut req, &[TAG_UPSAMPLE_FEATURE])
+                .await?;
+            let personalization_enabled = self.styles_augmentation_enabled().await?;
+            let upsampled = self
+                .upsample_tags(PromptUpsampleRequest {
+                    original_tags,
+                    lyrics: (!lyrics.is_empty()).then_some(lyrics),
+                    is_instrumental: false,
+                    user_guidance: None,
+                })
+                .await?;
+            req.tags = Some(upsampled.upsampled.clone());
+            req.metadata.last_tags_generation = Some(LastTagsGeneration::from_upsample_response(
+                original_tags.to_string(),
+                upsampled,
+                personalization_enabled,
+            ));
+            validate_generation_lengths_with_limits(&req, &limits)?;
+        } else {
+            self.prepare_generation_request(&mut req).await?;
+        }
         Ok(req)
     }
 }

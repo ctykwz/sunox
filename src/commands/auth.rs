@@ -51,7 +51,7 @@ pub async fn run(args: AuthArgs, ctx: &AppContext) -> Result<(), CliError> {
         state.clerk_client_cookie.as_ref().ok_or_else(|| {
             CliError::Config("no Clerk session cookie stored — run `sunox login` first".into())
         })?;
-        let http = crate::net::http::browser_client()?;
+        let http = crate::net::http::clerk_client()?;
         auth::refresh_state_explicit(&http, &mut state).await?;
     } else if should_login {
         eprintln!("Extracting Suno session from your browser...");
@@ -66,7 +66,7 @@ pub async fn run(args: AuthArgs, ctx: &AppContext) -> Result<(), CliError> {
         let (session_id, jwt) = match login.verified_clerk {
             Some(verified) => (verified.session_id, verified.jwt),
             None => {
-                let http = crate::net::http::browser_client()?;
+                let http = crate::net::http::clerk_client()?;
                 eprintln!("Exchanging for access token via Clerk...");
                 auth::clerk_token_exchange(
                     &http,
@@ -82,7 +82,7 @@ pub async fn run(args: AuthArgs, ctx: &AppContext) -> Result<(), CliError> {
         let mut browser_auth = auth::normalize_cookie_input(cookie)?;
         auth::enrich_browser_auth_environment(&mut browser_auth).await?;
         environment_recovery_attempted = true;
-        let http = crate::net::http::browser_client()?;
+        let http = crate::net::http::clerk_client()?;
         eprintln!("Exchanging cookie for access token...");
         let (session_id, jwt) = auth::clerk_token_exchange(
             &http,

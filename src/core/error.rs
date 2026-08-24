@@ -1,5 +1,84 @@
 use thiserror::Error;
 
+#[derive(Debug)]
+pub(crate) struct MutationAmbiguity {
+    message: String,
+    operation: String,
+    operation_id: String,
+    stage: String,
+    cause_code: String,
+    cause_message: String,
+    resumable: bool,
+    recovery_reason: String,
+    inspection_commands: Vec<String>,
+    context: serde_json::Map<String, serde_json::Value>,
+}
+
+impl MutationAmbiguity {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        message: impl Into<String>,
+        operation: impl Into<String>,
+        operation_id: impl Into<String>,
+        stage: impl Into<String>,
+        cause_code: impl Into<String>,
+        cause_message: impl Into<String>,
+        resumable: bool,
+        recovery_reason: impl Into<String>,
+        inspection_commands: Vec<String>,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            operation: operation.into(),
+            operation_id: operation_id.into(),
+            stage: stage.into(),
+            cause_code: cause_code.into(),
+            cause_message: cause_message.into(),
+            resumable,
+            recovery_reason: recovery_reason.into(),
+            inspection_commands,
+            context: serde_json::Map::new(),
+        }
+    }
+
+    pub(crate) fn with_context(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
+        self.context.insert(key.into(), value);
+        self
+    }
+
+    pub(crate) fn into_error(self) -> CliError {
+        let mut details = self.context;
+        details.insert(
+            "operation".into(),
+            serde_json::Value::String(self.operation),
+        );
+        details.insert(
+            "operation_id".into(),
+            serde_json::Value::String(self.operation_id),
+        );
+        details.insert("stage".into(), serde_json::Value::String(self.stage));
+        details.insert(
+            "cause".into(),
+            serde_json::json!({
+                "code": self.cause_code,
+                "message": self.cause_message,
+            }),
+        );
+        details.insert(
+            "recovery".into(),
+            serde_json::json!({
+                "resumable": self.resumable,
+                "reason": self.recovery_reason,
+                "inspection_commands": self.inspection_commands,
+            }),
+        );
+        CliError::AmbiguousMutation {
+            message: self.message,
+            details: serde_json::Value::Object(details),
+        }
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum CliError {
     #[error("API error: {message}")]
@@ -16,6 +95,12 @@ pub enum CliError {
 
     #[error("Partial mutation failure: {message}")]
     PartialMutation {
+        message: String,
+        details: serde_json::Value,
+    },
+
+    #[error("Mutation result is ambiguous: {message}")]
+    AmbiguousMutation {
         message: String,
         details: serde_json::Value,
     },
@@ -94,6 +179,7 @@ impl CliError {
             Self::Api { .. }
             | Self::SunoApi { .. }
             | Self::PartialMutation { .. }
+            | Self::AmbiguousMutation { .. }
             | Self::PartialDownload { .. }
             | Self::Diagnostic { .. }
             | Self::Http(_)
@@ -111,6 +197,7 @@ impl CliError {
             Self::Api { code, .. } => code,
             Self::SunoApi { code, .. } => code,
             Self::PartialMutation { .. } => "partial_mutation",
+            Self::AmbiguousMutation { .. } => "ambiguous_mutation",
             Self::PartialDownload { .. } => "partial_download",
             Self::Diagnostic { code, .. } => code,
             Self::AuthMissing => "auth_missing",
@@ -153,6 +240,9 @@ impl CliError {
             }
             Self::PartialMutation { .. } => {
                 "Inspect error.details before retrying; when recovery is present, follow it only if recovery.resumable is true"
+            }
+            Self::AmbiguousMutation { .. } => {
+                "Do not blindly retry: Suno may have accepted the write. Inspect error.details and run its read-only inspection commands first"
             }
             Self::PartialDownload { .. } => {
                 "Inspect error.details for succeeded paths, the failed clip, and not_attempted IDs before retrying"
@@ -204,6 +294,7 @@ impl CliError {
     pub fn details(&self) -> Option<&serde_json::Value> {
         match self {
             Self::PartialMutation { details, .. }
+            | Self::AmbiguousMutation { details, .. }
             | Self::PartialDownload { details, .. }
             | Self::Diagnostic { details, .. }
             | Self::SunoApi {
@@ -217,7 +308,7 @@ impl CliError {
 
 #[cfg(test)]
 mod tests {
-    use super::CliError;
+    use super::{CliError, MutationAmbiguity};
 
     #[test]
     fn partial_download_exposes_machine_readable_details() {
@@ -237,6 +328,50 @@ mod tests {
 
         assert!(!error.suggestion().to_ascii_lowercase().contains("credit"));
         assert!(error.suggestion().contains("failure message"));
+    }
+
+    #[test]
+    fn ambiguous_mutation_exposes_details_and_forbids_blind_retry() {
+        let details = serde_json::json!({
+            "operation": "generation_submit",
+            "operation_id": "transaction-1"
+        });
+        let error = CliError::AmbiguousMutation {
+            message: "generation response was lost".into(),
+            details: details.clone(),
+        };
+
+        assert_eq!(error.error_code(), "ambiguous_mutation");
+        assert_eq!(error.details(), Some(&details));
+        assert!(error.suggestion().contains("Do not blindly retry"));
+    }
+
+    #[test]
+    fn ambiguity_builder_preserves_typed_cause_recovery_and_context() {
+        let error = MutationAmbiguity::new(
+            "write outcome is unknown",
+            "crop",
+            "operation-1",
+            "response_body",
+            "http_error",
+            "body ended early",
+            false,
+            "inspect the clip list before retrying",
+            vec!["sunox clip list --json".into()],
+        )
+        .with_context("source_clip_id", serde_json::json!("clip-a"))
+        .into_error();
+
+        let details = error.details().expect("ambiguity details");
+        assert_eq!(details["operation"], "crop");
+        assert_eq!(details["operation_id"], "operation-1");
+        assert_eq!(details["source_clip_id"], "clip-a");
+        assert_eq!(details["cause"]["code"], "http_error");
+        assert_eq!(details["recovery"]["resumable"], false);
+        assert_eq!(
+            details["recovery"]["inspection_commands"][0],
+            "sunox clip list --json"
+        );
     }
 
     #[test]

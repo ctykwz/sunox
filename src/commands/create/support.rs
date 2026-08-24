@@ -91,6 +91,7 @@ where
         Output = Result<(crate::api::SunoClient, crate::api::types::GenerateRequest), CliError>,
     >,
 {
+    ctx.ensure_mutations_allowed()?;
     let (client, mut request) = prepare().await?;
     let initial_auth = client.auth_state_snapshot();
     let _guard = ctx.acquire_mutation_lock_for(&initial_auth)?;

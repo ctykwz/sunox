@@ -11,6 +11,9 @@ use crate::core::{
 };
 use serde::Serialize;
 
+const SUPPORTED_AUDIO_EXTENSIONS: &[&str] = &["mp3", "m4a", "wav", "flac", "ogg", "aac"];
+const MAX_AUDIO_UPLOAD_BYTES: u64 = 524_288_000;
+
 #[derive(Debug, Serialize)]
 pub struct UploadResult {
     pub upload_id: String,
@@ -31,21 +34,40 @@ pub struct UploadWorkflowInput<'a> {
     pub poll_interval: Duration,
 }
 
+#[derive(Debug)]
+pub(crate) struct AudioFilePreflight {
+    extension: String,
+    filename: String,
+    content_length: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AudioAssetUploadResult {
+    pub upload_id: String,
+    pub status_upload_id: Option<String>,
+    pub status: String,
+}
+
+pub(crate) struct VoiceRecordingUploadInput<'a> {
+    pub file: &'a Path,
+    pub workflow_id: &'a str,
+    pub role: &'a str,
+    pub timeout: Duration,
+    pub poll_interval: Duration,
+}
+
 pub async fn run(
     client: &SunoClient,
     input: UploadWorkflowInput<'_>,
 ) -> Result<UploadResult, CliError> {
     ensure_poll_timeout(input.timeout)?;
-    let extension = audio_extension(input.file)?;
-    let filename = upload_filename(input.file)?;
+    let preflight = preflight_audio_file(input.file).await?;
+    let AudioFilePreflight {
+        extension,
+        filename,
+        content_length,
+    } = preflight;
     let file = tokio::fs::File::open(input.file).await?;
-    let metadata = file.metadata().await?;
-    if !metadata.is_file() {
-        return Err(CliError::Config(format!(
-            "upload path is not a regular file: {}",
-            input.file.display()
-        )));
-    }
 
     let upload = client
         .create_audio_upload(&CreateAudioUploadRequest {
@@ -59,7 +81,7 @@ pub async fn run(
     let mut completed_steps = vec!["upload_created"];
 
     client
-        .upload_presigned_audio_file(&upload.url, &upload.fields, &filename, file, metadata.len())
+        .upload_presigned_audio_file(&upload.url, &upload.fields, &filename, file, content_length)
         .await
         .map_err(|error| {
             upload_stage_error(&upload.id, None, &completed_steps, "file_upload", error)
@@ -173,6 +195,133 @@ pub async fn run(
         clip,
         has_vocal: status.has_vocal,
         status: "complete".into(),
+    })
+}
+
+/// Upload and process an audio asset without initializing a normal Suno
+/// library clip. Voice creation uses this seam for both the singing sample and
+/// the dynamic-phrase verification recording.
+pub(crate) async fn upload_voice_recording_asset<F>(
+    client: &SunoClient,
+    input: VoiceRecordingUploadInput<'_>,
+    on_upload_created: F,
+) -> Result<AudioAssetUploadResult, CliError>
+where
+    F: FnOnce(&str) -> Result<(), CliError>,
+{
+    ensure_poll_timeout(input.timeout)?;
+    let preflight = preflight_audio_file(input.file).await?;
+    let file = tokio::fs::File::open(input.file).await?;
+    let upload = client
+        .create_voice_recording_upload(
+            input.workflow_id,
+            input.role,
+            &CreateAudioUploadRequest {
+                spec: CreateAudioUploadSpec {
+                    extension: preflight.extension,
+                    is_stem_mix: false,
+                    upload_type: "voice_recording".into(),
+                },
+            },
+        )
+        .await?;
+    let mut completed_steps = vec![format!("{}_upload_created", input.role)];
+    on_upload_created(&upload.id).map_err(|error| {
+        voice_upload_stage_error(
+            input.workflow_id,
+            input.role,
+            &upload.id,
+            &completed_steps,
+            "checkpoint_persist",
+            error,
+        )
+    })?;
+
+    client
+        .upload_presigned_audio_file(
+            &upload.url,
+            &upload.fields,
+            &preflight.filename,
+            file,
+            preflight.content_length,
+        )
+        .await
+        .map_err(|error| {
+            voice_upload_stage_error(
+                input.workflow_id,
+                input.role,
+                &upload.id,
+                &completed_steps,
+                "file_upload",
+                error,
+            )
+        })?;
+    completed_steps.push(format!("{}_file_uploaded", input.role));
+
+    client
+        .finish_voice_recording_upload(
+            input.workflow_id,
+            input.role,
+            &upload.id,
+            &FinishAudioUploadRequest {
+                upload_type: "voice_recording".into(),
+                upload_filename: preflight.filename,
+                agreed_to_vip_upload_terms: false,
+            },
+        )
+        .await
+        .map_err(|error| {
+            voice_upload_stage_error(
+                input.workflow_id,
+                input.role,
+                &upload.id,
+                &completed_steps,
+                "upload_finish",
+                error,
+            )
+        })?;
+    completed_steps.push(format!("{}_upload_finished", input.role));
+
+    let status = wait_until_complete(client, &upload.id, input.timeout, input.poll_interval)
+        .await
+        .map_err(|error| {
+            voice_upload_stage_error(
+                input.workflow_id,
+                input.role,
+                &upload.id,
+                &completed_steps,
+                "processing_wait",
+                error,
+            )
+        })?;
+
+    Ok(AudioAssetUploadResult {
+        upload_id: upload.id,
+        status_upload_id: status.id,
+        status: status.status.unwrap_or_else(|| "complete".into()),
+    })
+}
+
+pub(crate) async fn preflight_audio_file(path: &Path) -> Result<AudioFilePreflight, CliError> {
+    let extension = audio_extension(path)?;
+    let filename = upload_filename(path)?;
+    let metadata = tokio::fs::metadata(path).await?;
+    if !metadata.is_file() {
+        return Err(CliError::Config(format!(
+            "upload path is not a regular file: {}",
+            path.display()
+        )));
+    }
+    if metadata.len() > MAX_AUDIO_UPLOAD_BYTES {
+        return Err(CliError::Config(format!(
+            "upload file is {} bytes, exceeding the current Suno Web limit of {MAX_AUDIO_UPLOAD_BYTES} bytes",
+            metadata.len()
+        )));
+    }
+    Ok(AudioFilePreflight {
+        extension,
+        filename,
+        content_length: metadata.len(),
     })
 }
 
@@ -334,6 +483,68 @@ fn upload_recovery_details(
     }
 }
 
+fn voice_upload_stage_error(
+    workflow_id: &str,
+    role: &str,
+    upload_id: &str,
+    completed_steps: &[String],
+    failed_step: &str,
+    mut error: CliError,
+) -> CliError {
+    if let CliError::AmbiguousMutation { details, .. } = &mut error {
+        if let Some(details) = details.as_object_mut() {
+            details.insert("workflow_id".into(), serde_json::json!(workflow_id));
+            details.insert("recording_role".into(), serde_json::json!(role));
+            details.insert("upload_id".into(), serde_json::json!(upload_id));
+            details.insert("completed_steps".into(), serde_json::json!(completed_steps));
+        }
+        return error;
+    }
+
+    let recovery = match failed_step {
+        "processing_wait" => serde_json::json!({
+            "resumable": false,
+            "reason": "the upload may finish, but the next Voice processing POST has not been sent",
+            "inspection": {
+                "command": "sunox clip upload-status",
+                "arguments": { "upload_id": upload_id }
+            }
+        }),
+        "file_upload" => serde_json::json!({
+            "resumable": false,
+            "reason": "the presigned form upload result is not reliably known"
+        }),
+        "upload_finish" => serde_json::json!({
+            "resumable": false,
+            "reason": "retry safety for the upload-finish POST is not verified"
+        }),
+        "checkpoint_persist" => serde_json::json!({
+            "resumable": false,
+            "reason": "the server upload exists, but its durable local Voice checkpoint could not be written"
+        }),
+        _ => serde_json::json!({ "resumable": false }),
+    };
+    CliError::PartialMutation {
+        message: format!(
+            "Voice workflow {workflow_id} stopped during {role} {failed_step} after creating upload {upload_id}"
+        ),
+        details: serde_json::json!({
+            "operation": "voice_create",
+            "workflow_id": workflow_id,
+            "recording_role": role,
+            "upload_id": upload_id,
+            "completed_steps": completed_steps,
+            "failed": {
+                "step": format!("{role}_{failed_step}"),
+                "code": error.error_code(),
+                "message": error.to_string(),
+                "details": error.details()
+            },
+            "recovery": recovery
+        }),
+    }
+}
+
 pub fn audio_extension(path: &Path) -> Result<String, CliError> {
     let extension = path
         .extension()
@@ -341,6 +552,12 @@ pub fn audio_extension(path: &Path) -> Result<String, CliError> {
         .map(|extension| extension.trim_start_matches('.').to_ascii_lowercase())
         .filter(|extension| !extension.is_empty())
         .ok_or_else(|| CliError::Config("upload file must have an audio extension".into()))?;
+    if !SUPPORTED_AUDIO_EXTENSIONS.contains(&extension.as_str()) {
+        return Err(CliError::Config(format!(
+            "unsupported audio extension `{extension}`; current Suno Web uploads accept {}",
+            SUPPORTED_AUDIO_EXTENSIONS.join(", ")
+        )));
+    }
     Ok(extension)
 }
 
@@ -365,7 +582,7 @@ fn initialized_clip_id(
         })
 }
 
-async fn wait_until_complete(
+pub(crate) async fn wait_until_complete(
     client: &SunoClient,
     upload_id: &str,
     timeout: Duration,
@@ -416,8 +633,9 @@ mod tests {
     use crate::core::CliError;
 
     use super::{
-        ExpectedClipMetadata, UploadWorkflowInput, audio_extension, initialized_clip_id, run,
-        upload_filename, upload_metadata_stage_error, upload_stage_error, wait_until_complete,
+        ExpectedClipMetadata, MAX_AUDIO_UPLOAD_BYTES, UploadWorkflowInput, audio_extension,
+        initialized_clip_id, run, upload_filename, upload_metadata_stage_error, upload_stage_error,
+        wait_until_complete,
     };
 
     #[test]
@@ -425,6 +643,16 @@ mod tests {
         assert_eq!(
             audio_extension(Path::new("/tmp/Demo.MP3")).expect("extension"),
             "mp3"
+        );
+    }
+
+    #[test]
+    fn audio_extension_rejects_formats_the_current_web_uploader_does_not_offer() {
+        let error = audio_extension(Path::new("/tmp/Demo.aiff"))
+            .expect_err("unsupported extensions must be rejected before upload creation");
+
+        assert!(
+            matches!(error, CliError::Config(message) if message.contains("aiff") && message.contains("mp3"))
         );
     }
 
@@ -540,6 +768,43 @@ mod tests {
 
         assert!(
             matches!(error, CliError::Config(message) if message.contains("poll timeout") && message.contains("greater than 0"))
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_workflow_rejects_oversized_file_before_remote_creation() {
+        let dir = tempfile::tempdir().expect("upload tempdir");
+        let path = dir.path().join("too-large.wav");
+        std::fs::File::create(&path)
+            .expect("create sparse audio fixture")
+            .set_len(MAX_AUDIO_UPLOAD_BYTES + 1)
+            .expect("size sparse audio fixture");
+        let client = SunoClient::new_for_tests(
+            "http://127.0.0.1:9".into(),
+            AuthState {
+                jwt: Some("test-jwt".into()),
+                ..AuthState::default()
+            },
+        )
+        .expect("test client");
+
+        let error = run(
+            &client,
+            UploadWorkflowInput {
+                file: &path,
+                upload_type: "file_upload",
+                is_stem_mix: false,
+                title: None,
+                lyrics: None,
+                timeout: Duration::from_secs(1),
+                poll_interval: Duration::from_secs(1),
+            },
+        )
+        .await
+        .expect_err("oversized files must be rejected before creating an upload");
+
+        assert!(
+            matches!(error, CliError::Config(message) if message.contains("524288001") && message.contains("524288000"))
         );
     }
 

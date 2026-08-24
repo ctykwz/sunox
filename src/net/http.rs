@@ -28,6 +28,35 @@ pub fn browser_client() -> Result<Client, CliError> {
     .map_err(|e| CliError::Config(format!("HTTP client: {e}")))
 }
 
+/// Keep a dedicated HTTP/1 pool as one bounded recovery attempt for explicitly
+/// idempotent reads. Both transports have shown intermittent resets, so this is
+/// not evidence that a route requires HTTP/1. Mutation transports never use it.
+pub fn browser_http1_client() -> Result<Client, CliError> {
+    crate::net::proxy::apply_to_client_builder(
+        Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .http1_only()
+            .user_agent(BROWSER_USER_AGENT),
+    )?
+    .build()
+    .map_err(|e| CliError::Config(format!("HTTP/1 client: {e}")))
+}
+
+/// Clerk's Cloudflare edge can reset negotiated HTTP/2 connections even while
+/// the same auth endpoint remains healthy over HTTP/1.1. Keep token exchange
+/// and refresh on a dedicated HTTP/1.1 pool so authentication does not inherit
+/// the business API's transport negotiation or retry policy.
+pub fn clerk_client() -> Result<Client, CliError> {
+    crate::net::proxy::apply_to_client_builder(
+        Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .http1_only()
+            .user_agent(BROWSER_USER_AGENT),
+    )?
+    .build()
+    .map_err(|e| CliError::Config(format!("Clerk HTTP client: {e}")))
+}
+
 /// CDN media can legitimately take longer than an API response. Keep the
 /// connection bounded but do not impose Reqwest's total-body deadline.
 pub fn download_client() -> Result<Client, CliError> {

@@ -11,6 +11,7 @@ pub struct ExtendClipOptions<'a> {
     pub title: Option<&'a str>,
     pub instrumental: Option<bool>,
     pub challenge_token: Option<String>,
+    pub model: &'a str,
 }
 
 impl SunoClient {
@@ -49,8 +50,12 @@ impl SunoClient {
             }
         }
 
-        let mut req = GenerateRequest::new("chirp-fenix", "custom");
-        req.task = Some("extend".into());
+        let mut req = GenerateRequest::new(options.model, "custom");
+        req.task = Some(if source.metadata.clip_type.as_deref() == Some("upload") {
+            "upload_extend".into()
+        } else {
+            "extend".into()
+        });
         req.title = Some(
             options
                 .title

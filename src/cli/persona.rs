@@ -58,7 +58,7 @@ pub struct PersonaListArgs {
     #[arg(long, default_value_t = 1)]
     pub page: u32,
 
-    /// Continuation token from a previous response
+    /// Continuation token from a previous owned-Persona response (mine only)
     #[arg(long)]
     pub continuation_token: Option<String>,
 }
@@ -153,6 +153,10 @@ pub struct PersonaSetArgs {
     /// New persona description
     #[arg(long)]
     pub description: Option<String>,
+
+    /// Existing Suno image S3 ID for persona artwork
+    #[arg(long)]
+    pub image_s3_id: Option<String>,
 
     /// Set public/private visibility with the edit endpoint
     #[arg(long)]

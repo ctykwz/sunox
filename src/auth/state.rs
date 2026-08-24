@@ -232,6 +232,10 @@ impl AuthState {
         Ok(format!("account-{}", sha256_hex(source.as_bytes())))
     }
 
+    pub(crate) fn account_user_id(&self) -> Option<String> {
+        self.jwt_account_subject()
+    }
+
     pub(crate) fn matches_account_material(&self, other: &Self) -> bool {
         let self_subject = self.jwt_account_subject();
         let other_subject = other.jwt_account_subject();

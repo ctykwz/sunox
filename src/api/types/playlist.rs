@@ -54,6 +54,12 @@ struct RawPlaylistInfo {
     #[serde(default)]
     pub image_url: Option<String>,
     #[serde(default)]
+    pub cover_url: Option<String>,
+    #[serde(default)]
+    pub cover_image_s3_id: Option<String>,
+    #[serde(default)]
+    pub cover_is_user_set: Option<bool>,
+    #[serde(default)]
     pub is_public: Option<bool>,
     #[serde(default)]
     pub is_trashed: Option<bool>,
@@ -84,8 +90,10 @@ impl<'de> Deserialize<'de> for PlaylistInfo {
         let metadata = raw.metadata.take();
         let relationship = raw.relationship.take();
         let stats = raw.stats.take();
-        let cover_url =
-            string_field(metadata.as_ref(), "cover_url").or_else(|| raw.image_url.clone());
+        let cover_url = raw
+            .cover_url
+            .or_else(|| string_field(metadata.as_ref(), "cover_url"))
+            .or_else(|| raw.image_url.clone());
         let image_url = raw
             .image_url
             .or_else(|| cover_url.clone())
@@ -106,8 +114,12 @@ impl<'de> Deserialize<'de> for PlaylistInfo {
                 .or_else(|| string_field(metadata.as_ref(), "description")),
             image_url,
             cover_url,
-            cover_image_s3_id: string_field(metadata.as_ref(), "cover_image_s3_id"),
-            cover_is_user_set: bool_field(metadata.as_ref(), "cover_is_user_set"),
+            cover_image_s3_id: raw
+                .cover_image_s3_id
+                .or_else(|| string_field(metadata.as_ref(), "cover_image_s3_id")),
+            cover_is_user_set: raw
+                .cover_is_user_set
+                .or_else(|| bool_field(metadata.as_ref(), "cover_is_user_set")),
             is_public: raw
                 .is_public
                 .or_else(|| bool_field(metadata.as_ref(), "is_public"))
@@ -292,20 +304,14 @@ impl SetPlaylistCoverRequest {
     pub fn from_upload_id(upload_id: &str) -> Self {
         let cover_image_s3_id = format!("image_{upload_id}");
         Self {
-            metadata: PlaylistCoverMetadata {
-                cover_url: format!("https://cdn2.suno.ai/{cover_image_s3_id}.jpeg"),
-                cover_image_s3_id,
-                cover_is_user_set: true,
-            },
+            metadata: PlaylistCoverMetadata { cover_image_s3_id },
         }
     }
 }
 
 #[derive(Debug, Serialize)]
 pub struct PlaylistCoverMetadata {
-    pub cover_url: String,
     pub cover_image_s3_id: String,
-    pub cover_is_user_set: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -439,6 +445,35 @@ mod tests {
     }
 
     #[test]
+    fn playlist_info_consumes_current_list_cover_fields_without_duplicate_extra_keys() {
+        let playlist: PlaylistInfo = serde_json::from_value(serde_json::json!({
+            "id": "playlist-1",
+            "name": "Current list item",
+            "description": "",
+            "image_url": "https://cdn2.suno.ai/image_cover.jpeg",
+            "cover_url": "https://cdn2.suno.ai/image_cover.jpeg",
+            "cover_image_s3_id": "image_cover",
+            "cover_is_user_set": true,
+            "is_public": false,
+            "is_trashed": false,
+            "song_count": 3,
+            "clip_ids": [],
+            "playlist_clips": []
+        }))
+        .expect("deserialize current playlist list item");
+
+        assert_eq!(
+            playlist.cover_url.as_deref(),
+            Some("https://cdn2.suno.ai/image_cover.jpeg")
+        );
+        assert_eq!(playlist.cover_image_s3_id.as_deref(), Some("image_cover"));
+        assert_eq!(playlist.cover_is_user_set, Some(true));
+        assert!(!playlist.extra.contains_key("cover_url"));
+        assert!(!playlist.extra.contains_key("cover_image_s3_id"));
+        assert!(!playlist.extra.contains_key("cover_is_user_set"));
+    }
+
+    #[test]
     fn create_playlist_request_matches_web_shape() {
         let req = CreatePlaylistRequest {
             name: "Mixtape".into(),
@@ -538,9 +573,7 @@ mod tests {
             json,
             serde_json::json!({
                 "metadata": {
-                    "cover_url": "https://cdn2.suno.ai/image_upload-1.jpeg",
-                    "cover_image_s3_id": "image_upload-1",
-                    "cover_is_user_set": true
+                    "cover_image_s3_id": "image_upload-1"
                 }
             })
         );

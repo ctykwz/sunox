@@ -1,100 +1,63 @@
-use clap::ValueEnum;
+use clap::{Subcommand, ValueEnum};
 
-#[derive(ValueEnum, Clone, Debug, Default)]
-pub enum ModelVersion {
-    #[value(name = "v5.5")]
-    #[default]
-    V55,
-    #[value(name = "v5")]
-    V5,
-    #[value(name = "v4.5+")]
-    V45Plus,
-    #[value(name = "v4.5-all")]
-    V45All,
-    #[value(name = "v4.5")]
-    V45,
-    #[value(name = "v4")]
-    V4,
-    #[value(name = "v3.5")]
-    V35,
-    #[value(name = "v3")]
-    V3,
+#[derive(clap::Args)]
+pub struct ModelsArgs {
+    #[command(subcommand)]
+    pub command: Option<ModelsCommand>,
 }
 
-impl ModelVersion {
-    pub fn to_api_key(&self) -> &'static str {
-        match self {
-            Self::V55 => "chirp-fenix",
-            Self::V5 => "chirp-crow",
-            Self::V45Plus => "chirp-bluejay",
-            Self::V45All => "chirp-auk-turbo",
-            Self::V45 => "chirp-auk",
-            Self::V4 => "chirp-v4",
-            Self::V35 => "chirp-v3-5",
-            Self::V3 => "chirp-v3-0",
-        }
-    }
-
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            Self::V55 => "v5.5",
-            Self::V5 => "v5",
-            Self::V45Plus => "v4.5+",
-            Self::V45All => "v4.5-all",
-            Self::V45 => "v4.5",
-            Self::V4 => "v4",
-            Self::V35 => "v3.5",
-            Self::V3 => "v3",
-        }
-    }
+#[derive(Subcommand)]
+pub enum ModelsCommand {
+    /// Train and manage account-scoped Custom Models
+    Custom(CustomModelsArgs),
 }
 
-#[derive(ValueEnum, Clone, Debug)]
-pub enum CoverModel {
-    #[value(name = "v5.5")]
-    V55,
-    #[value(name = "v5")]
-    V5,
-    #[value(name = "v4.5+")]
-    V45Plus,
-    #[value(name = "v4.5-all")]
-    V45All,
-    #[value(name = "v4.5")]
-    V45,
-    #[value(name = "v4")]
-    V4,
-    #[value(name = "v3.5")]
-    V35,
-    #[value(name = "v3")]
-    V3,
+#[derive(clap::Args)]
+pub struct CustomModelsArgs {
+    #[command(subcommand)]
+    pub command: CustomModelCommand,
 }
 
-impl CoverModel {
-    pub fn to_api_key(&self) -> &'static str {
-        match self {
-            Self::V55 => "chirp-fenix",
-            Self::V5 => "chirp-crow",
-            Self::V45Plus => "chirp-bluejay",
-            Self::V45All => "chirp-auk-turbo",
-            Self::V45 => "chirp-auk",
-            Self::V4 => "chirp-v4",
-            Self::V35 => "chirp-v3-5",
-            Self::V3 => "chirp-v3-0",
-        }
-    }
+#[derive(Subcommand)]
+pub enum CustomModelCommand {
+    /// Show models that are still training
+    Pending,
 
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            Self::V55 => "v5.5",
-            Self::V5 => "v5",
-            Self::V45Plus => "v4.5+",
-            Self::V45All => "v4.5-all",
-            Self::V45 => "v4.5",
-            Self::V4 => "v4",
-            Self::V35 => "v3.5",
-            Self::V3 => "v3",
-        }
-    }
+    /// Train after explicitly confirming the current account's Web UI exposes training
+    Train(CustomModelTrainArgs),
+
+    /// Archive a Custom Model
+    #[command(visible_alias = "delete")]
+    Archive(CustomModelArchiveArgs),
+}
+
+#[derive(clap::Args)]
+pub struct CustomModelTrainArgs {
+    /// Custom Model name (1-16 Unicode characters)
+    #[arg(long)]
+    pub name: String,
+
+    /// Confirm that you own the rights to every selected clip
+    #[arg(long)]
+    pub confirm_rights: bool,
+
+    /// Attest that the current Suno Web account visibly exposes training; server stays authoritative
+    #[arg(long)]
+    pub confirm_ui_available: bool,
+
+    /// 6-100 distinct Suno clip IDs (Artist accounts can use Web for up to 200)
+    #[arg(value_name = "CLIP_ID", num_args = 6..=100)]
+    pub clip_ids: Vec<String>,
+}
+
+#[derive(clap::Args)]
+pub struct CustomModelArchiveArgs {
+    /// Custom Model ID
+    pub id: String,
+
+    /// Confirm this destructive action
+    #[arg(short = 'y', long)]
+    pub yes: bool,
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -103,33 +66,14 @@ pub enum VocalGender {
     Female,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{CoverModel, ModelVersion};
-
-    #[test]
-    fn v45_all_uses_the_current_free_model_key() {
-        assert_eq!(ModelVersion::V45All.to_api_key(), "chirp-auk-turbo");
-        assert_eq!(ModelVersion::V45All.display_name(), "v4.5-all");
-    }
-
-    #[test]
-    fn cover_models_use_account_keys_before_reference_mapping() {
-        assert_eq!(CoverModel::V45All.to_api_key(), "chirp-auk-turbo");
-        assert_eq!(CoverModel::V3.to_api_key(), "chirp-v3-0");
-        assert_eq!(CoverModel::V35.to_api_key(), "chirp-v3-5");
-        assert_eq!(CoverModel::V4.to_api_key(), "chirp-v4");
-    }
-}
-
 #[derive(ValueEnum, Clone, Debug, Default)]
 pub enum RemasterModel {
-    #[value(name = "v5.5")]
+    #[value(name = "v5.5", alias = "chirp-flounder")]
     #[default]
     V55,
-    #[value(name = "v5")]
+    #[value(name = "v5", alias = "chirp-carp")]
     V5,
-    #[value(name = "v4.5+")]
+    #[value(name = "v4.5+", alias = "chirp-bass")]
     V45Plus,
 }
 
@@ -148,5 +92,9 @@ impl RemasterModel {
             Self::V5 => "v5",
             Self::V45Plus => "v4.5+",
         }
+    }
+
+    pub fn supports_api_key(key: &str) -> bool {
+        matches!(key, "chirp-flounder" | "chirp-carp" | "chirp-bass")
     }
 }

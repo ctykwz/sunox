@@ -1,4 +1,4 @@
-# Suno API Intelligence — Reverse-Engineered April 6, 2026
+# Suno API Intelligence — Reverse-Engineered through August 24, 2026
 
 Implementation notes in this file were refreshed for the Rust CLI structure on
 June 30, 2026. Non-Studio page-load traffic was recaptured from the user's
@@ -8,6 +8,37 @@ Suno create bundle was scanned again on July 10, 2026 for non-generation edit
 and download contracts, then the complete non-Studio endpoint and generation
 payload surface was rescanned on July 26, 2026. Live endpoint behavior can
 drift; recapture requests before changing schemas.
+
+The `/create` bundle was checked again on August 23–24, 2026. The generation
+route and response envelope remain stable, while the request builder now uses
+the actual `/create` pathname, distinguishes uploaded-audio continuation as
+`task: "upload_extend"`, exposes Cowrite model discovery at
+`GET /api/generate/cowrite-lyrics/models/`, and supports `audio_weight` plus
+account-gated `aug_creativity` in `metadata.control_sliders`. Sunox implements
+the applicable `audio_weight` control and leaves the gated control unexposed.
+
+A deeper August 23 audit also compared account model capabilities, exact
+condition combinations, playlist v2 bodies, flat playlist responses, and audio
+upload guards. Extend and Inspiration now resolve the configured/account model
+instead of hard-coding v5.5; Cover/Extend/upload-Extend/Inspiration validate
+task plus condition compatibility before submission. Uploaded playlist covers
+send only `metadata.cover_image_s3_id`, flat cover fields no longer duplicate
+normalized JSON keys, and audio uploads reject formats outside
+`mp3,m4a,wav,flac,ogg,aac` or sizes above 524,288,000 bytes before presign.
+Authenticated readback showed intermittent resets in both protocol directions:
+some GETs reset under normal negotiation and succeeded over HTTP/1.1, while
+later probes did the reverse. Timing was not controlled, so this establishes
+recoverability by retry rather than a causal protocol preference. Explicitly
+idempotent Persona, playlist, billing/model, and Cowrite-model GETs therefore
+use a bounded transport fallback rather than a route-family downgrade. Mutation
+transports retain normal negotiation because no account write was performed to
+justify changing them.
+Persona mine/loved/followed, detail, and paginated-clips responses all decoded
+successfully during the audit, although later Persona commands occasionally
+exhausted the bounded retries before the same route succeeded again. The retry
+boundary includes the complete JSON body read, and a runtime method guard
+rejects non-GET requests before any network I/O; it does not claim deterministic
+upstream availability.
 
 ## Capture Scope (June 30, 2026)
 
@@ -192,8 +223,9 @@ Studio routes also appeared in the bundle, but they are excluded by scope.
 Agent-facing capability metadata should expose known non-implemented or
 unverified surfaces instead of advertising an empty gap list. As of this pass,
 `sunox agent-info --json` reports video upload, `update_feedback_state`,
-social/profile/project/video surfaces, stale voice-verification routes, and Studio export surfaces under
-`unsupported_surfaces`. Playlist-conditioned generation is implemented as
+social/profile/project/video surfaces, and Studio export surfaces under
+`unsupported_surfaces`. The current Voice verification protocol is confirmed
+separately in the August 24 lazy-chunk audit below. Playlist-conditioned generation is implemented as
 `sunox clip inspire`. Image upload is implemented for clip and playlist cover
 replacement. Fade is now exposed as `sunox clip fade`; reverse,
 crop/remove-section, and official download formats were added from the July 10,
@@ -271,10 +303,14 @@ the length limits below are the values returned by that response.
 Returns full account info, credits, plan, models, features, limits.
 
 ### POST /api/generate/cowrite-lyrics/
-Current standalone whole-lyrics generation route, confirmed in the July 26, 2026 Web bundle and a
-live authenticated request. The editor calls its empty state `fresh_generate`, but that value is
-not an API mode: the final request sends the user's request as `instruction` with
-`mode: "apply_user_request"`:
+Standalone whole-lyrics route captured in the July 26, 2026 Web bundle and a
+live authenticated request, then re-confirmed by the current first-party
+interaction chunk and one authorized minimal submission during the preceding
+August 24 protocol audit. That submission predates this 0.3.0 implementation
+pass; implementation and verification for this release made no account writes.
+The editor calls its empty UI state
+`fresh_generate`, but that value was not an API mode: the final request sent the
+user's request as `instruction` with `mode: "apply_user_request"`:
 
 ```json
 {
@@ -303,6 +339,14 @@ The synchronous response includes `edited_lyrics`, `lyrics_request_id`, `lyrics_
 The older `POST /api/generate/lyrics/` submit route no longer appears in the current Web bundle.
 `GET /api/generate/lyrics/{lyrics_id}` still exists for the separate lyrics-mashup polling flow;
 Sunox standalone lyrics generation does not use either legacy transport.
+
+The current Web bundle and live API expose
+`GET /api/generate/cowrite-lyrics/models/`. Each model includes `id`,
+`display_name`, `family`, and `supports_thinking`. Before using the current
+submit route, Sunox resolves the requested model against that
+current response, preserves the Web literal `default` selection when no model
+is requested, and refuses `--thinking` for a model that does not advertise
+support.
 
 ### POST /api/generate/v2-web/
 **Generate music**. Current CLI implementation posts to this route using
@@ -492,12 +536,13 @@ Current web remaster route, captured from
   "variation_category": "normal"
 }
 ```
-The July 15, 2026 first-party web bundle still posts the selected value as
-`variation_category`. Suno's current official UI exposes Subtle, Normal
-(default), and High; sunox sends the corresponding lowercase values
-`subtle|normal|high`. The existing HAR directly captures `normal`; the other
-two values were verified from the current first-party UI plus its direct
-pass-through code path, without submitting a paid remaster job.
+For `chirp-flounder` and `chirp-carp`, current Web posts the selected
+`variation_category`; Suno exposes Subtle, Normal (default), and High. The
+`chirp-bass` request omits that field entirely. Before submitting, current Web
+also requires a complete, non-trashed, non-infill source no longer than 960
+seconds whose server `action_config` exposes Remaster as visible and enabled.
+Sunox mirrors these gates and rejects an explicit `--variation` for
+`chirp-bass`.
 Response shape matches generation response with two submitted remaster clips,
 top-level `metadata`, `status`, `batch_size`, and `created_at`.
 
@@ -724,7 +769,7 @@ Body: {"playlist_id": "...", "name": "...", "description": "...", "image_url": "
 
 PATCH /api/playlist/v2/{playlist_id}
 Body for uploaded playlist covers:
-{"metadata":{"cover_url":"https://cdn2.suno.ai/image_<upload_id>.jpeg","cover_image_s3_id":"image_<upload_id>","cover_is_user_set":true}}
+{"metadata":{"cover_image_s3_id":"image_<upload_id>"}}
 
 POST /api/playlist/v2/{playlist_id}/tracks/add
 Body: {"clip_ids": ["..."]}
@@ -914,8 +959,9 @@ POST /api/gen/{clip_id}/convert_opus
 MP3 and M4A return a prepared download response with `download_url` and can be
 `processing`; WAV uses convert-then-poll for `wav_file_url`; OPUS reads an
 existing `opus_file_url` first and starts conversion only when absent. The CLI
-defaults to the existing `audio_url` MP3, while explicit
-`--format mp3|m4a|wav|opus` uses these official format routes. Preparation and
+uses the official prepared MP3 route by default, while
+`--format mp3|m4a|wav|opus` selects among these routes. `--no-convert` (and
+global `--read-only`) refuses a missing WAV/OPUS conversion. Preparation and
 edit-action polling use the configured `poll_timeout_secs` and
 `poll_interval_secs`; CDN file transfer has a bounded connection timeout but
 no total body deadline, while a 60-second no-progress timeout prevents a
@@ -923,23 +969,29 @@ connected but stalled response from hanging the CLI. WAV conversion is
 serialized as account-scoped mutations. OPUS checks for an existing file while
 holding that lock and only requests conversion when the URL is absent.
 
-### Studio multitrack stem export
+### Stored stem-result pages and separate Studio multitrack export
 Captured from `13suno-labs-nostudio-20260630.har` and the downloaded
 local artifact `测试描述模式 Stems (129BPM).zip`.
 
-The export flow is Studio-scoped and is not the same as ordinary clip audio
-download:
+The stored result-page lookup is now also confirmed in the current non-Studio
+stems modal and is not itself a Studio render:
 
 ```http
 GET /api/clip/{source_clip_id}/stems/pages
 ```
 
-Observed response:
+The older observed response was:
 ```json
 {"pages": 0}
 ```
 
-For each source/stem clip that participates in the render, the web calls:
+The current non-Studio modal follows that page count with
+`GET /api/clip/{source_clip_id}/stems?page=<zero-based page>` and reads the
+response `stems` array. The CLI exposes these two reads through
+`clip get-stems`; it does not start extraction. The following rights and render
+steps are the separate Studio-only export flow.
+
+For each source/stem clip that participates in the Studio render, the web calls:
 ```http
 POST /api/mango/rights
 Body: {"content_params":{"content_id":"<clip id>","content_type":"clip"}}
@@ -1138,7 +1190,7 @@ The CLI live-verified the generic `file_upload` flow on June 30, 2026.
 ### Step 1: Initialize audio upload
 ```
 POST /api/uploads/audio/
-Body: {"spec": {"extension": "mp3", "is_stem_mix": false, "upload_type": "file_upload"}}
+Body: {"extension": "mp3", "is_stem_mix": false, "upload_type": "file_upload"}
 ```
 
 Accepted `upload_type` enum values observed from Suno validation:
@@ -1166,7 +1218,7 @@ form `fields`. This request is not sent to Suno's API host.
 ### Step 3: Finish upload
 ```
 POST /api/uploads/audio/{upload_id}/upload-finish/
-Body: {"upload_type": "...", "upload_filename": "song.mp3"}
+Body: {"upload_type": "...", "upload_filename": "song.mp3", "agreed_to_vip_upload_terms": false}
 ```
 
 ### Step 4: Poll processing status
@@ -1200,76 +1252,965 @@ finish with
 `moderation_status: "approved"`. Clip cover replacement uses
 `POST /api/gen/{clip_id}/set_metadata/` with
 `{"image_url":"https://cdn2.suno.ai/image_<upload_id>.jpeg"}`. Playlist cover
-replacement uses the same CDN URL plus `cover_image_s3_id:
-"image_<upload_id>"` in the playlist v2 patch above. The legacy
+replacement extracts that upload identity and sends only
+`cover_image_s3_id: "image_<upload_id>"` in the playlist v2 patch above. The legacy
 `POST /api/playlist/set_metadata` `image_url` path can return `Failed to upload
 image` for freshly uploaded Suno images. Clip `remove_video_cover: true` was
 also live-verified through `POST /api/gen/{clip_id}/set_metadata/`.
 Related video upload routes also appear in the current bundle:
 - `POST /api/uploads/video/`
 
-## Voices / Persona Creation Flow (older capture, out of scope)
+## Voices / Persona Creation Flow (older capture, superseded)
 
-The older capture below showed a voice-persona flow. The current June 30, 2026
-non-Studio bundle scan did not find `/api/processed_clip/voice-vox-stem` or
-`/api/voice-verification/`. Treat those routes as stale or flow-specific. This
-workflow is not tracked as a current CLI gap.
+The older content-length-only capture originally left the Voice preprocessing
+bodies uncertain. The August 24 current-page lazy chunk
+`155krfj46sodd.js` now confirms the exact vocal processing, phrase,
+verification, polling, image-prompt, and final Persona bodies. The authoritative
+current contract is recorded in the dated audit below; do not use the former
+content-length guesses or the old fixed verification phrase.
 
-Full pipeline for creating a Voice persona from audio:
+## August 24, 2026: Advanced Stems, Voices, Custom Models, Lyrics 2.0, and Cover Art
 
-### Step 1: Upload initial voice sample
-The S3 presigned upload happens first (not captured here), then:
-```
-POST /api/uploads/audio/{upload_id}/upload-finish/
-```
-Response: `200 OK` (empty body, content-length: 2)
+This section is the implementation boundary for the four newer Pro surfaces
+audited on August 24. Evidence is labeled so that a route found in a bundle is
+not accidentally presented as a live mutation capture:
 
-### Step 2: Poll upload status
-```
-GET /api/uploads/audio/{upload_id}/
-```
-Response: JSON with processing status.
+- **LIVE-READ**: a safe authenticated read against the user's account. No
+  create, train, generate, download, archive, or delete action was submitted.
+- **CURRENT-BUNDLE**: code in the first-party `/create` HTML and JavaScript
+  chunks fetched on August 24 (the bundle reports deploy build `201f1db`),
+  including the current-page dynamic lazy chunk `155krfj46sodd.js`.
+- **OFFICIAL**: current Suno Help Center documentation.
+- **OLD/STALE**: an older HAR or bundle pointer that is useful for provenance
+  but is not enough to implement a current mutation.
+- **INFERENCE**: a conclusion derived from the preceding evidence, not an
+  observed request.
 
-### Step 3: Extract vocal stem
+The account read succeeded earlier in this audit and identified an active Pro
+plan with `get_stems`, `custom_models`, `generate_song_image`, and
+`generate_song_video` enabled. Two later repetitions failed while reading
+`/api/billing/info/` because the upstream connection reset. That does not
+change the successful entitlement read, but it reinforces the existing bounded
+retry requirement for idempotent reads. No private song/model names, balances,
+auth material, or other account-specific content is recorded here.
+
+### 1. Get Stems is still a `gen_stem` asynchronous operation
+
+**OFFICIAL.** [Advanced Stem Separation](https://help.suno.com/en/articles/12702337)
+currently distinguishes three workflows:
+
+- Pro and Premier: **Auto Split**, up to 12 stems, 50 credits.
+- Pro and Premier: **Split from Mix**, one selected target plus its complement,
+  10 credits for each extraction and 20 credits for the pair.
+- Premier only: **Advanced Split**, selection from nearly 100 instruments,
+  with the same 10-per-extraction / 20-per-pair pricing per stem.
+
+The same article warns that asking for an instrument that is not present may
+still consume credits. [Suno's download policy](https://help.suno.com/en/articles/13614785)
+says that starting September 3, 2026, a song and its stems count once per source
+song for download accounting; repeated downloads and alternate formats do not
+add another count, while failed or interrupted downloads do not count.
+
+**LIVE-READ / CURRENT-BUNDLE.** The Pro account has the `get_stems` plan
+feature. The menu also evaluates the per-clip `get_stems` action configuration,
+ownership, `status == "complete"`, not trashed, not a Suno Short, and download
+availability. The advanced-selection UI has an additional Premier/bypass gate;
+therefore Pro must not be offered arbitrary Advanced Split instruments merely
+because the canonical instrument catalogue exists in the bundle.
+
+**CURRENT-BUNDLE.** There is no distinct current first-load route such as
+`/api/edit/stems` for this operation. The current request builder still submits
+advanced separation through:
+
+```http
+POST /api/generate/v2-web/
 ```
+
+The stem-specific part of the normal generation body is:
+
+```json
+{
+  "task": "gen_stem",
+  "mv": "chirp-v3-0",
+  "continue_clip_id": "<source clip id>",
+  "stem_type_id": 91,
+  "stem_type_group_name": "<optional StemGroup>",
+  "stem_task": "<StemTask>",
+  "stem_name": "<optional canonical instrument name>",
+  "metadata": {
+    "is_remix": true
+  }
+}
+```
+
+The normal generation metadata (`transaction_uuid`,
+`create_session_token`, client surface, user tier, and so on) remains required
+by the shared builder. `GenStem` forces `mv: "chirp-v3-0"`; it is not a normal
+v5.5 song generation. Its response is the ordinary generation envelope:
+
+```json
+{
+  "id": "<request id>",
+  "clips": ["<normal clip objects>"],
+  "clip_review_prompt_id": "<optional>"
+}
+```
+
+Result clips are classified from `metadata.stem_task`,
+`metadata.stem_type_group_name`, and `metadata.stem_name` (falling back to the
+legacy `metadata.stem`). A result is a complement when
+`stem_task == "remove"` or its group is `Instrumental`; `Instrumental` resolves
+its base stem to `Lead Vocal`.
+
+The exact current `StemTask` values are:
+
+```text
+extract, remove, two, eight, twelve, add, dry, wet
+```
+
+The exact current `StemGroup` values are:
+
+```text
+Vocals, Backing_Vocals, Drums, Bass, Guitar, Keyboard, Percussion,
+Strings, Synth, FX, Brass, Woodwinds, Instrumental
+```
+
+Only `extract` and `remove` are classified as user-picked tasks. The current
+bundle contains 240 canonical stem names. Default group-to-name resolution is:
+
+| Group | Canonical default name |
+|---|---|
+| `Vocals` | `Lead Vocal` |
+| `Backing_Vocals` | `Backing Vocals` |
+| `Drums` | `Drum Kit` |
+| `Bass` | `Bass` |
+| `Guitar` | `Guitar` |
+| `Keyboard` | `Keyboards` |
+| `Percussion` | `Percussion` |
+| `Strings` | `String Section` |
+| `Synth` | `Synth` |
+| `FX` | `Sound Effects` |
+| `Brass` | `Brass Section` |
+| `Woodwinds` | `Woodwinds` |
+
+The 240-name catalogue is the protocol's canonical spelling source; a CLI
+should copy/generate it from captured evidence rather than accept a guessed
+free-form instrument and silently spend credits. Examples include
+`12-String Guitar`, `808`, `Acoustic Guitar`, `Backing Vocals`, `Drum Kit`,
+`Lead Vocal`, `String Section`, `Sound Effects`, `Synth`, and `Woodwinds`.
+
+**CURRENT-BUNDLE, current lazy modal.** The current `2jel9qnsyfn3j.js` stem
+modal confirms that every shown generation reference uses
+`StemTypeId.FX == 91`. Auto invokes the builder as group `Twelve`, task
+`twelve`, and expects banks of 12. Split from Mix invokes it with the selected
+group, task `extract`, an expected target/complement pair of 2, and first
+normalizes the selected group through the canonical `resolveExtractName`
+mapping above. The current CLI therefore does not accept a guessed free-form
+stem name. The Premier-only advanced loop also uses this same generation
+reference shape, but its broader 240-name selection remains intentionally
+unexposed to a Pro account.
+
+**Recovery boundary.** This is a credit-bearing asynchronous generation, not a
+pure file export. A lost response, invalid 2xx body, or disconnect after the
+request may mean that the job was accepted. Preserve the transaction UUID,
+recover via read-only request/clip/feed state, and never blindly replay. For
+Pro, a safe first implementation is limited to bundle-proven Auto Split and
+target/complement semantics; arbitrary Advanced Split must remain Premier-
+gated until its current selection-to-ID request is captured.
+
+### 2. Voices: complete current lazy-loaded workflow
+
+**OFFICIAL.** [Voices](https://help.suno.com/en/articles/11362369) supports
+three sources: a song already in the user's library, a real-time recording, or
+an uploaded recording. Upload/record input is described as 15 seconds to four
+minutes, with at most the best two minutes selected. If the source contains
+backing music, Suno extracts a vocal stem. The user then reads a displayed
+phrase and Suno compares both the voice and spoken words. The user may supply a
+name, image, and singer skill level, must affirm the rights, and must satisfy
+the age and geographic restrictions.
+
+[Voices FAQ](https://help.suno.com/en/articles/11362433) says Voices replace
+the old Create-menu Personas (Style Personas remain), require v5.5 for song
+creation, and recommend high Audio Influence. Only the Voice creator can create
+new songs with it; sharing/remixing has separate restrictions.
+
+**LIVE-READ.** The billing response exposes these server limits:
+
+```text
+audio_upload_limits: min 6 s, max 1800 s
+voice_record_limits: min 10 s, max 240 s
+voice_upload_limits: min 10 s, max 900 s
+```
+
+These are not identical to the 15-second/four-minute Voice workflow documented
+by the product. More importantly, the current bundle exports
+`VOX_MIN_SECONDS=10` and `VOX_MAX_SECONDS=240`, uses those constants in the
+active trimmer, and labels the maximum as four minutes. Its upload handler
+accepts a source at three seconds before opening that trimmer; for a source
+shorter than ten seconds the complete source is selected. Therefore the
+official “best two minutes” wording is stale relative to the current Web
+implementation: this CLI follows the current 3-second source / dynamic
+10-to-240-second trimmer behavior and still treats the server as authoritative.
+The UI is additionally gated by `voices-geo`, an underage check, and the
+`personas-audio-upload` availability flag.
+
+**CURRENT-BUNDLE, current-page lazy chunk.** The dynamically loaded
+`155krfj46sodd.js` chunk confirms the preprocessing and verification workflow
+that was absent from the first-load chunks.
+
+The singing/source sample is first trimmed locally. Only that trimmed buffer is
+converted to a WAV `File` and uploaded through the existing audio upload
+workflow with `type: "voice_recording"`; the original untrimmed audio is not
+uploaded. The client then requests vocal processing:
+
+```http
 POST /api/processed_clip/voice-vox-stem
-Content-Length: ~90 bytes
-```
-Extracts clean vocals from uploaded audio. Body likely: `{"upload_id": "<id>"}`.
-Called multiple times — once per upload (sample + verification).
+Content-Type: application/json
 
-### Step 4: Record & upload verification phrase
-User reads: "Listening to the melody of a gentle summer breeze"
-Second upload goes through the same upload-finish flow with a new upload_id.
-
-### Step 5: Voice verification
+{
+  "upload_id": "<voice source upload id>",
+  "vocal_start_s": 0,
+  "vocal_end_s": 120.0
+}
 ```
+
+`120.0` above is an illustrative numeric duration; the actual value is the
+selected duration rounded to two decimal places.
+
+The response fields required by the flow are `id` (the processed audio ID) and
+`voice_recording_id`. It polls the processed audio once per second, at most 120
+times:
+
+```http
+GET /api/processed_clip/{processed_clip_id}
+```
+
+`completed` and `complete` are terminal success values; `failed` and `error`
+are terminal failures. Exhausting 120 polls is a processing failure.
+
+The verification phrase is server-selected for the chosen language:
+
+```http
+GET /api/voice-verification/phrase/?language=<language code>
+```
+
+The flow requires both `phrase_text` for display and `phrase_id` for the later
+verification request. The exact language codes offered by this chunk are `en`,
+`es`, `fr`, `pt`, `de`, `ja`, `ko`, `zh`, `hi`, and `ru`. The UI records for
+15 seconds, converts the recording to WAV, and uploads it with
+`type: "voice_recording"`. It then creates the verification recording through
+the same processor with a distinct body:
+
+```http
+POST /api/processed_clip/voice-vox-stem
+Content-Type: application/json
+
+{
+  "upload_id": "<verification upload id>",
+  "recording_type": "verification"
+}
+```
+
+The required response field for this branch is `voice_recording_id`; it becomes
+`verification_recording_id` below. Voice/phrase comparison starts with:
+
+```http
 POST /api/voice-verification/
-Content-Length: 179 bytes
-```
-Verifies the voice matches. Body likely includes both upload IDs + verification text.
+Content-Type: application/json
 
-### Step 6: Create persona
+{
+  "voice_recording_id": "<processed singing/source recording id>",
+  "verification_recording_id": "<processed verification recording id>",
+  "phrase_id": "<phrase id>"
+}
 ```
+
+The initial response consumes `id`, `status`, and, on rejection,
+`rejection_reason`. When `status == "pending"`, the client polls at 1.5-second
+intervals up to 40 times:
+
+```http
+GET /api/voice-verification/{verification_id}
+```
+
+Any status other than `pending` stops polling. `approved` is success; the
+approved response `id` is retained as the final `verification_id`. The current
+UI recognizes `didnt_say_verification_phrase` as a specific rejection reason.
+Still pending after about 60 seconds is presented as a verification timeout.
+
+The generic, fully evidenced finalization call is:
+
+```http
 POST /api/persona/create/
-Content-Length: 47261 bytes (large — likely includes audio data as base64)
 ```
-Creates the voice persona from the verified audio clips.
 
-### Endpoints summary:
-- `POST /api/uploads/audio/{id}/upload-finish/` — mark upload complete
-- `GET /api/uploads/audio/{id}/` — poll upload processing
-- `POST /api/processed_clip/voice-vox-stem` — extract vocals
-- `POST /api/voice-verification/` — verify voice sample
-- `POST /api/persona/create/` — create voice persona (47KB payload)
+The body builder includes only fields whose values were provided:
 
-The generic audio upload flow above is current bundle evidence; voice-specific
-processing is not.
+```json
+{
+  "root_clip_id": "<optional clip id>",
+  "name": "<optional; empty is localized Untitled>",
+  "description": "<optional; empty becomes an empty string>",
+  "image_s3_id": "<optional>",
+  "is_public": "<optional boolean>",
+  "is_suno_persona": "<optional boolean>",
+  "persona_type": "<optional>",
+  "vox_audio_id": "<optional>",
+  "vocal_start_s": "<optional number>",
+  "vocal_end_s": "<optional number>",
+  "user_input_styles": "<optional>",
+  "source": "<optional>",
+  "singer_skill_level": "<optional>",
+  "clips": "<optional>",
+  "is_voice_recording": "<optional boolean>",
+  "voice_recording_id": "<optional>",
+  "verification_id": "<optional>"
+}
+```
+
+The client refuses to submit unless either `root_clip_id` is present or
+`is_voice_recording` is true. A successful response is a non-empty Persona/
+Voice object and causes the user's Persona list to be reset. HTTP 409 is
+interpreted as “already exists for clip,” which is also a useful recovery
+signal.
+
+The current Voice details screen invokes that builder with this narrower exact
+shape (fields marked optional are omitted when absent):
+
+```json
+{
+  "is_voice_recording": true,
+  "voice_recording_id": "<processed singing/source recording id>",
+  "name": "<trimmed non-empty name>",
+  "description": "<trimmed description or empty string>",
+  "is_public": false,
+  "persona_type": "vox",
+  "source": "<library_song or random_song>",
+  "user_input_styles": "<optional trimmed styles>",
+  "singer_skill_level": "<optional>",
+  "verification_id": "<optional approved verification id>",
+  "image_s3_id": "<optional image data URL>",
+  "vox_audio_id": "<optional completed processed audio id>",
+  "vocal_start_s": 0,
+  "vocal_end_s": 120.0
+}
+```
+
+`source` is `library_song` only for the lazy flow's `library` source value and
+`random_song` otherwise. The optional `vox_audio_id`, `vocal_start_s`, and
+`vocal_end_s` are added together after processed audio completes. The avatar
+editor can use `/api/gen/prompt_image/` as documented in the cover-media
+subsection; it downloads the returned image and converts it to a data URL
+before passing it as `image_s3_id`.
+
+The exact non-empty `singer_skill_level` choices emitted by the current UI are
+`Beginner`, `Intermediate`, `Advanced`, and `Professional`; Skip omits the
+field. As above, `120.0` is illustrative and the actual `vocal_end_s` is the
+selected duration rounded to two decimal places.
+
+The current input `maxLength` values are 80 UTF-16 code units for name, 256 for
+styles, and 2000 for description. When the `voices-biometric-consent` gate is
+enabled, all source choices remain disabled until the user explicitly consents
+to collection and processing of voice data that may be biometric under Suno's
+Terms and Privacy Policy. `voices-training-consent` changes the disclosed use
+text (including possible service/model training according to the user's
+choice), but does not add another checkbox or submit gate in this bundle.
+
+**CURRENT CLI BOUNDARY.** `voice create` accepts only structurally valid WAVs.
+Because the CLI does not silently re-encode or retain a second locally trimmed
+asset, the singing-sample WAV must already be trimmed: its actual duration,
+rounded to two decimal places, must equal `--sample-duration`. Before the first
+upload the CLI requires the active `persona` plan feature, refetches the
+selected language's current phrase and matches its exact ID, and separately
+requires rights, 18+/region/audio-upload eligibility, and biometric-processing
+confirmations. The latter flags are explicit user attestations because Statsig
+geo/age/consent state has no authenticated read API captured here; server-side
+checks remain authoritative. The processor poll is bounded to 1 second x 120,
+verification to 1.5 seconds x 40, and final Persona detail uses a short bounded
+read-only convergence poll. Every returned server identity is atomically
+written to a private managed checkpoint. The checkpoint is inspection
+evidence, not a verified resume command, so status/detail recovery is marked
+non-resumable unless an actual safe mutation is available.
+
+**Recovery boundary.** Every upload, processing, verification, and final-create
+step is a mutation boundary. Persist the returned upload, processed-audio,
+voice-recording, phrase, verification, and Persona IDs as they become known.
+After a lost processor response, inspect the upload/processed resource before
+re-uploading. After a lost verification POST response, an ID is unavailable,
+so do not record/re-submit automatically. After a lost final Persona response,
+recover through Persona list/detail and treat HTTP 409 as possible prior
+success before replaying. List/detail/manage operations continue to use the
+current Persona routes documented elsewhere.
+
+### 3. Custom Models and My Taste are separate features
+
+**OFFICIAL.** [Custom Models](https://help.suno.com/en/articles/11362497) is a
+Pro/Premier feature. The user can have up to three models, training needs at
+least six songs (library selection and bulk upload are supported), the user
+must own the rights, typical readiness is two to five minutes, and models are
+private. [The v5.5 overview](https://help.suno.com/en/articles/11362305)
+describes Custom Models as a way to personalize v5.5.
+
+**LIVE-READ / CURRENT-BUNDLE.** The account has `custom_models` enabled. The UI
+also requires the `custom-model-ui` gate. Current bundle validation requires at
+least six resolved clip IDs, a name of 1 to 16 characters, and no active uploads. It allows
+up to 100 selected songs in the normal flow (200 for an Artist-plan branch) and
+shows a 100-credit cost. The local UI contains experimental max-model branches
+(`unlimited`, otherwise 10 for one VIP branch, otherwise 3), but the official
+Pro/Premier limit is three and server/account state is authoritative.
+
+**EXPLICIT-ATTESTATION CLI BOUNDARY.** The bundle proves the `custom-model-ui`
+gate name, but this audit did not capture an authenticated API request/response
+field that exposes its value. `accessible_features: ["custom_models"]` therefore
+does not prove the second gate. Training requires both that live entitlement and
+`--confirm-ui-available`, which the user may pass only after visibly confirming
+that the current Suno Web account exposes Custom Model training. Without the flag
+the CLI sends no training POST. It does not guess a Statsig body; the Suno server
+remains authoritative for final eligibility and charging.
+
+Create training:
+
+```http
+POST /api/custom-model/create/
+Content-Type: application/json
+
+{
+  "clip_ids": ["<clip id>", "..."],
+  "name": "<trimmed name, fallback Custom Model>"
+}
+```
+
+The response field consumed by the client is the required top-level `id`. A
+successful submit invalidates both billing/subscription model data and
+pending-model state.
+
+Pending training state:
+
+```http
+GET /api/custom-model/pending/
+```
+
+```json
+{
+  "has_pending": true,
+  "pending_models": [
+    {"id": "<model id>", "name": "<model name>"}
+  ]
+}
+```
+
+Both fields are treated as optional (`false` and `[]` defaults). The query
+retries three times and polls every 15 seconds while pending rows exist or the
+query is in error. A `true -> false` transition invalidates billing data and
+shows the ready notification.
+
+After an accepted create/archive response, CLI business verification follows
+the same eventual-consistency boundary with a bounded 45-second, 15-second-
+interval read-only loop over pending and billing state. The write is issued
+exactly once; exhaustion preserves the operation/model IDs for later GET-only
+inspection.
+
+The Web action labeled Delete is an archive mutation for both active and
+pending rows:
+
+```http
+POST /api/custom-model/archive/
+Content-Type: application/json
+
+{"id": "<model id>"}
+```
+
+The current client does not inspect a response body before invalidating billing
+and pending state. Ready Custom Models are not returned by a separate list
+route in the current first-load bundle; they are model rows in
+`GET /api/billing/info/`. A `custom` badge alone is not an archive identity seam
+because a base model can also carry it. CLI archive accepts either an exact
+pending-model ID or a billing row whose exact `extra.id`, `chirp-custom...`
+external key, and `custom`/`training` badge agree; otherwise it fails closed.
+Selection uses the billing model's current `external_key`. No current separate
+detail, rename, restore, or hard-delete endpoint was found. Therefore “delete”
+should be named `archive` at the protocol layer and no claim of permanent
+deletion or recoverability should be made.
+
+**OFFICIAL / CURRENT-BUNDLE.** [My Taste](https://help.suno.com/en/articles/11362561)
+is available to all users and augments styles through the Magic Wand. It is not
+a Custom Model, does not train from selected clips, and has no Custom Model ID.
+Its independent settings contract is:
+
+```http
+GET /api/personalization/settings
+POST /api/personalization/settings
+```
+
+The GET response field used by the client is `styles_augmentation` (defaulting
+to true). The POST body is:
+
+```json
+{"styles_augmentation": true}
+```
+
+The UI updates optimistically, rolls back on error, and invalidates the setting
+after success. Personalized tag/style enhancement records personalization
+state in its own response/submission metadata; it does not attach a Custom
+Model to the training protocol.
+
+**Recovery boundary.** A missing model ID, unusable 2xx response, or transport
+failure after `custom-model/create` is ambiguous. Read pending state and then
+billing models before any replay. The same rule applies to archive: re-read
+pending and billing state first. Uploading training sources uses the existing
+upload mutation and its own recovery rules; completion of uploads does not
+prove training submit success.
+
+### 4. Lyrics Projects, selection rewrite, mashup, and cover media
+
+#### Lyrics Projects and the improved editor
+
+**CURRENT-BUNDLE.** Lyrics Projects are now the persisted backing store for
+saved Lyrics 2.0 drafts. The exact CRUD/flush contract is:
+
+```http
+GET    /api/lyrics-projects?limit=<default 50>&sort=<default updated_at>&cursor=<optional>
+POST   /api/lyrics-projects
+GET    /api/lyrics-projects/{project_id}
+PATCH  /api/lyrics-projects/{project_id}
+DELETE /api/lyrics-projects/{project_id}
+POST   /api/lyrics-projects/{project_id}/flush
+```
+
+List pagination appends `projects` until `next_cursor` is null. Create and
+rename truncate by Unicode code points to 200 characters:
+
+```json
+{"title": "<at most 200 characters>"}
+```
+
+Create, get, and patch return the project object. Fields consumed by the client
+are `id`, `title`, `lyrics`, `created_at`, and `updated_at`. Delete requires
+only an HTTP-success response. Flush accepts:
+
+```json
+{"lyrics": "<full current lyrics>"}
+```
+
+and returns at least `updated_at`; the browser may send it with Fetch
+`keepalive: true`. Manual-lyrics song generation may include
+`lyrics_project_id`, linking the generated song back to the saved project.
+Project CRUD/flush itself is persistence, not music generation.
+
+Selection rewrite/enhance is synchronous with a 30-second client timeout:
+
+```http
+POST /api/generate/lyrics-infill/
+```
+
+```json
+{
+  "prompt": "<instruction>",
+  "context_lyrics_prefix": "<text before selection>",
+  "context_lyrics_edit": "<selected text>",
+  "context_lyrics_suffix": "<text after selection>",
+  "create_session_token": "<session token>",
+  "title": "<title>"
+}
+```
+
+The response fields consumed are `generated_lyrics`, `lyrics_request_id`, and
+`lyrics_id`. HTTP 400 with detail `Lyrics too long to enhance.` has a dedicated
+error branch.
+
+Two-source lyrics mashup starts with:
+
+```http
+POST /api/generate/lyrics-mashup
+```
+
+```json
+{
+  "lyrics_a": "<first lyrics>",
+  "lyrics_b": "<second lyrics>",
+  "create_session_token": "<session token>",
+  "source": "create_ui"
+}
+```
+
+The reusable hook allows `source: null`; the two-clip helper uses the literal
+`create_ui`. The response fields consumed are `lyrics_request_id` and
+`mashup_id`. Poll the latter as `{lyrics_id}` every 2.5 seconds:
+
+```http
+GET /api/generate/lyrics/{lyrics_id}
+```
+
+Terminal `status` values are `complete` and `error`. Completion consumes
+`text`, `title`, and `id`; error consumes `error_message`. One helper bounds at
+60 polls (about 150 seconds), while the general hook cancels after 90 seconds,
+so a CLI should expose an explicit bounded wait rather than assume one global
+server timeout.
+
+**CURRENT CLI BOUNDARY.** `create --lyrics-project-id <id>` is accepted only
+with explicit custom lyrics. Before any generation write, Sunox performs an
+exact project GET and rejects an identity mismatch; the unchanged ID is then
+sent on the generation body. Lyrics mashup submission and observation are
+separate: the submit command waits on a configurable deadline (150 seconds by
+default, 2.5-second interval) unless `--no-wait` is given, while
+`mashup-status` only observes an already-known ID and never claims it submitted
+the job. On `mashup-status`, `--timeout` is valid only together with `--wait`.
+Transport ambiguity is not automatically replayed.
+
+**Recovery boundary.** Create/flush/rename/delete are account writes. If a
+flush response is lost, GET the project and compare the exact intended lyrics
+before retrying. If create loses its returned ID, list newest projects and
+compare stable fields rather than blindly creating duplicates. Mashup submit is
+ambiguous after send; poll a returned ID, and if no ID arrived do not replay
+without user confirmation because no client transaction UUID is present in
+this body.
+
+#### Song cover image and video generation
+
+**LIVE-READ / CURRENT-BUNDLE.** The Pro account has both
+`generate_song_image` and `generate_song_video`. The song action is named
+`generate_cover_art` and is limited to an owned, non-trashed clip plus its
+server-supplied action gate.
+
+For the direct image composition, that server-supplied action is the confirmed
+eligibility seam. A top-level `download_disabled_reason` belongs to download
+policy and must not override an explicitly enabled `generate_cover_art` action.
+
+**CURRENT-BUNDLE, current-page lazy chunk.** The direct prompt-image contract
+is fully confirmed in `155krfj46sodd.js`:
+
+```http
+POST /api/gen/prompt_image/
+Content-Type: application/json
+
+{"prompt": "<image description>"}
+```
+
+The response field consumed by the client is `image_url`:
+
+```json
+{"image_url": "<generated image URL>"}
+```
+
+The current Voice avatar UI limits the prompt to 200 characters and disables
+submit for an empty string. It uses the returned URL directly for preview,
+then fetches the image and converts it to a data URL for Voice finalization.
+For a song, this direct route composes with the independently live-verified
+metadata mutation:
+
+```http
+POST /api/gen/{clip_id}/set_metadata/
+Content-Type: application/json
+
+{"image_url": "<image_url returned by prompt_image>"}
+```
+
+This is the direct `prompt_image + set_metadata` path and is distinct from the
+new multi-result `SONG_COVER_ART` batch modal. The uploaded-image + S3 +
+`set_metadata` path documented above is a third variant that starts from local
+bytes rather than an AI prompt.
+
+**CURRENT-BUNDLE, new batch submit confirmed 2026-08-24.** Suno's official
+July 31 release note describes the current Web feature as iterative image
+editing from text or a dropped image, producing either an image or a video:
+<https://suno.com/release-notes/cover-art-improvements>. The exact transport is
+confirmed by the current `/create` deployment chain rather than inferred from
+that product description: `2y5thy224ncxq.js` loads the app-modal registry
+`09tvl580d4za9.js`; its `SONG_COVER_ART` entry resolves loader `150515` from
+`02jx6qed7xt_n.js`, which loads `3fb41b6lf417k.js`, `0td69sloxk6wz.js`,
+`25suq96jo2z-y.js`, and `3ywrez2jy646l.js`. The API hooks and exact request
+builders are in `0td69sloxk6wz.js`; the modal composition, model/cost selection,
+history, and apply workflow are in `3fb41b6lf417k.js` and
+`25suq96jo2z-y.js`.
+
+The song modal opens with `supportsVideo: true`, an owned clip ID, and fixed
+square output. Image generation submits:
+
+```http
+POST /api/video_gen/image/generate
+Content-Type: application/json
+```
+
+```json
+{
+  "generated_text_id": "<optional prior text-generation id>",
+  "prompt": "<trimmed prompt, hard-sliced to 800 UTF-16 code units>",
+  "clip_id": "<song clip id>",
+  "quantity": 2,
+  "image_gen_category": "<category returned by model-configs>",
+  "prompt_images": [
+    {"id": "<image id>", "type": "uploaded|generated|s3_filename"}
+  ],
+  "aspect_ratio": "1:1"
+}
+```
+
+`generated_text_id`, `image_gen_category`, `prompt_images`, and
+`aspect_ratio` are optional at the reusable hook layer and are omitted rather
+than sent as JSON `null`; the song modal supplies the category and `1:1`.
+`prompt_images` is omitted when empty. Local image attachments first use the
+already-confirmed `/api/uploads/image/` presigned upload workflow and then use
+`{"id":"<upload id>","type":"uploaded"}`. Iterating an existing generated
+result uses `type: "generated"`; an initial S3 filename derived from existing
+song art uses `type: "s3_filename"`. The current UI allows submission with
+either nonblank prompt text, at least one attached image, or a selected prompt
+suggestion. Image attachment count is one by default and four only when the
+server-delivered `MULTI_IMAGE_I2I_ENABLED` Web parameter is true.
+
+Video generation is a separate route and a different body:
+
+```http
+POST /api/video_gen/video/generate
+Content-Type: application/json
+```
+
+```json
+{
+  "generated_text_id": "<optional prior text-generation id>",
+  "prompt_start_image": {"id": "<image id>", "type": "uploaded|generated|s3_filename"},
+  "clip_id": "<song clip id>",
+  "prompt": "<prompt>",
+  "quantity": 2,
+  "video_gen_category": "<category returned by model-configs>",
+  "duration": 5,
+  "clip_start_time": 0.0,
+  "clip_end_time": 30.0,
+  "aspect_ratio": "1:1"
+}
+```
+
+The reusable hook omits absent optional fields. It defaults `quantity` to two
+and `duration` to five seconds. The song modal supplies its clip ID, the
+selected server category, `1:1`, and at most the first attached image as
+`prompt_start_image`. Allowed video durations are not a stable client enum:
+they come from the selected `/api/video_gen/model-configs` entry's
+`allowed_durations`, or `allowed_durations_with_image` when an image is
+attached. A model whose `image == "not_supported"` is excluded from the
+image-to-video choice.
+
+Both submit responses are batch handles. The client requires `batch_id` for
+polling and consumes `image_ids` from an image response or `video_ids` from a
+video response for event/result identity:
+
+```json
+{"batch_id":"<batch id>","image_ids":["<image id>"]}
+```
+
+```json
+{"batch_id":"<batch id>","video_ids":["<video id>"]}
+```
+
+Applying a selected batch result also differs by media type. For an image, the
+modal uses the generated image ID rather than copying its URL:
+
+```http
+POST /api/gen/{clip_id}/set_metadata/
+
+{
+  "cover_image": {"id": "<generated image id>", "type": "generated"},
+  "cover_art_session_id": "<client session UUID>"
+}
+```
+
+For a video, the polled/history item must contain `video_upload_id`; applying
+it sends:
+
+```http
+POST /api/gen/{clip_id}/set_metadata/
+
+{
+  "video_cover_upload_id": "<video_upload_id>",
+  "cover_art_session_id": "<client session UUID>"
+}
+```
+
+The video apply response is consumed for `image_url`, `video_cover_url`, and
+`preview_url`. The `cover_art_session_id` is generated client-side for event
+and workflow correlation; it is not a submit idempotency key.
+
+The optional prompt-enhancement call is not itself a media submit:
+
+```http
+POST /api/video_gen/text/generate
+```
+
+```json
+{
+  "clip_id": "<optional clip id>",
+  "target": "image|video",
+  "user_prompt": "<prompt>",
+  "image_url": "<optional image URL>",
+  "clip_start_time": 0.0,
+  "clip_end_time": 30.0,
+  "duration": 5
+}
+```
+
+The numeric timing fields in both examples are optional illustrative values,
+not fixed defaults; absent values are omitted.
+
+**CURRENT-BUNDLE, dynamic model and credit gates.** Categories must be fetched
+at runtime; they must not be hard-coded:
+
+```http
+GET  /api/video_gen/model-configs
+POST /api/video_gen/cost/image
+Body: {"image_gen_category":"<category>","prompt":""}
+POST /api/video_gen/cost/video
+Body: {"video_gen_category":"<category>","duration":<selected seconds>}
+```
+
+`model-configs` returns `image_model_categories` and
+`video_model_categories`; the UI consumes each entry's `category`,
+`display_name`, `description`, image-input support, and the video duration
+arrays described above. Both cost responses consume `cost` and optional
+`remaining_gens`. The submit hooks classify HTTP 402 as either
+`creation_limit_reached` or insufficient credits, HTTP 429 as rate limiting,
+and `error_type == "moderation_error"` as moderation rejection. These server
+responses remain authoritative even after a successful cost read.
+
+For a song, the Web entry point additionally requires that the session user
+owns the clip, the clip is not trashed, and the server-supplied
+`generate_cover_art` action is visible and not disabled. A 2026-08-24 read-only
+account check confirms that this Pro plan advertises both
+`generate_song_image` and `generate_song_video`; those account features do not
+replace the per-clip action check.
+
+**CURRENT-BUNDLE, new batch read/recovery side.** The first-load bundle
+confirms these new cover-art batch calls:
+
+```http
+POST /api/video_gen/pending_batches
+Body: {}
+```
+
+The response field is `batch_ids`. Each entry is a batch descriptor with at
+least `id` and `type`, not a bare string. The global notification path filters
+entries whose `type == "video"`; the cover-art library independently derives
+the same descriptor shape from history as
+`{"id":"<batch id>","type":"image|video"}` (normalizing the historical
+`image-to-video` type to `video`). The filtered descriptors are sent unchanged
+to:
+
+```http
+POST /api/video_gen/poll_batches
+Body: {"batch_ids": [{"id": "<batch id>", "type": "image|video"}]}
+```
+
+The response is:
+
+```json
+{
+  "batches": {
+    "<batch id>": [
+      {
+        "id": "<generated image or video id>",
+        "clip_id": "<source clip id>",
+        "type": "image|video|image-to-video",
+        "status": "processing|complete|error",
+        "url": "<optional completed media URL>",
+        "thumbnail_url": "<optional generated preview>",
+        "video_upload_id": "<optional ID used when applying a video cover>",
+        "start_frame_url": "<optional video start frame>",
+        "prompt": "<optional prompt>",
+        "gen_category": "<optional model category>",
+        "duration": 5
+      }
+    ]
+  }
+}
+```
+
+The global notifier polls every seven seconds and groups results by source
+`clip_id` and batch ID. The modal library uses a three-second poll. A batch is
+still processing while any item has `status == "processing"`; item terminal
+states are `complete` and `error`. Only completed items with a media URL enter
+the apply/download carousel. In addition to pending recovery, the current modal
+loads its batch history with:
+
+```http
+POST /api/video_gen/history
+Content-Type: application/json
+
+{
+  "clip_id": null,
+  "created_at_offset": null,
+  "favorites_only": false,
+  "media_type": null,
+  "limit": 20
+}
+```
+
+`created_at_offset` becomes the preceding page's last `created_at`; filters may
+set `favorites_only` and `media_type` to `image` or `video`. The response field
+is `history`. Each batch contains `batch_id`, `type`, `prompt`, `gen_category`,
+`created_at`, and `items`; the item fields consumed by the current client are
+the polling fields above plus `is_liked`, `clip_start_time`, and
+`clip_end_time`.
+
+It also exposes current generated-media library reads:
+
+```http
+GET /api/project/library/images?limit=30&cursor=<optional>
+GET /api/project/library/videos?limit=30&cursor=<optional>
+```
+
+Their response fields are respectively `images` / `videos` and
+`next_cursor`.
+
+The older non-AI song-video regeneration/download manager remains independently
+current:
+
+```http
+POST /api/video/generate/{clip_id}/
+GET  /api/video/generate/{clip_id}/status/
+```
+
+The POST has no request body used by the client. Status is polled every four
+seconds. `status == "complete"` is terminal success; the response fields used
+are `video_url` and `video_is_stale`. Exhausting the caller's bounded retry
+counter is reported as timeout.
+
+The current bundle/captured responses do not, however, expose an exact
+per-clip action name or ownership/download predicate that authorizes this old
+video POST. Knowing the route and the account-level `generate_song_video`
+feature is insufficient to prove a particular clip is eligible. The CLI thus
+keeps `clip video-status` as a bounded read-only surface and fail-closes
+`clip generate-video` before POST until that eligibility seam is captured; it
+does not guess an action name or interpret opaque ownership metadata.
+
+**CURRENT CLI IMPLEMENTATION.** `clip cover-art` now exposes dynamic model
+discovery, pending/history/status reads, distinct two-result image/video batch
+submits, and explicit image/video apply commands. Writes fail closed unless the
+JWT account subject exactly matches the clip `user_id`, the clip is explicitly
+non-trashed, `generate_cover_art` is visible and enabled, and the matching live
+plan feature is present. Image/video submits fetch live categories, allowed
+durations, and cost first; reject prompts at or beyond the Web's 800 UTF-16
+unit hard-slice boundary rather than silently changing caller text; validate the attachment shape;
+preserve the returned `batch_id` plus media IDs; and use bounded
+`poll_batches` recovery. Generation never auto-applies the first candidate.
+Apply requires the caller to provide that batch ID and first proves that the
+exact completed image ID or video upload ID belongs to the selected clip.
+No current submit body contains a client idempotency key, so a lost submit
+response is reported as ambiguous and is not replayed automatically.
+
+**Recovery boundary.** A lost `prompt_image` response is ambiguous because the
+image may already have been generated and the contract exposes no client
+transaction UUID; do not spend again automatically. Once `image_url` is known,
+a failed/lost metadata mutation must first be investigated by reading the clip
+and comparing its exact `image_url`. The current CLI marks that mutation
+non-resumable and does not promise that replaying even the metadata-only step is
+safe. A lost response
+after the older video POST is also ambiguous; GET status before replay. For the
+new batch system, pending-batch discovery and batch polling are the intended
+read-only recovery surfaces, but without a confirmed submit response it is not
+yet known whether they can always recover a batch whose submit response was
+lost.
 
 ## Key Insights for Rust CLI
 
 1. **Captcha/challenge is conditional** — `POST /api/c/check` with `{"ctype":"generation"}` decides whether generation needs a solved token. The CLI mirrors this preflight before `/api/generate/v2-web/` submits. If the preflight reports a challenge and stored Clerk refresh material exists, the CLI refreshes the JWT once and repeats the preflight. A remaining challenge is solved silently using hCaptcha/provider 1 or Cloudflare Turnstile/provider 2 according to `captcha_version`; normal authenticated submits omit `token` and `token_provider`.
-2. **Standalone lyrics uses Cowrite** — `POST /api/generate/cowrite-lyrics/` is synchronous and JWT-authenticated. The CLI does not promise that it is free or permanently exempt from server-side anti-abuse checks.
+2. **Standalone lyrics uses Cowrite** — both model discovery and the synchronous JWT-authenticated `POST /api/generate/cowrite-lyrics/` body/response are current-confirmed by the August 24 interaction chunk and a minimal submission. The CLI does not promise that it is free or permanently exempt from server-side anti-abuse checks.
 3. **JWT refresh** — need Clerk cookie exchange or session keepalive
 4. **Browser-token header** — dynamically generated from current timestamp, base64-encoded
 5. **Browser environment** — browser-cookie extraction records a stable browser source id (`chrome`, `arc`, `brave`, `firefox`, or `edge`) and best-effort public profile settings such as `accept-language`; it does not fabricate a `user-agent` from that label. Interactive login captures stable runtime headers such as `user-agent` and `accept-language`. API calls reuse captured fields independently, derive Chromium client hints from the selected `user-agent`, send the stable browser fetch metadata headers observed in HARs, and fall back field-by-field when unavailable.

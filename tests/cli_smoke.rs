@@ -24,6 +24,26 @@ fn with_isolated_home<'a>(cmd: &'a mut Command, test_home: &Path) -> &'a mut Com
         .env_remove("SUNOX_CHALLENGE_BROWSER")
 }
 
+fn write_pcm_wav(path: &Path, seconds: u32) {
+    let sample_rate = 8_000_u32;
+    let data_len = sample_rate.checked_mul(seconds).expect("fixture duration");
+    let mut wav = Vec::with_capacity(44 + data_len as usize);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16_u32.to_le_bytes());
+    wav.extend_from_slice(&1_u16.to_le_bytes());
+    wav.extend_from_slice(&1_u16.to_le_bytes());
+    wav.extend_from_slice(&sample_rate.to_le_bytes());
+    wav.extend_from_slice(&sample_rate.to_le_bytes());
+    wav.extend_from_slice(&1_u16.to_le_bytes());
+    wav.extend_from_slice(&8_u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.resize(44 + data_len as usize, 128);
+    std::fs::write(path, wav).expect("WAV fixture");
+}
+
 #[test]
 fn help_lists_codex_style_commands() {
     let mut cmd = Command::cargo_bin("sunox").expect("binary");
@@ -40,12 +60,14 @@ fn help_lists_codex_style_commands() {
         .stdout(predicate::str::contains("download"))
         .stdout(predicate::str::contains("add"))
         .stdout(predicate::str::contains("clip"))
+        .stdout(predicate::str::contains("capabilities"))
         .stdout(predicate::str::contains("login"))
         .stdout(predicate::str::contains("logout"))
         .stdout(predicate::str::contains("doctor"))
         .stdout(predicate::str::contains("install-browser-extension"))
         .stdout(predicate::str::contains("-c, --config <key=value>"))
         .stdout(predicate::str::contains("--parallel"))
+        .stdout(predicate::str::contains("--read-only"))
         .stdout(predicate::str::contains("generate").not());
 }
 
@@ -130,28 +152,33 @@ fn create_help_accepts_prompt_argument() {
         )
         .stdout(predicate::str::contains("--title"))
         .stdout(predicate::str::contains("--tags"))
+        .stdout(predicate::str::contains("--enhance-tags"))
         .stdout(predicate::str::contains("--captcha"));
 }
 
 #[test]
-fn create_help_exposes_the_current_free_model() {
+fn create_help_exposes_dynamic_account_model_selection() {
     let mut cmd = Command::cargo_bin("sunox").expect("binary");
 
     cmd.args(["create", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("v4.5-all"));
+        .stdout(predicate::str::contains(
+            "Generation model display name, external key, or account model ID",
+        ))
+        .stdout(predicate::str::contains("--duration"));
 }
 
 #[test]
-fn cover_help_exposes_the_current_free_model_override() {
+fn cover_help_exposes_dynamic_account_model_selection() {
     let mut cmd = Command::cargo_bin("sunox").expect("binary");
 
     cmd.args(["clip", "cover", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("v5.5"))
-        .stdout(predicate::str::contains("v4.5-all"));
+        .stdout(predicate::str::contains(
+            "Cover model display name, external key, or account model ID",
+        ));
 }
 
 #[test]
@@ -176,6 +203,7 @@ fn clip_help_groups_clip_subcommands() {
         .success()
         .stdout(predicate::str::contains("Manage clips"))
         .stdout(predicate::str::contains("list"))
+        .stdout(predicate::str::contains("actions"))
         .stdout(predicate::str::contains("status"))
         .stdout(predicate::str::contains("download"))
         .stdout(predicate::str::contains("upload"))
@@ -193,8 +221,20 @@ fn inspire_help_exposes_only_the_live_captured_inputs() {
         .stdout(predicate::str::contains("--title"))
         .stdout(predicate::str::contains("--tags"))
         .stdout(predicate::str::contains("--lyrics-file"))
+        .stdout(predicate::str::contains("--audio-influence"))
         .stdout(predicate::str::contains("--model").not())
         .stdout(predicate::str::contains("--instrumental").not());
+}
+
+#[test]
+fn lyrics_help_exposes_discovered_model_controls() {
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    cmd.args(["lyrics", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--model"))
+        .stdout(predicate::str::contains("--thinking"));
 }
 
 #[test]
@@ -400,6 +440,70 @@ fn persona_create_is_private_unless_public_is_explicit() {
         .success()
         .stdout(predicate::str::contains("--public"))
         .stdout(predicate::str::contains("--private").not());
+}
+
+#[test]
+fn voice_help_exposes_read_and_verified_private_create_commands() {
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    cmd.args(["voice", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("phrase"))
+        .stdout(predicate::str::contains("processed-status"))
+        .stdout(predicate::str::contains("verification-status"))
+        .stdout(predicate::str::contains("create"));
+
+    let mut create = Command::cargo_bin("sunox").expect("binary");
+    create
+        .args(["voice", "create", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--sample <PATH>"))
+        .stdout(predicate::str::contains("--verification <PATH>"))
+        .stdout(predicate::str::contains("--phrase-id"))
+        .stdout(predicate::str::contains("--sample-duration"))
+        .stdout(predicate::str::contains("--confirm-rights"))
+        .stdout(predicate::str::contains("--confirm-eligibility"))
+        .stdout(predicate::str::contains("--confirm-biometric-consent"))
+        .stdout(predicate::str::contains("--public").not());
+}
+
+#[test]
+fn read_only_blocks_voice_creation_before_auth_or_account_writes() {
+    let test_home = isolated_test_home("sunox-cli-voice-read-only-test");
+    let sample = test_home.join("sample.wav");
+    let verification = test_home.join("verification.wav");
+    write_pcm_wav(&sample, 30);
+    write_pcm_wav(&verification, 15);
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    with_isolated_home(&mut cmd, &test_home)
+        .args([
+            "--read-only",
+            "voice",
+            "create",
+            "--sample",
+            sample.to_str().expect("sample path"),
+            "--verification",
+            verification.to_str().expect("verification path"),
+            "--phrase-id",
+            "phrase-1",
+            "--sample-duration",
+            "30",
+            "--name",
+            "My Voice",
+            "--confirm-rights",
+            "--confirm-eligibility",
+            "--confirm-biometric-consent",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--read-only blocks Suno account mutations",
+        ));
+
+    let _ = std::fs::remove_dir_all(test_home);
 }
 
 #[test]
@@ -864,6 +968,32 @@ fn inspire_rejects_out_of_range_weirdness_before_auth() {
 }
 
 #[test]
+fn inspire_rejects_out_of_range_audio_influence_before_auth() {
+    let test_home = isolated_test_home("sunox-cli-invalid-inspire-audio-control-test");
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    with_isolated_home(&mut cmd, &test_home)
+        .args([
+            "clip",
+            "inspire",
+            "clip-a",
+            "--title",
+            "Title",
+            "--tags",
+            "pop",
+            "--lyrics",
+            "hello",
+            "--audio-influence",
+            "101",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("\"code\": \"config_error\""))
+        .stderr(predicate::str::contains("--audio-influence"));
+}
+
+#[test]
 fn extend_rejects_non_finite_timestamp_before_auth() {
     let test_home = isolated_test_home("sunox-cli-invalid-extend-timestamp-test");
     let mut cmd = Command::cargo_bin("sunox").expect("binary");
@@ -928,7 +1058,36 @@ fn top_level_download_help_is_user_facing() {
         .stdout(predicate::str::contains("--output"))
         .stdout(predicate::str::contains("--force"))
         .stdout(predicate::str::contains("--format"))
+        .stdout(predicate::str::contains("--no-convert"))
         .stdout(predicate::str::contains("--video"));
+}
+
+#[test]
+fn read_only_blocks_a_mutation_before_authentication() {
+    let test_home = isolated_test_home("sunox-cli-read-only-mutation-test");
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    with_isolated_home(&mut cmd, &test_home)
+        .args(["clip", "like", "clip-a", "--read-only", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("\"code\": \"config_error\""))
+        .stderr(predicate::str::contains("--read-only"))
+        .stderr(predicate::str::contains("auth_missing").not());
+}
+
+#[test]
+fn read_only_blocks_generation_before_preflight_or_authentication() {
+    let test_home = isolated_test_home("sunox-cli-read-only-generation-test");
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    with_isolated_home(&mut cmd, &test_home)
+        .args(["create", "a short piano theme", "--read-only", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("\"code\": \"config_error\""))
+        .stderr(predicate::str::contains("--read-only"))
+        .stderr(predicate::str::contains("auth_missing").not());
 }
 
 #[test]
@@ -1079,8 +1238,8 @@ fn config_set_persists_in_isolated_home() {
 }
 
 #[test]
-fn removed_v2_config_recovers_and_can_be_replaced_through_the_cli() {
-    let test_home = isolated_test_home("sunox-cli-removed-model-recovery");
+fn live_v2_config_is_preserved_and_can_be_replaced_through_the_cli() {
+    let test_home = isolated_test_home("sunox-cli-v2-model-preservation");
     let config_dir = test_home.join(".config").join("sunox");
     std::fs::create_dir_all(&config_dir).expect("config directory");
     let config_path = config_dir.join("config.toml");
@@ -1092,21 +1251,21 @@ fn removed_v2_config_recovers_and_can_be_replaced_through_the_cli() {
         .args(["config", "show", "--json"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"default_model\": \"auto\""))
-        .stderr(predicate::str::contains("was removed"));
+        .stdout(predicate::str::contains(
+            "\"default_model\": \"chirp-v2-xxl-alpha\"",
+        ))
+        .stderr(predicate::str::contains("was removed").not());
 
     let mut set = Command::cargo_bin("sunox").expect("binary");
     with_isolated_home(&mut set, &test_home)
         .args(["config", "set", "default_model", "v5.5", "--json"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "\"default_model\": \"chirp-fenix\"",
-        ));
+        .stdout(predicate::str::contains("\"default_model\": \"v5.5\""));
 
     let persisted = std::fs::read_to_string(config_path).expect("updated config");
-    assert!(persisted.contains("default_model = \"chirp-fenix\""));
-    assert!(!persisted.contains("v2"));
+    assert!(persisted.contains("default_model = \"v5.5\""));
+    assert!(!persisted.contains("chirp-v2-xxl-alpha"));
 }
 
 #[test]
@@ -1138,7 +1297,7 @@ fn config_show_applies_sunox_env_overrides() {
 }
 
 #[test]
-fn config_set_normalizes_default_model_version() {
+fn config_set_preserves_default_model_display_selector() {
     let test_home = isolated_test_home("sunox-cli-model-config-test");
 
     let mut cmd = Command::cargo_bin("sunox").expect("binary");
@@ -1146,9 +1305,7 @@ fn config_set_normalizes_default_model_version() {
         .args(["config", "set", "default_model", "v5.5", "--json"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "\"default_model\": \"chirp-fenix\"",
-        ));
+        .stdout(predicate::str::contains("\"default_model\": \"v5.5\""));
 }
 
 #[test]
@@ -1365,9 +1522,7 @@ fn global_config_override_applies_without_persisting() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "\"default_model\": \"chirp-crow\"",
-        ))
+        .stdout(predicate::str::contains("\"default_model\": \"v5\""))
         .stdout(predicate::str::contains("\"serial_mutations\": false"));
 
     let mut show = Command::cargo_bin("sunox").expect("binary");
@@ -1412,12 +1567,8 @@ fn agent_info_reports_submit_wait_download_workflow() {
         .stdout(predicate::str::contains("do not pass --parallel"))
         .stdout(predicate::str::contains("\"audio_analysis\""))
         .stdout(predicate::str::contains("\"download_formats\""))
-        .stdout(predicate::str::contains(
-            "supports explicit --format mp3|m4a|wav|opus",
-        ))
-        .stdout(predicate::str::contains(
-            "Suno Web exposes Pro download choices",
-        ))
+        .stdout(predicate::str::contains("official prepared MP3 endpoint"))
+        .stdout(predicate::str::contains("Suno Web exposes Pro choices"))
         .stdout(predicate::str::contains("WAV"))
         .stdout(predicate::str::contains("do not publish"))
         .stdout(predicate::str::contains("destructive commands require"))
@@ -1437,11 +1588,9 @@ fn agent_info_reports_submit_wait_download_workflow() {
             "poll until the requested fields are visible",
         ))
         .stdout(predicate::str::contains("stream the file to S3"))
+        .stdout(predicate::str::contains("partial or ambiguous mutation"))
         .stdout(predicate::str::contains(
-            "partial mutation or partial download",
-        ))
-        .stdout(predicate::str::contains(
-            "not the same as Suno Web Pro Get Stems export",
+            "clip get-stems` reads or downloads existing stem banks",
         ))
         .stdout(predicate::str::contains("sunox download <clip_id>"))
         .stdout(predicate::str::contains(
@@ -1711,4 +1860,140 @@ fn config_check_reports_corrupt_auth_consistently_in_json() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("\"code\": \"config_error\""));
+}
+
+#[test]
+fn read_only_blocks_custom_project_and_visual_mutations_before_authentication() {
+    let test_home = isolated_test_home("sunox-new-mutation-read-only-test");
+    let commands = [
+        vec![
+            "--read-only",
+            "models",
+            "custom",
+            "train",
+            "--name",
+            "My Sound",
+            "--confirm-rights",
+            "--confirm-ui-available",
+            "clip-1",
+            "clip-2",
+            "clip-3",
+            "clip-4",
+            "clip-5",
+            "clip-6",
+            "--json",
+        ],
+        vec![
+            "--read-only",
+            "lyrics",
+            "projects",
+            "create",
+            "--title",
+            "Draft",
+            "--json",
+        ],
+        vec![
+            "--read-only",
+            "clip",
+            "generate-image",
+            "clip-1",
+            "--prompt",
+            "neon rain",
+            "--json",
+        ],
+        vec!["--read-only", "clip", "generate-video", "clip-1", "--json"],
+        vec![
+            "--read-only",
+            "clip",
+            "cover-art",
+            "image",
+            "clip-1",
+            "--prompt",
+            "neon rain",
+            "--no-wait",
+            "--json",
+        ],
+        vec![
+            "--read-only",
+            "clip",
+            "cover-art",
+            "apply-image",
+            "clip-1",
+            "batch-image",
+            "image-1",
+            "--json",
+        ],
+    ];
+
+    for arguments in commands {
+        let mut cmd = Command::cargo_bin("sunox").expect("binary");
+        with_isolated_home(&mut cmd, &test_home)
+            .args(arguments)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("\"code\": \"config_error\""))
+            .stderr(predicate::str::contains("--read-only"))
+            .stderr(predicate::str::contains("auth_missing").not());
+    }
+}
+
+#[test]
+fn cover_art_help_exposes_recovery_and_explicit_apply_commands() {
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+    cmd.args(["clip", "cover-art", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("models"))
+        .stdout(predicate::str::contains("pending"))
+        .stdout(predicate::str::contains("history"))
+        .stdout(predicate::str::contains("image"))
+        .stdout(predicate::str::contains("video"))
+        .stdout(predicate::str::contains("status"))
+        .stdout(predicate::str::contains("apply-image"))
+        .stdout(predicate::str::contains("apply-video"));
+}
+
+#[test]
+fn custom_model_training_without_ui_attestation_stops_before_authentication() {
+    let test_home = isolated_test_home("sunox-custom-model-ui-attestation-test");
+    let mut cmd = Command::cargo_bin("sunox").expect("binary");
+
+    with_isolated_home(&mut cmd, &test_home)
+        .args([
+            "models",
+            "custom",
+            "train",
+            "--name",
+            "My Sound",
+            "--confirm-rights",
+            "clip-1",
+            "clip-2",
+            "clip-3",
+            "clip-4",
+            "clip-5",
+            "clip-6",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--confirm-ui-available"))
+        .stderr(predicate::str::contains("auth_missing").not());
+}
+
+#[test]
+fn custom_archive_and_lyrics_project_delete_require_confirmation_before_auth() {
+    let test_home = isolated_test_home("sunox-new-delete-confirmation-test");
+    for arguments in [
+        vec!["models", "custom", "archive", "model-1", "--json"],
+        vec!["lyrics", "projects", "delete", "project-1", "--json"],
+    ] {
+        let mut cmd = Command::cargo_bin("sunox").expect("binary");
+        with_isolated_home(&mut cmd, &test_home)
+            .args(arguments)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("\"code\": \"config_error\""))
+            .stderr(predicate::str::contains("requires -y/--yes"))
+            .stderr(predicate::str::contains("auth_missing").not());
+    }
 }

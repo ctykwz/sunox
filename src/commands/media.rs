@@ -12,7 +12,7 @@ struct CompletedDownload {
     path: String,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 struct DownloadWarning {
     clip_id: String,
     field: &'static str,
@@ -25,7 +25,9 @@ struct DownloadFileOptions<'a> {
     video: bool,
     force: bool,
     quiet: bool,
-    source: AudioDownloadSource,
+    format: DownloadFormat,
+    no_convert: bool,
+    skip_timed_lyrics: bool,
 }
 
 pub async fn download(args: DownloadArgs, ctx: &AppContext) -> Result<(), CliError> {
@@ -41,14 +43,22 @@ pub async fn download(args: DownloadArgs, ctx: &AppContext) -> Result<(), CliErr
     let mut completed = Vec::new();
     let mut warnings = Vec::new();
     let output_dir = args.output.as_deref().unwrap_or(&ctx.config.output_dir);
-    let source = audio_download_source(args.format);
+    let format = audio_download_format(args.format);
+    let extension = if args.video {
+        "mp4"
+    } else {
+        format.extension()
+    };
+    preflight_download_batch(&clips, output_dir, extension, args.force).await?;
     for (index, clip) in clips.iter().enumerate() {
         let options = DownloadFileOptions {
             output_dir,
             video: args.video,
             force: args.force,
             quiet: ctx.quiet,
-            source,
+            format,
+            no_convert: args.no_convert,
+            skip_timed_lyrics: args.skip_timed_lyrics,
         };
         let (path, warning) = match download_file(clip, options, ctx, &client).await {
             Ok(result) => result,
@@ -87,6 +97,18 @@ pub async fn download(args: DownloadArgs, ctx: &AppContext) -> Result<(), CliErr
     Ok(())
 }
 
+async fn preflight_download_batch(
+    clips: &[crate::api::types::Clip],
+    output_dir: &str,
+    extension: &str,
+    force: bool,
+) -> Result<(), CliError> {
+    for clip in clips {
+        media::download::preflight_clip_download(clip, output_dir, extension, force).await?;
+    }
+    Ok(())
+}
+
 async fn download_file(
     clip: &crate::api::types::Clip,
     options: DownloadFileOptions<'_>,
@@ -98,50 +120,42 @@ async fn download_file(
             .await
             .map(|path| (path, None));
     }
-    match options.source {
-        AudioDownloadSource::ClipAudioUrl => {
-            let url = clip
-                .audio_url
-                .as_deref()
-                .ok_or_else(|| CliError::Download("no audio URL available".into()))?;
-            download_mp3_with_lyrics(
-                clip,
-                options.output_dir,
-                url,
-                options.force,
-                options.quiet,
-                ctx,
-                client,
-            )
-            .await
-        }
-        AudioDownloadSource::OfficialFormat(format) => {
-            let url = official_download_url(ctx, client, &clip.id, format).await?;
-            if format == DownloadFormat::Mp3 {
-                download_mp3_with_lyrics(
-                    clip,
-                    options.output_dir,
-                    &url,
-                    options.force,
-                    options.quiet,
-                    ctx,
-                    client,
-                )
-                .await
-            } else {
-                media::download_clip_url(
-                    clip,
-                    options.output_dir,
-                    &url,
-                    format.extension(),
-                    options.force,
-                    options.quiet,
-                )
-                .await
-                .map(|path| (path, None))
-            }
-        }
+    media::download::preflight_clip_download(
+        clip,
+        options.output_dir,
+        options.format.extension(),
+        options.force,
+    )
+    .await?;
+    let url =
+        official_download_url(ctx, client, &clip.id, options.format, options.no_convert).await?;
+    if should_fetch_timed_lyrics(options.format, options.skip_timed_lyrics) {
+        download_mp3_with_lyrics(
+            clip,
+            options.output_dir,
+            &url,
+            options.force,
+            options.quiet,
+            ctx,
+            client,
+        )
+        .await
+    } else {
+        media::download_clip_url(
+            clip,
+            options.output_dir,
+            &url,
+            options.format.extension(),
+            options.force,
+            options.quiet,
+        )
+        .await
+        .map(|path| (path, None))
     }
+}
+
+fn should_fetch_timed_lyrics(format: DownloadFormat, skip_timed_lyrics: bool) -> bool {
+    format == DownloadFormat::Mp3 && !skip_timed_lyrics
 }
 
 async fn download_mp3_with_lyrics(
@@ -155,16 +169,22 @@ async fn download_mp3_with_lyrics(
 ) -> Result<(String, Option<DownloadWarning>), CliError> {
     let staged = media::stage_clip_url(clip, output_dir, url, "mp3", force, quiet).await?;
     let plain_lyrics = clip_alignment_lyrics(clip);
-    let enable_augmentation = !clip_has_concat_history(clip);
-    let (aligned, warning) = match client
-        .aligned_lyrics(
-            &clip.id,
-            plain_lyrics,
-            enable_augmentation,
-            configured_polling(ctx),
-        )
-        .await
-    {
+    let aligned_result = if ctx.read_only {
+        client
+            .existing_aligned_lyrics(&clip.id, configured_polling(ctx))
+            .await
+    } else {
+        let _mutation_guard = ctx.acquire_mutation_lock_for(&client.auth_state_snapshot())?;
+        client
+            .aligned_lyrics(
+                &clip.id,
+                plain_lyrics,
+                !clip_has_concat_history(clip),
+                configured_polling(ctx),
+            )
+            .await
+    };
+    let (aligned, warning) = match aligned_result {
         Ok(aligned) => (Some(aligned), None),
         Err(error) if error.is_auth_or_rate_limit() => return Err(error),
         Err(error) => {
@@ -218,6 +238,9 @@ fn partial_download_error(
         "code": error.error_code(),
         "message": error.to_string(),
     });
+    if let Some(details) = error.details() {
+        failed["details"] = details.clone();
+    }
     if let Some(path) = partial_output_path {
         failed["output_path"] = serde_json::Value::String(path.to_string());
     }
@@ -236,17 +259,8 @@ fn partial_download_error(
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AudioDownloadSource {
-    ClipAudioUrl,
-    OfficialFormat(DownloadFormat),
-}
-
-fn audio_download_source(format: Option<DownloadFormat>) -> AudioDownloadSource {
-    match format {
-        Some(format) => AudioDownloadSource::OfficialFormat(format),
-        None => AudioDownloadSource::ClipAudioUrl,
-    }
+fn audio_download_format(format: Option<DownloadFormat>) -> DownloadFormat {
+    format.unwrap_or(DownloadFormat::Mp3)
 }
 
 async fn official_download_url(
@@ -254,13 +268,19 @@ async fn official_download_url(
     client: &crate::api::SunoClient,
     clip_id: &str,
     format: DownloadFormat,
+    no_convert: bool,
 ) -> Result<String, CliError> {
     let polling = configured_polling(ctx);
-    if format.requires_mutation_lock() {
+    let allow_conversion = !no_convert && !ctx.read_only;
+    if format.requires_mutation_lock() && allow_conversion {
         let _mutation_guard = ctx.acquire_mutation_lock_for(&client.auth_state_snapshot())?;
         client.download_url(clip_id, format, polling).await
-    } else {
+    } else if allow_conversion {
         client.download_url(clip_id, format, polling).await
+    } else {
+        client
+            .download_url_with_conversion_policy(clip_id, format, polling, false)
+            .await
     }
 }
 
@@ -342,15 +362,21 @@ pub async fn timed_lyrics(args: TimedLyricsArgs, ctx: &AppContext) -> Result<(),
     let ids = vec![args.id.clone()];
     let clips = tasks::require_found_clips(&ids, client.get_clips(&ids).await?)?;
     let clip = &clips[0];
-    let enable_augmentation = !clip_has_concat_history(clip);
-    let words = client
-        .aligned_lyrics(
-            &args.id,
-            clip_alignment_lyrics(clip),
-            enable_augmentation,
-            configured_polling(ctx),
-        )
-        .await?;
+    let words = if ctx.read_only {
+        client
+            .existing_aligned_lyrics(&args.id, configured_polling(ctx))
+            .await?
+    } else {
+        let _mutation_guard = ctx.acquire_mutation_lock_for(&client.auth_state_snapshot())?;
+        client
+            .aligned_lyrics(
+                &args.id,
+                clip_alignment_lyrics(clip),
+                !clip_has_concat_history(clip),
+                configured_polling(ctx),
+            )
+            .await?
+    };
     match render {
         TimedLyricsRender::Json => output::json::success(&words),
         TimedLyricsRender::Lrc => {
@@ -441,23 +467,49 @@ mod tests {
     use crate::output::OutputFormat;
 
     use super::{
-        AudioDownloadSource, TimedLyricsRender, audio_download_source, clip_alignment_lyrics,
-        json_value_is_truthy, partial_download_error, timed_lyrics_render,
+        DownloadFileOptions, TimedLyricsRender, audio_download_format, clip_alignment_lyrics,
+        download_file, json_value_is_truthy, partial_download_error, preflight_download_batch,
+        should_fetch_timed_lyrics, timed_lyrics_render,
     };
 
+    fn clip() -> crate::api::types::Clip {
+        serde_json::from_value(serde_json::json!({
+            "id": "clip-a",
+            "title": "Track",
+            "status": "complete",
+            "model_name": "chirp-fenix",
+            "created_at": "2026-08-24T00:00:00Z"
+        }))
+        .expect("clip fixture")
+    }
+
+    fn clip_with_id(id: &str) -> crate::api::types::Clip {
+        let mut clip = clip();
+        clip.id = id.to_owned();
+        clip
+    }
+
+    fn context() -> crate::app::AppContext {
+        crate::app::AppContext {
+            fmt: OutputFormat::Json,
+            json_explicit: true,
+            quiet: true,
+            parallel: true,
+            read_only: false,
+            config: crate::core::AppConfig::default(),
+        }
+    }
+
     #[test]
-    fn default_audio_download_uses_existing_clip_cdn_url() {
-        assert_eq!(
-            audio_download_source(None),
-            AudioDownloadSource::ClipAudioUrl
-        );
+    fn default_audio_download_uses_official_mp3_route() {
+        assert_eq!(audio_download_format(None), DownloadFormat::Mp3);
     }
 
     #[test]
     fn explicit_audio_format_uses_official_download_route() {
         assert_eq!(
-            audio_download_source(Some(DownloadFormat::Wav)),
-            AudioDownloadSource::OfficialFormat(DownloadFormat::Wav)
+            audio_download_format(Some(DownloadFormat::Wav)),
+            DownloadFormat::Wav
         );
     }
 
@@ -467,6 +519,79 @@ mod tests {
         assert!(!DownloadFormat::M4a.requires_mutation_lock());
         assert!(DownloadFormat::Wav.requires_mutation_lock());
         assert!(DownloadFormat::Opus.requires_mutation_lock());
+    }
+
+    #[test]
+    fn stem_download_safety_switch_prevents_aligned_lyrics_generation() {
+        assert!(should_fetch_timed_lyrics(DownloadFormat::Mp3, false));
+        assert!(!should_fetch_timed_lyrics(DownloadFormat::Mp3, true));
+        assert!(!should_fetch_timed_lyrics(DownloadFormat::Wav, true));
+    }
+
+    #[tokio::test]
+    async fn existing_audio_destinations_fail_before_prepared_or_conversion_endpoints() {
+        let dir = tempfile::tempdir().expect("download output directory");
+        let output_dir = dir.path().to_string_lossy().into_owned();
+        let client = crate::api::SunoClient::new_for_tests(
+            "http://127.0.0.1:9".into(),
+            crate::auth::AuthState {
+                jwt: Some("test-jwt".into()),
+                ..Default::default()
+            },
+        )
+        .expect("test client");
+
+        for format in [DownloadFormat::Mp3, DownloadFormat::Wav] {
+            let destination = dir
+                .path()
+                .join(format!("track-clip-a.{}", format.extension()));
+            std::fs::write(&destination, b"existing").expect("existing destination");
+
+            let result = download_file(
+                &clip(),
+                DownloadFileOptions {
+                    output_dir: &output_dir,
+                    video: false,
+                    force: false,
+                    quiet: true,
+                    format,
+                    no_convert: false,
+                    skip_timed_lyrics: false,
+                },
+                &context(),
+                &client,
+            )
+            .await;
+            let error = match result {
+                Ok(_) => panic!("local destination must fail before any official endpoint call"),
+                Err(error) => error,
+            };
+
+            assert!(
+                matches!(error, CliError::Download(message) if message.contains("already exists")),
+                "format {format:?} reached the network before local preflight"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_preflight_rejects_a_later_collision_before_downloads_start() {
+        let dir = tempfile::tempdir().expect("download output directory");
+        let output_dir = dir.path().to_string_lossy().into_owned();
+        std::fs::write(dir.path().join("track-clip-b.mp3"), b"existing")
+            .expect("existing second destination");
+
+        let error = preflight_download_batch(
+            &[clip_with_id("clip-a"), clip_with_id("clip-b")],
+            &output_dir,
+            "mp3",
+            false,
+        )
+        .await
+        .expect_err("the complete batch must be preflighted before requests start");
+
+        assert!(matches!(error, CliError::Download(message) if message.contains("already exists")));
+        assert!(!dir.path().join("track-clip-a.mp3").exists());
     }
 
     #[test]
@@ -494,6 +619,38 @@ mod tests {
         assert_eq!(
             error.details().expect("partial download details")["not_attempted_clip_ids"],
             serde_json::json!(["clip-later"])
+        );
+    }
+
+    #[test]
+    fn partial_download_preserves_nested_ambiguous_recovery_details() {
+        let error = partial_download_error(
+            &[super::CompletedDownload {
+                clip_id: "clip-complete".into(),
+                path: "/tmp/complete.mp3".into(),
+            }],
+            "clip-failed",
+            None,
+            &[],
+            CliError::AmbiguousMutation {
+                message: "conversion outcome is unknown".into(),
+                details: serde_json::json!({
+                    "operation_id": "conversion-1",
+                    "recovery": {
+                        "resumable": true,
+                        "inspection_commands": ["sunox clip download clip-failed --format wav --no-convert --json"]
+                    }
+                }),
+            },
+        );
+
+        let failed = &error.details().expect("partial download details")["failed"];
+        assert_eq!(failed["code"], "ambiguous_mutation");
+        assert_eq!(failed["details"]["operation_id"], "conversion-1");
+        assert_eq!(failed["details"]["recovery"]["resumable"], true);
+        assert_eq!(
+            failed["details"]["recovery"]["inspection_commands"][0],
+            "sunox clip download clip-failed --format wav --no-convert --json"
         );
     }
 

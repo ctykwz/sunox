@@ -16,6 +16,12 @@ impl SunoClient {
         page: u32,
         continuation_token: Option<&str>,
     ) -> Result<PersonaListResponse, CliError> {
+        if continuation_token.is_some() && !matches!(scope, PersonaListScope::Mine) {
+            return Err(CliError::Config(
+                "Suno Web continuation tokens apply only to the owned Persona collection; loved and followed collections use page numbers only"
+                    .into(),
+            ));
+        }
         let path = match scope {
             PersonaListScope::Mine => "/api/persona/get-personas/",
             PersonaListScope::Loved => "/api/persona/get-loved-personas/",
@@ -24,12 +30,13 @@ impl SunoClient {
 
         self.with_auth_retry(|| async {
             let mut query = vec![("page", page.to_string())];
-            if let Some(token) = continuation_token {
+            if let Some(token) =
+                continuation_token.filter(|_| matches!(scope, PersonaListScope::Mine))
+            {
                 query.push(("continuation_token", token.to_string()));
             }
-            let resp = self.get(path).query(&query).send().await?;
-            let resp = self.check_response(resp).await?;
-            Ok(resp.json().await?)
+            self.read_json_with_transport_retry(self.get(path).query(&query))
+                .await
         })
         .await
     }
@@ -38,12 +45,12 @@ impl SunoClient {
     /// GET /api/persona/get-persona/{persona_id}/
     pub async fn get_persona(&self, persona_id: &str) -> Result<PersonaInfo, CliError> {
         self.with_auth_retry(|| async {
-            let resp = self
-                .get(&format!("/api/persona/get-persona/{persona_id}/"))
-                .send()
+            let raw = self
+                .read_json_with_transport_retry(
+                    self.get(&format!("/api/persona/get-persona/{persona_id}/")),
+                )
                 .await?;
-            let resp = self.check_response(resp).await?;
-            decode_persona(resp.json().await?)
+            decode_persona(raw)
         })
         .await
     }
@@ -56,13 +63,11 @@ impl SunoClient {
         page: u32,
     ) -> Result<PersonaClipsResponse, CliError> {
         self.with_auth_retry(|| async {
-            let resp = self
-                .get(&format!("/api/persona/get-persona-paginated/{persona_id}/"))
-                .query(&[("page", page.to_string())])
-                .send()
-                .await?;
-            let resp = self.check_response(resp).await?;
-            Ok(resp.json().await?)
+            self.read_json_with_transport_retry(
+                self.get(&format!("/api/persona/get-persona-paginated/{persona_id}/"))
+                    .query(&[("page", page.to_string())]),
+            )
+            .await
         })
         .await
     }

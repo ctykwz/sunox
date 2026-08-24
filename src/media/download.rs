@@ -109,6 +109,18 @@ pub async fn stage_clip_url(
     .await
 }
 
+pub async fn preflight_clip_download(
+    clip: &Clip,
+    output_dir: &str,
+    ext: &str,
+    force: bool,
+) -> Result<(), CliError> {
+    let output_dir = Path::new(output_dir);
+    ensure_output_directory(output_dir).await?;
+    reject_existing_output(&output_dir.join(download_filename(clip, ext)), force).await?;
+    verify_output_directory_writable(output_dir).await
+}
+
 async fn stage_clip_url_with_idle_timeout(
     clip: &Clip,
     output_dir: &str,
@@ -146,7 +158,7 @@ async fn stage_clip_url_with_limits(
 ) -> Result<StagedDownload, CliError> {
     let filename = download_filename(clip, ext);
     let output_dir = Path::new(output_dir);
-    tokio::fs::create_dir_all(output_dir).await?;
+    ensure_output_directory(output_dir).await?;
     let path = output_dir.join(&filename);
     reject_existing_output(&path, force).await?;
 
@@ -234,6 +246,61 @@ fn download_filename(clip: &Clip, ext: &str) -> String {
     format!("{slug}{suffix}")
 }
 
+async fn ensure_output_directory(output_dir: &Path) -> Result<(), CliError> {
+    match tokio::fs::metadata(output_dir).await {
+        Ok(metadata) if metadata.is_dir() => return Ok(()),
+        Ok(_) => {
+            return Err(CliError::Download(format!(
+                "output path exists but is not a directory: {}",
+                output_dir.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    tokio::fs::create_dir_all(output_dir).await?;
+    let metadata = tokio::fs::metadata(output_dir).await?;
+    if !metadata.is_dir() {
+        return Err(CliError::Download(format!(
+            "output path exists but is not a directory: {}",
+            output_dir.display()
+        )));
+    }
+    Ok(())
+}
+
+async fn verify_output_directory_writable(output_dir: &Path) -> Result<(), CliError> {
+    let metadata = tokio::fs::metadata(output_dir).await?;
+    if metadata.permissions().readonly() {
+        return Err(output_directory_not_writable(output_dir, None));
+    }
+
+    let probe_path = TempPath::try_from_path(temporary_path(output_dir))?;
+    let probe_file_path: &Path = probe_path.as_ref();
+    let probe_result = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(probe_file_path)
+        .await;
+    match probe_result {
+        Ok(probe) => {
+            drop(probe);
+            drop(probe_path);
+            Ok(())
+        }
+        Err(error) => Err(output_directory_not_writable(output_dir, Some(&error))),
+    }
+}
+
+fn output_directory_not_writable(output_dir: &Path, error: Option<&std::io::Error>) -> CliError {
+    let reason = error.map(|error| format!(" ({error})")).unwrap_or_default();
+    CliError::Download(format!(
+        "output directory is not writable: {}{reason}",
+        output_dir.display()
+    ))
+}
+
 async fn reject_existing_output(path: &Path, force: bool) -> Result<(), CliError> {
     if output_exists_as_regular_file(path).await? && !force {
         return Err(existing_output_error(path));
@@ -291,7 +358,8 @@ mod tests {
 
     use super::{
         DOWNLOAD_IDLE_TIMEOUT, download_clip_url, download_filename, download_progress_bar,
-        stage_clip_url, stage_clip_url_with_idle_timeout, stage_clip_url_with_limits,
+        preflight_clip_download, stage_clip_url, stage_clip_url_with_idle_timeout,
+        stage_clip_url_with_limits,
     };
 
     fn clip() -> Clip {
@@ -304,6 +372,8 @@ mod tests {
             video_url: None,
             image_url: None,
             created_at: "2026-07-10T00:00:00Z".into(),
+            is_trashed: None,
+            action_config: None,
             play_count: 0,
             upvote_count: 0,
             metadata: Default::default(),
@@ -338,6 +408,42 @@ mod tests {
             filename.len()
         );
         assert!(filename.ends_with("-clip-a.mp3"));
+    }
+
+    #[tokio::test]
+    async fn download_preflight_rejects_an_output_directory_that_is_a_file() {
+        let dir = test_dir("download-preflight-output-file");
+        std::fs::create_dir_all(&dir).expect("create test directory");
+        let output_file = dir.join("not-a-directory");
+        std::fs::write(&output_file, b"file").expect("write output path fixture");
+
+        let error = preflight_clip_download(&clip(), &output_file.to_string_lossy(), "mp3", false)
+            .await
+            .expect_err("a regular file cannot be used as an output directory");
+
+        assert!(
+            matches!(error, CliError::Download(message) if message.contains("not a directory"))
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn download_preflight_rejects_a_non_writable_output_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = test_dir("download-preflight-read-only");
+        std::fs::create_dir_all(&dir).expect("create output directory");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555))
+            .expect("make output directory read-only");
+
+        let result = preflight_clip_download(&clip(), &dir.to_string_lossy(), "mp3", false).await;
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
+            .expect("restore output directory permissions");
+        let error = result.expect_err("read-only output directory must fail preflight");
+        assert!(matches!(error, CliError::Download(message) if message.contains("not writable")));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     async fn audio_server(body: &'static [u8]) -> String {

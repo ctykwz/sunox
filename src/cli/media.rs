@@ -56,6 +56,15 @@ pub struct DownloadArgs {
     /// Audio format to download through Suno's web download endpoints
     #[arg(long, value_enum)]
     pub format: Option<DownloadFormat>,
+
+    /// Refuse to start server-side WAV/OPUS conversion when no converted file exists
+    #[arg(long, conflicts_with = "video")]
+    pub no_convert: bool,
+
+    /// Internal safety switch for media such as stems that must never trigger
+    /// aligned-lyrics generation while downloading an MP3.
+    #[arg(skip)]
+    pub skip_timed_lyrics: bool,
 }
 
 #[derive(clap::Args)]

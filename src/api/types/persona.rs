@@ -111,6 +111,8 @@ pub struct EditPersonaRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_s3_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub is_public: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub persona_type: Option<String>,
@@ -217,6 +219,7 @@ mod tests {
             persona_id: "persona-1".into(),
             name: Some("Lead Voice".into()),
             description: None,
+            image_s3_id: None,
             is_public: Some(false),
             persona_type: Some("vox".into()),
             user_input_styles: None,
@@ -291,4 +294,15 @@ pub struct PersonaInfo {
     pub persona_clips: Vec<PersonaClipEntry>,
     #[serde(default, flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+impl PersonaInfo {
+    /// Suno currently identifies a verified Voice in either the typed Persona
+    /// field or the flattened Web response flag, depending on the endpoint.
+    pub fn is_vox_persona(&self) -> bool {
+        self.persona_type
+            .as_deref()
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("vox"))
+            || self.extra.get("is_vox_persona").and_then(Value::as_bool) == Some(true)
+    }
 }

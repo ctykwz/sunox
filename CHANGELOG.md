@@ -11,6 +11,66 @@ backward-compatible features, upstream protocol adaptations, and fixes.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-24
+
+### Added
+
+- Added authenticated `sunox capabilities` output that combines the live plan, usable generation
+  and Remaster selectors, safe account-limit fields, and an entitlement-by-entitlement CLI
+  coverage matrix. Added read-only `sunox clip actions <id>` for source eligibility inspection.
+- Added account-driven generation and Cover model selectors by display name, external key, or
+  account model ID, plus v5.5 `--duration` validation against the live account model limit.
+- Added global `--read-only` enforcement and `--no-convert` for GET-only WAV/OPUS retrieval.
+- Added current Pro stem workflows: paid Auto Split and Split from Mix generation, plus read/download
+  access to existing stem-result banks.
+- Added private verified Voice creation with phrase lookup, upload/processing/verification polling,
+  exact identity checks, durable recovery checkpoints, and private Vox Persona readback.
+- Added Custom Model pending inspection, gated 6-to-100-source training, ready-model selection, and
+  explicit archive with pending/billing readback.
+- Added Lyrics 2.0 projects, selection rewrite, and two-source mashup submit/status workflows.
+- Added the current multi-result song Cover Art workflow: live image/video model and cost discovery,
+  pending/history/status recovery, two-candidate generation, and explicit image/video application.
+
+### Changed
+
+- Use Suno's prepared MP3 endpoint for the default download instead of bypassing the official
+  format workflow through `clip.audio_url`. Downloads can therefore follow current plan metering.
+- Match model-specific Remaster bodies: v5/v5.5 default to Normal when omitted, while v4.5+
+  `chirp-bass` omits `variation_category` and rejects an explicit variation. Future unknown
+  Remaster request shapes are never guessed or auto-selected.
+- Resolve generation, Cover, Persona/Vox, Custom Model, stem, and visual eligibility from current
+  account models, entitlements, clip ownership/state, and server-provided action configuration.
+- Keep generated Cover Art candidates separate from application. Applying now requires the batch ID
+  and proves that the exact completed media result belongs to the selected clip before metadata is
+  changed.
+
+### Fixed
+
+- Fail Remaster locally unless the exact source is complete, explicitly outside trash, not an
+  infill, at most 960 seconds, and exposes a visible, enabled Remaster action in current
+  `action_config`.
+- Report response loss after generation, Remaster, conversion, and submitted edit work as
+  `ambiguous_mutation` with operation identity and safe recovery guidance instead of suggesting a
+  blind replay that could duplicate clips or consume credits twice.
+- Preserve current and legacy `accessible_features` response shapes behind one fail-closed typed
+  feature check.
+- Preflight all local batch download destinations before the first prepared-format or conversion
+  request, preserve nested recovery details for partial failures, and strictly sanitize capability
+  limits.
+- Wait for every returned Cover Art media ID after submit, and for both fixed-quantity candidates
+  during standalone batch recovery, instead of accepting a partial poll page as complete.
+- Treat HTTP 5xx responses after non-idempotent Voice, Custom Model, Lyrics, visual, upload, and edit
+  writes as ambiguous accepted state and never replay them automatically.
+- Enforce the current minimum Voice polling cadence and fail closed when returned workflow, clip,
+  Persona, verification, batch, or media identities do not match the requested resource.
+- Preserve structured insufficient-credit, creation-limit, and moderation errors for Cover Art
+  generation, and stop before submit when the live cost response reports no remaining generations.
+
+### Security
+
+- Updated `h2` to a release that fixes RUSTSEC-2026-0258 and updated `event-listener` past its
+  affected unsound release.
+
 ## [0.2.2] - 2026-08-04
 
 ### Fixed

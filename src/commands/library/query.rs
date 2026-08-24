@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 
-use crate::api::types::FeedFilters;
+use serde::Serialize;
+
+use crate::api::types::{ClipActionConfig, FeedFilters};
 use crate::app::AppContext;
 use crate::cli::{InfoArgs, ListArgs, ListSort, SearchArgs, StatusArgs};
 use crate::core::{CliError, ensure_clip_ids};
@@ -92,6 +94,29 @@ pub async fn info(args: InfoArgs, ctx: &AppContext) -> Result<(), CliError> {
     match ctx.fmt {
         OutputFormat::Json => output::json::success(&info),
         OutputFormat::Table => output::table::clip_detail(&info),
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct ClipActionsOutput<'a> {
+    clip_id: &'a str,
+    action_config: Option<&'a ClipActionConfig>,
+}
+
+pub async fn actions(args: InfoArgs, ctx: &AppContext) -> Result<(), CliError> {
+    let client = ctx.client().await?;
+    let clips = client.get_clips(std::slice::from_ref(&args.id)).await?;
+    let clip = clips
+        .iter()
+        .find(|clip| clip.id == args.id)
+        .ok_or_else(|| CliError::NotFound(format!("exact clip: {}", args.id)))?;
+    match ctx.fmt {
+        OutputFormat::Json => output::json::success(ClipActionsOutput {
+            clip_id: &clip.id,
+            action_config: clip.action_config.as_ref(),
+        }),
+        OutputFormat::Table => output::table::clip_actions(&clip.id, clip.action_config.as_ref()),
     }
     Ok(())
 }

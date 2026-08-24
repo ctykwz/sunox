@@ -3,7 +3,7 @@ use super::types::{
     Clip, FeedFilters, FeedResponse, FeedV3Request, GenerateRequest, GenerateResponse,
     GenerationResult, MaxLengths, Model,
 };
-use crate::core::CliError;
+use crate::core::{CliError, MutationAmbiguity};
 
 const CREATE_CONTROL_SLIDERS_FEATURE: &str = "create_control_sliders";
 pub(crate) const TAG_UPSAMPLE_FEATURE: &str = "tag_upsample";
@@ -27,6 +27,9 @@ impl SunoClient {
         &self,
         req: &mut GenerateRequest,
     ) -> Result<(), CliError> {
+        if req.task.as_deref() == Some("gen_stem") {
+            return self.prepare_stem_generation_request(req).await;
+        }
         self.prepare_generation_request_internal(req, &[])
             .await
             .map(drop)
@@ -57,21 +60,28 @@ impl SunoClient {
         req: &mut GenerateRequest,
         required_features: &[&str],
     ) -> Result<Option<MaxLengths>, CliError> {
-        let needs_model_features = req.mv == "auto"
-            || req.metadata.control_sliders.is_some()
-            || !required_features.is_empty();
-        if !req.metadata.user_tier.trim().is_empty() && !needs_model_features {
-            return Ok(None);
-        }
+        let mut web_requirement = generation_web_requirement(req.task.as_deref());
 
         let info = match self.billing_info().await {
             Ok(info) => info,
             Err(error) if is_transient_billing_transport(&error) => {
-                if req.task.as_deref() == Some("cover") {
+                if req.duration.is_some() {
                     return Err(CliError::Config(
-                        "could not verify whether the selected base model is available for the current Suno Cover protocol; refusing to submit a Cover request without validating and mapping its model"
+                        "could not verify --duration against the current Suno billing model and its exact v5.5 limits; refusing to submit or apply the auto-model fallback"
                             .into(),
                     ));
+                }
+                if let Some(requirement) = web_requirement {
+                    if requirement.task == "cover" {
+                        return Err(CliError::Config(
+                            "could not verify whether the selected base model is available for the current Suno Cover protocol; refusing to submit a Cover request without validating and mapping its model"
+                                .into(),
+                        ));
+                    }
+                    return Err(CliError::Config(format!(
+                        "could not verify whether the selected model supports the current Suno Web {} protocol; refusing to submit without account capability validation",
+                        requirement.label
+                    )));
                 }
                 if req.metadata.control_sliders.is_some() || !required_features.is_empty() {
                     return Err(CliError::Config(
@@ -81,8 +91,12 @@ impl SunoClient {
                 }
                 if req.mv == "auto" {
                     req.mv = WEB_FALLBACK_MODEL.into();
+                    return Ok(None);
                 }
-                return Ok(None);
+                return Err(CliError::Config(format!(
+                    "could not verify model selector `{}` against the current Suno account; refusing to submit without exact billing validation",
+                    req.mv
+                )));
             }
             Err(error) => return Err(error),
         };
@@ -105,7 +119,57 @@ impl SunoClient {
         } else {
             &req.mv
         };
-        let model = select_generation_model(&info.models, requested_model)?;
+        let sourced_vox = req.task.as_deref() == Some("vox") && req.artist_clip_id.is_some();
+        let model = match select_generation_model(&info.models, requested_model, web_requirement) {
+            Ok(model)
+                if sourced_vox
+                    && web_requirement
+                        .is_some_and(|required| !model_supports_requirement(model, required)) =>
+            {
+                let legacy_requirement = generation_web_requirement(Some("artist_consistency"))
+                    .expect("artist_consistency has a Web requirement");
+                match select_generation_model(
+                    &info.models,
+                    requested_model,
+                    Some(legacy_requirement),
+                ) {
+                    Ok(legacy_model)
+                        if model_supports_requirement(legacy_model, legacy_requirement) =>
+                    {
+                        req.task = Some("artist_consistency".into());
+                        web_requirement = Some(legacy_requirement);
+                        legacy_model
+                    }
+                    _ => model,
+                }
+            }
+            Ok(model) => model,
+            Err(vox_error) if sourced_vox => {
+                let legacy_requirement = generation_web_requirement(Some("artist_consistency"))
+                    .expect("artist_consistency has a Web requirement");
+                match select_generation_model(
+                    &info.models,
+                    requested_model,
+                    Some(legacy_requirement),
+                ) {
+                    Ok(model) if model_supports_requirement(model, legacy_requirement) => {
+                        req.task = Some("artist_consistency".into());
+                        web_requirement = Some(legacy_requirement);
+                        model
+                    }
+                    Ok(_) | Err(_) => return Err(vox_error),
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        if let Some(requirement) = web_requirement
+            && !model_supports_requirement(model, requirement)
+        {
+            return Err(CliError::Config(format!(
+                "Suno model `{}` does not support {} in the current Web model capabilities and condition combinations",
+                model.external_key, requirement.label
+            )));
+        }
         req.mv = if req.task.as_deref() == Some("cover") {
             cover_reference_model(&model.external_key).to_string()
         } else {
@@ -127,6 +191,7 @@ impl SunoClient {
                 )));
             }
         }
+        validate_generation_duration(req, model)?;
         let uses_account_generation_limits =
             matches!(req.task.as_deref(), None | Some("playlist_condition"));
         if uses_account_generation_limits {
@@ -144,7 +209,7 @@ impl SunoClient {
             .await?;
         let body = serde_json::to_value(req)?;
         Ok(self
-            .submit_generation_body(&body, req.token.is_some())
+            .submit_generation_body(&body, req.token.is_some(), &req.transaction_uuid)
             .await?
             .clips)
     }
@@ -165,7 +230,7 @@ impl SunoClient {
         req: &GenerateRequest,
     ) -> Result<GenerationResult, CliError> {
         let body = serde_json::to_value(req)?;
-        self.submit_generation_body(&body, req.token.is_some())
+        self.submit_generation_body(&body, req.token.is_some(), &req.transaction_uuid)
             .await
     }
 
@@ -173,15 +238,50 @@ impl SunoClient {
         &self,
         body: &serde_json::Value,
         has_challenge_token: bool,
+        transaction_uuid: &str,
     ) -> Result<GenerationResult, CliError> {
         self.with_auth_retry(|| async {
-            let resp = self.post("/api/generate/v2-web/").json(body).send().await?;
+            let resp = self
+                .post("/api/generate/v2-web/")
+                .json(body)
+                .send()
+                .await
+                .map_err(|error| {
+                    ambiguous_generation_submit(
+                        transaction_uuid,
+                        "request_send",
+                        "http_error",
+                        error.to_string(),
+                    )
+                })?;
             let resp = self
                 .check_generation_response(resp, has_challenge_token)
                 .await?;
-            let raw: serde_json::Value = resp.json().await?;
-            let result: GenerateResponse = serde_json::from_value(raw.clone())?;
-            result.into_result(raw)
+            let raw: serde_json::Value = resp.json().await.map_err(|error| {
+                ambiguous_generation_submit(
+                    transaction_uuid,
+                    "response_body",
+                    "http_error",
+                    error.to_string(),
+                )
+            })?;
+            let result: GenerateResponse =
+                serde_json::from_value(raw.clone()).map_err(|error| {
+                    ambiguous_generation_submit(
+                        transaction_uuid,
+                        "response_schema",
+                        "json_error",
+                        error.to_string(),
+                    )
+                })?;
+            result.into_result(raw).map_err(|error| {
+                ambiguous_generation_submit(
+                    transaction_uuid,
+                    "response_schema",
+                    error.error_code(),
+                    error.to_string(),
+                )
+            })
         })
         .await
     }
@@ -225,7 +325,7 @@ impl SunoClient {
         Ok(ids.iter().filter_map(|id| by_id.get(id).cloned()).collect())
     }
 
-    async fn get_clip(&self, id: &str) -> Result<Option<Clip>, CliError> {
+    pub(crate) async fn get_clip(&self, id: &str) -> Result<Option<Clip>, CliError> {
         let path = format!("/api/clip/{id}");
         self.with_auth_retry(|| async {
             let resp = self.get(&path).send().await?;
@@ -241,6 +341,35 @@ impl SunoClient {
         })
         .await
     }
+}
+
+fn ambiguous_generation_submit(
+    transaction_uuid: &str,
+    stage: &'static str,
+    cause_code: &'static str,
+    cause_message: String,
+) -> CliError {
+    MutationAmbiguity::new(
+        format!(
+            "generation transaction {transaction_uuid} lost a reliable response during {stage}; Suno may still have created clips"
+        ),
+        "generation_submit",
+        transaction_uuid,
+        stage,
+        cause_code,
+        cause_message,
+        false,
+        "a fresh submit would use a new transaction UUID and may duplicate clips or credit usage",
+        vec![
+            "sunox clip list --json".into(),
+            "sunox credits --json".into(),
+        ],
+    )
+    .with_context(
+        "transaction_uuid",
+        serde_json::Value::String(transaction_uuid.to_string()),
+    )
+    .into_error()
 }
 
 pub(crate) fn is_transient_billing_transport(error: &CliError) -> bool {
@@ -266,27 +395,106 @@ fn cover_reference_model(model: &str) -> &str {
     }
 }
 
+#[derive(Clone, Copy)]
+struct WebModelRequirement {
+    task: &'static str,
+    conditions: &'static [&'static str],
+    label: &'static str,
+}
+
+fn generation_web_requirement(task: Option<&str>) -> Option<WebModelRequirement> {
+    match task {
+        Some("cover") => Some(WebModelRequirement {
+            task: "cover",
+            conditions: &["cover"],
+            label: "Cover",
+        }),
+        Some("extend") => Some(WebModelRequirement {
+            task: "extend",
+            conditions: &["extend"],
+            label: "Extend",
+        }),
+        Some("upload_extend") => Some(WebModelRequirement {
+            task: "upload_extend",
+            conditions: &["extend"],
+            label: "uploaded-audio Extend",
+        }),
+        Some("playlist_condition") => Some(WebModelRequirement {
+            task: "playlist_condition",
+            conditions: &["playlist"],
+            label: "Inspiration",
+        }),
+        Some("vox") => Some(WebModelRequirement {
+            task: "vox",
+            conditions: &["vox"],
+            label: "Voice Persona generation",
+        }),
+        Some("artist_consistency") => Some(WebModelRequirement {
+            task: "artist_consistency",
+            conditions: &["persona"],
+            label: "legacy Persona generation",
+        }),
+        _ => None,
+    }
+}
+
+fn model_supports_requirement(model: &Model, requirement: WebModelRequirement) -> bool {
+    model.supports_web_task(requirement.task)
+        && model.supports_web_conditions(requirement.conditions)
+}
+
 fn select_generation_model<'a>(
     models: &'a [Model],
     requested: &str,
+    requirement: Option<WebModelRequirement>,
 ) -> Result<&'a Model, CliError> {
+    let eligible = |model: &&Model| {
+        model.can_use
+            && requirement
+                .map(|required| model_supports_requirement(model, required))
+                .unwrap_or(true)
+    };
     let selected = if requested == "auto" {
         models
             .iter()
-            .find(|model| model.can_use && model.is_default_model)
+            .filter(eligible)
+            .find(|model| model.is_default_model)
             .or_else(|| {
                 models
                     .iter()
-                    .find(|model| model.can_use && model.is_default_free_model)
+                    .filter(eligible)
+                    .find(|model| model.is_default_free_model)
             })
-            .or_else(|| models.iter().find(|model| model.can_use))
+            .or_else(|| models.iter().find(eligible))
+    } else if let Some(model) = models.iter().find(|model| model.external_key == requested) {
+        Some(model)
+    } else if let Some(model) = models
+        .iter()
+        .find(|model| generation_model_account_id(model) == Some(requested))
+    {
+        Some(model)
     } else {
-        models
+        let display_matches = models
             .iter()
-            .find(|model| model.external_key == requested && model.can_use)
+            .filter(|model| model.name.eq_ignore_ascii_case(requested))
+            .collect::<Vec<_>>();
+        if display_matches.len() > 1 {
+            let choices = display_matches
+                .iter()
+                .map(|model| match generation_model_account_id(model) {
+                    Some(id) => format!("{} (id: {id})", model.external_key),
+                    None => model.external_key.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(CliError::Config(format!(
+                "generation model display name `{requested}` is ambiguous; select an exact external key or account model ID: {choices}"
+            )));
+        }
+        display_matches.into_iter().next()
     };
 
-    selected.ok_or_else(|| {
+    let unavailable = || {
         let requested = if requested == "auto" {
             "an account default model".to_string()
         } else {
@@ -295,7 +503,60 @@ fn select_generation_model<'a>(
         CliError::Config(format!(
             "Suno account cannot use {requested}; run `sunox models --json` and select a model whose can_use field is true"
         ))
-    })
+    };
+    let Some(model) = selected else {
+        return Err(unavailable());
+    };
+    if !model.can_use {
+        return Err(unavailable());
+    }
+    Ok(model)
+}
+
+fn generation_model_account_id(model: &Model) -> Option<&str> {
+    ["id", "model_id"]
+        .into_iter()
+        .find_map(|key| model.extra.get(key).and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+}
+
+fn validate_generation_duration(req: &GenerateRequest, model: &Model) -> Result<(), CliError> {
+    let Some(duration) = req.duration else {
+        return Ok(());
+    };
+    if !duration.is_finite() || duration <= 0.0 {
+        return Err(CliError::Config(
+            "generation duration must be a positive finite number of seconds".into(),
+        ));
+    }
+    if model.external_key != "chirp-fenix" {
+        return Err(CliError::Config(format!(
+            "--duration is only supported by the current v5.5 generation model `chirp-fenix`; selector resolved to `{}`",
+            model.external_key
+        )));
+    }
+    let Some(raw_limit) = model.max_lengths.extra.get("duration") else {
+        return Ok(());
+    };
+    if raw_limit.is_null() {
+        return Ok(());
+    }
+    let Some(limit) = raw_limit
+        .as_f64()
+        .filter(|limit| limit.is_finite() && *limit > 0.0)
+    else {
+        return Err(CliError::Config(
+            "Suno billing returned an invalid max_lengths.duration for the selected model; refusing to guess a duration limit"
+                .into(),
+        ));
+    };
+    if duration > limit {
+        return Err(CliError::Config(format!(
+            "requested duration {duration} seconds exceeds the current account limit of {limit} seconds for `chirp-fenix`"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_generation_lengths(req: &GenerateRequest, model: &Model) -> Result<(), CliError> {
@@ -345,8 +606,8 @@ fn generation_challenge_error(challenge: &super::challenge::GenerationChallenge)
 #[cfg(test)]
 mod tests {
     use super::{
-        cover_base_model, cover_reference_model, select_generation_model,
-        validate_generation_lengths,
+        cover_base_model, cover_reference_model, generation_web_requirement,
+        select_generation_model, validate_generation_duration, validate_generation_lengths,
     };
     use crate::api::types::{GenerateRequest, MaxLengths, Model};
 
@@ -359,6 +620,7 @@ mod tests {
             is_default_free_model: false,
             description: "fixture".into(),
             capabilities: Vec::new(),
+            allowed_condition_combinations: Vec::new(),
             features: Vec::new(),
             badges: Vec::new(),
             max_lengths,
@@ -370,10 +632,46 @@ mod tests {
     fn account_model_selection_rejects_unusable_explicit_model() {
         let models = [model(false, true, MaxLengths::default())];
 
-        let error = select_generation_model(&models, "chirp-auk-turbo")
+        let error = select_generation_model(&models, "chirp-auk-turbo", None)
             .expect_err("unusable model must be rejected");
 
         assert!(error.to_string().contains("cannot use"));
+    }
+
+    #[test]
+    fn account_model_selection_resolves_display_name_and_account_id() {
+        let mut custom = model(true, false, MaxLengths::default());
+        custom.name = "My Custom Voice".into();
+        custom.external_key = "chirp-custom-7".into();
+        custom
+            .extra
+            .insert("id".into(), serde_json::json!("model-account-7"));
+        let models = [custom];
+
+        let by_name = select_generation_model(&models, "my custom voice", None)
+            .expect("case-insensitive display name");
+        let by_id = select_generation_model(&models, "model-account-7", None)
+            .expect("exact account model ID");
+
+        assert_eq!(by_name.external_key, "chirp-custom-7");
+        assert_eq!(by_id.external_key, "chirp-custom-7");
+    }
+
+    #[test]
+    fn duplicate_generation_model_display_name_is_ambiguous() {
+        let mut first = model(true, false, MaxLengths::default());
+        first.name = "My Model".into();
+        first.external_key = "chirp-custom-a".into();
+        let mut second = model(true, false, MaxLengths::default());
+        second.name = "my model".into();
+        second.external_key = "chirp-custom-b".into();
+
+        let error = select_generation_model(&[first, second], "MY MODEL", None)
+            .expect_err("duplicate display names require an exact selector");
+
+        assert!(error.to_string().contains("is ambiguous"));
+        assert!(error.to_string().contains("chirp-custom-a"));
+        assert!(error.to_string().contains("chirp-custom-b"));
     }
 
     #[test]
@@ -384,7 +682,7 @@ mod tests {
         free_default.is_default_free_model = true;
         let models = [first_usable, free_default];
 
-        let selected = select_generation_model(&models, "auto").expect("free default");
+        let selected = select_generation_model(&models, "auto", None).expect("free default");
 
         assert_eq!(selected.external_key, "chirp-fenix");
     }
@@ -396,9 +694,42 @@ mod tests {
         let web_fallback = model(true, false, MaxLengths::default());
         let models = [first_usable, web_fallback];
 
-        let selected = select_generation_model(&models, "auto").expect("first usable");
+        let selected = select_generation_model(&models, "auto", None).expect("first usable");
 
         assert_eq!(selected.external_key, "chirp-fenix");
+    }
+
+    #[test]
+    fn auto_model_selection_skips_a_default_that_cannot_run_the_requested_web_flow() {
+        let mut incompatible_default = model(true, true, MaxLengths::default());
+        incompatible_default.capabilities = vec!["generate".into()];
+        incompatible_default.allowed_condition_combinations = vec![vec![]];
+        let mut compatible_fallback = model(true, false, MaxLengths::default());
+        compatible_fallback.external_key = "chirp-fenix".into();
+        compatible_fallback.capabilities = vec!["upload_extend".into()];
+        compatible_fallback.allowed_condition_combinations = vec![vec!["extend".into()]];
+        let models = [incompatible_default, compatible_fallback];
+
+        let selected = select_generation_model(
+            &models,
+            "auto",
+            generation_web_requirement(Some("upload_extend")),
+        )
+        .expect("compatible upload-extend fallback");
+
+        assert_eq!(selected.external_key, "chirp-fenix");
+    }
+
+    #[test]
+    fn persona_tasks_require_the_current_web_condition_families() {
+        let vox = generation_web_requirement(Some("vox")).expect("Vox requirement");
+        assert_eq!(vox.task, "vox");
+        assert_eq!(vox.conditions, ["vox"]);
+
+        let legacy = generation_web_requirement(Some("artist_consistency"))
+            .expect("legacy Persona requirement");
+        assert_eq!(legacy.task, "artist_consistency");
+        assert_eq!(legacy.conditions, ["persona"]);
     }
 
     #[test]
@@ -429,5 +760,52 @@ mod tests {
             .expect_err("three characters exceed a two-character limit");
 
         assert!(error.to_string().contains("3 characters"));
+    }
+
+    #[test]
+    fn duration_requires_exact_v55_and_uses_account_limit_when_present() {
+        let mut limits = MaxLengths::default();
+        limits
+            .extra
+            .insert("duration".into(), serde_json::json!(480));
+        let mut fenix = model(true, true, limits);
+        fenix.name = "v5.5".into();
+        fenix.external_key = "chirp-fenix".into();
+        let mut request = GenerateRequest::new("chirp-fenix", "custom");
+        request.duration = Some(480.0);
+
+        validate_generation_duration(&request, &fenix).expect("duration at account limit");
+
+        request.duration = Some(480.1);
+        let error = validate_generation_duration(&request, &fenix)
+            .expect_err("duration beyond account limit");
+        assert!(
+            error
+                .to_string()
+                .contains("exceeds the current account limit")
+        );
+    }
+
+    #[test]
+    fn duration_does_not_guess_an_upper_bound_when_billing_omits_it() {
+        let mut fenix = model(true, true, MaxLengths::default());
+        fenix.name = "v5.5".into();
+        fenix.external_key = "chirp-fenix".into();
+        let mut request = GenerateRequest::new("chirp-fenix", "simple");
+        request.duration = Some(900.0);
+
+        validate_generation_duration(&request, &fenix).expect("billing omitted the duration limit");
+    }
+
+    #[test]
+    fn duration_rejects_non_v55_models() {
+        let crow = model(true, true, MaxLengths::default());
+        let mut request = GenerateRequest::new("chirp-auk-turbo", "custom");
+        request.duration = Some(120.0);
+
+        let error = validate_generation_duration(&request, &crow)
+            .expect_err("duration is exclusive to exact current v5.5");
+
+        assert!(error.to_string().contains("only supported"));
     }
 }

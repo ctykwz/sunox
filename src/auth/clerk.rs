@@ -54,6 +54,18 @@ fn transport_error(error: reqwest::Error) -> CliError {
     CliError::Http(error.without_url())
 }
 
+/// Retry one transport failure only. Clerk token minting is safe to repeat,
+/// and HTTP status/schema failures are deliberately returned without replay.
+async fn send_with_transport_retry<F>(mut build: F) -> Result<reqwest::Response, CliError>
+where
+    F: FnMut() -> reqwest::RequestBuilder,
+{
+    match build().send().await {
+        Ok(response) => Ok(response),
+        Err(_) => build().send().await.map_err(transport_error),
+    }
+}
+
 fn clerk_status_code(
     status: reqwest::StatusCode,
     rejected: &'static str,
@@ -82,14 +94,14 @@ pub async fn clerk_token_exchange(
     clerk_cookie: &str,
     browser_environment: Option<&crate::auth::BrowserEnvironment>,
 ) -> Result<(String, String), CliError> {
-    let resp = apply_clerk_headers(
-        client.get(clerk_client_url()),
-        clerk_cookie,
-        browser_environment,
-    )
-    .send()
-    .await
-    .map_err(transport_error)?;
+    let resp = send_with_transport_retry(|| {
+        apply_clerk_headers(
+            client.get(clerk_client_url()),
+            clerk_cookie,
+            browser_environment,
+        )
+    })
+    .await?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -136,15 +148,15 @@ pub async fn clerk_refresh_jwt(
     session_id: &str,
     browser_environment: Option<&crate::auth::BrowserEnvironment>,
 ) -> Result<String, CliError> {
-    let resp = apply_clerk_headers(
-        client.post(clerk_token_url(session_id)),
-        clerk_cookie,
-        browser_environment,
-    )
-    .header("content-type", "application/x-www-form-urlencoded")
-    .send()
-    .await
-    .map_err(transport_error)?;
+    let resp = send_with_transport_retry(|| {
+        apply_clerk_headers(
+            client.post(clerk_token_url(session_id)),
+            clerk_cookie,
+            browser_environment,
+        )
+        .header("content-type", "application/x-www-form-urlencoded")
+    })
+    .await?;
 
     if !resp.status().is_success() {
         let status = resp.status();

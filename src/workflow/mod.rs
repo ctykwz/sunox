@@ -5,3 +5,5 @@ pub mod image_upload;
 pub mod playlist;
 pub mod tasks;
 pub mod upload;
+pub mod visual;
+pub mod voice;

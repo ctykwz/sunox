@@ -1,7 +1,24 @@
 use super::types::Clip;
 use super::{PollingOptions, SunoClient};
-use crate::core::{CliError, run_before_deadline, sleep_before_deadline};
-use serde::{Deserialize, Serialize};
+use crate::core::{CliError, MutationAmbiguity, run_before_deadline, sleep_before_deadline};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+
+#[derive(Clone, Copy)]
+enum EditOperation {
+    Reverse,
+    Crop,
+    Fade,
+}
+
+impl EditOperation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Reverse => "reverse",
+            Self::Crop => "crop",
+            Self::Fade => "fade",
+        }
+    }
+}
 
 #[derive(Serialize)]
 struct ReverseRequest<'a> {
@@ -29,7 +46,21 @@ struct FadeRequest<'a> {
 
 #[derive(Deserialize)]
 struct EditActionResponse {
+    #[serde(deserialize_with = "deserialize_edit_action_id")]
     action_clip_id: String,
+}
+
+fn deserialize_edit_action_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let action_clip_id = String::deserialize(deserializer)?;
+    if action_clip_id.trim().is_empty() {
+        return Err(serde::de::Error::custom(
+            "edit action_clip_id must not be empty",
+        ));
+    }
+    Ok(action_clip_id)
 }
 
 #[derive(Deserialize)]
@@ -37,19 +68,33 @@ struct EditActionStatus {
     status: Option<String>,
 }
 
+struct SubmittedEdit<Response> {
+    response: Response,
+    operation_id: String,
+}
+
 impl SunoClient {
     pub async fn reverse_clip(&self, clip_id: &str, title: &str) -> Result<Clip, CliError> {
         let req = ReverseRequest { clip_id, title };
-        self.with_auth_retry(|| async {
-            let resp = self
-                .post("/api/clips/reverse-clip/")
-                .json(&req)
-                .send()
-                .await?;
-            let resp = self.check_response(resp).await?;
-            Ok(resp.json().await?)
-        })
-        .await
+        let submitted: SubmittedEdit<Clip> = self
+            .submit_edit(
+                EditOperation::Reverse,
+                clip_id,
+                "/api/clips/reverse-clip/",
+                &req,
+            )
+            .await?;
+        if submitted.response.id.trim().is_empty() {
+            return Err(ambiguous_edit_submit_details(
+                EditOperation::Reverse,
+                &submitted.operation_id,
+                clip_id,
+                "response_schema",
+                "schema_drift",
+                "reverse response contained an empty clip ID".into(),
+            ));
+        }
+        Ok(submitted.response)
     }
 
     pub async fn crop_clip(
@@ -70,14 +115,11 @@ impl SunoClient {
             ui_surface: "song_actions",
         };
         let path = format!("/api/edit/crop/{clip_id}/");
-        let action = self
-            .with_auth_retry(|| async {
-                let resp = self.post(&path).json(&req).send().await?;
-                let resp = self.check_response(resp).await?;
-                Ok(resp.json::<EditActionResponse>().await?)
-            })
-            .await?;
-        self.wait_for_edit_action(&action.action_clip_id, polling)
+        let action: EditActionResponse = self
+            .submit_edit(EditOperation::Crop, clip_id, &path, &req)
+            .await?
+            .response;
+        self.wait_for_edit_action(EditOperation::Crop, &action.action_clip_id, polling)
             .await
     }
 
@@ -96,19 +138,63 @@ impl SunoClient {
             title,
         };
         let path = format!("/api/edit/fade/{clip_id}/");
-        let action = self
+        let action: EditActionResponse = self
+            .submit_edit(EditOperation::Fade, clip_id, &path, &req)
+            .await?
+            .response;
+        self.wait_for_edit_action(EditOperation::Fade, &action.action_clip_id, polling)
+            .await
+    }
+
+    async fn submit_edit<Request, Response>(
+        &self,
+        operation: EditOperation,
+        source_clip_id: &str,
+        path: &str,
+        request: &Request,
+    ) -> Result<SubmittedEdit<Response>, CliError>
+    where
+        Request: Serialize + ?Sized,
+        Response: DeserializeOwned,
+    {
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let response = self
             .with_auth_retry(|| async {
-                let resp = self.post(&path).json(&req).send().await?;
+                let resp = self
+                    .post(path)
+                    .json(request)
+                    .send()
+                    .await
+                    .map_err(|error| {
+                        ambiguous_edit_submit(
+                            operation,
+                            &operation_id,
+                            source_clip_id,
+                            "request_send",
+                            error,
+                        )
+                    })?;
                 let resp = self.check_response(resp).await?;
-                Ok(resp.json::<EditActionResponse>().await?)
+                resp.json().await.map_err(|error| {
+                    ambiguous_edit_submit(
+                        operation,
+                        &operation_id,
+                        source_clip_id,
+                        "response_body",
+                        error,
+                    )
+                })
             })
             .await?;
-        self.wait_for_edit_action(&action.action_clip_id, polling)
-            .await
+        Ok(SubmittedEdit {
+            response,
+            operation_id,
+        })
     }
 
     async fn wait_for_edit_action(
         &self,
+        operation: EditOperation,
         action_clip_id: &str,
         polling: PollingOptions,
     ) -> Result<Clip, CliError> {
@@ -124,7 +210,10 @@ impl SunoClient {
                 }),
                 edit_action_timeout(action_clip_id),
             )
-            .await?;
+            .await
+            .map_err(|error| {
+                ambiguous_edit_poll(operation, action_clip_id, "action_poll", error)
+            })?;
             if edit_status_failed(action_status.status.as_deref()) {
                 return Err(CliError::GenerationFailed(format!(
                     "edit action {action_clip_id} failed"
@@ -134,9 +223,12 @@ impl SunoClient {
                 break;
             }
             if !sleep_before_deadline(deadline, polling.interval).await {
-                return Err(CliError::GenerationFailed(format!(
-                    "timed out waiting for edit action {action_clip_id}"
-                )));
+                return Err(ambiguous_edit_poll(
+                    operation,
+                    action_clip_id,
+                    "action_poll",
+                    edit_action_timeout(action_clip_id),
+                ));
             }
         }
 
@@ -146,7 +238,10 @@ impl SunoClient {
                 self.edit_result_clip(action_clip_id),
                 edit_result_timeout(action_clip_id),
             )
-            .await?;
+            .await
+            .map_err(|error| {
+                ambiguous_edit_poll(operation, action_clip_id, "result_poll", error)
+            })?;
             if let Some(clip) = result_clip {
                 if edit_status_failed(Some(&clip.status)) {
                     return Err(CliError::GenerationFailed(format!(
@@ -159,9 +254,12 @@ impl SunoClient {
                 }
             }
             if !sleep_before_deadline(deadline, polling.interval).await {
-                return Err(CliError::GenerationFailed(format!(
-                    "timed out waiting for edit result clip {action_clip_id}"
-                )));
+                return Err(ambiguous_edit_poll(
+                    operation,
+                    action_clip_id,
+                    "result_poll",
+                    edit_result_timeout(action_clip_id),
+                ));
             }
         }
     }
@@ -174,6 +272,84 @@ impl SunoClient {
             .into_iter()
             .find(|clip| clip.id == action_clip_id))
     }
+}
+
+fn ambiguous_edit_poll(
+    operation: EditOperation,
+    action_clip_id: &str,
+    stage: &'static str,
+    error: CliError,
+) -> CliError {
+    let cause_code = error.error_code();
+    let cause_message = error.to_string();
+    MutationAmbiguity::new(
+        format!(
+            "{} action {action_clip_id} did not reach a reliable terminal result during {stage}; the edit may still complete",
+            operation.as_str()
+        ),
+        operation.as_str(),
+        action_clip_id,
+        stage,
+        cause_code,
+        cause_message,
+        true,
+        "resume by reading the returned action/result clip id; do not submit the edit again",
+        vec![
+            format!("sunox clip status {action_clip_id} --json"),
+            format!("sunox clip wait {action_clip_id} --json"),
+        ],
+    )
+    .with_context(
+        "action_clip_id",
+        serde_json::Value::String(action_clip_id.to_string()),
+    )
+    .into_error()
+}
+
+fn ambiguous_edit_submit(
+    operation: EditOperation,
+    operation_id: &str,
+    source_clip_id: &str,
+    stage: &'static str,
+    error: reqwest::Error,
+) -> CliError {
+    ambiguous_edit_submit_details(
+        operation,
+        operation_id,
+        source_clip_id,
+        stage,
+        "http_error",
+        error.to_string(),
+    )
+}
+
+fn ambiguous_edit_submit_details(
+    operation: EditOperation,
+    operation_id: &str,
+    source_clip_id: &str,
+    stage: &'static str,
+    cause_code: &'static str,
+    cause_message: String,
+) -> CliError {
+    MutationAmbiguity::new(
+        format!(
+            "{} operation {operation_id} lost a reliable response during {stage}; Suno may still have created an edited clip",
+            operation.as_str()
+        ),
+        operation.as_str(),
+        operation_id,
+        stage,
+        cause_code,
+        cause_message,
+        false,
+        "the edit submit has no client idempotency key, so replay may create a duplicate clip",
+        vec!["sunox clip list --json".into()],
+    )
+    .with_context(
+        "source_clip_id",
+        serde_json::Value::String(source_clip_id.to_string()),
+    )
+    .into_error()
 }
 
 fn edit_action_timeout(action_clip_id: &str) -> CliError {

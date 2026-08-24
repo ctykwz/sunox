@@ -4,28 +4,45 @@ mod account;
 mod clip;
 mod clip_info;
 mod clip_mutation;
+mod custom_model;
 mod feed;
 mod generation;
 mod lyrics;
+mod lyrics_editor;
+mod lyrics_project;
 mod metadata;
 mod operations;
 mod persona;
 mod playlist;
 mod prompts;
 mod upload;
+mod visual;
+mod voice;
 
-pub use account::{BillingInfo, MaxLengths, Model, RemasterModelInfo};
-pub use clip::Clip;
+pub use account::{AccessibleFeatures, BillingInfo, MaxLengths, Model, RemasterModelInfo};
+pub use clip::{Clip, ClipActionConfig};
 pub use clip_info::{
     ClipAttribution, ClipComments, ClipInfo, ClipInfoSupplementalError, RemixCountResponse,
     SimilarClipsResponse,
 };
 pub use clip_mutation::{ClipReaction, ClipTrashRequest, SetClipReactionRequest};
+pub use custom_model::{
+    ArchiveCustomModelRequest, CreateCustomModelRequest, CustomModelCreateResponse,
+    PendingCustomModelsResponse,
+};
 pub use feed::{FeedFilters, FeedResponse, FeedV3Request};
 pub use generation::{
     ControlSliders, GenerateRequest, GenerateResponse, GenerationResult, LastTagsGeneration,
 };
-pub use lyrics::{AlignedWord, CowriteLyricsResponse};
+pub use lyrics::{AlignedWord, CowriteLyricsModel, CowriteLyricsResponse};
+pub use lyrics_editor::{
+    LyricsMashupRequest, LyricsMashupStatus, LyricsMashupSubmission, LyricsRewriteRequest,
+    LyricsRewriteResponse, LyricsRewriteResult,
+};
+pub use lyrics_project::{
+    FlushLyricsProjectRequest, FlushLyricsProjectResponse, LyricsProject,
+    LyricsProjectTitleRequest, LyricsProjectsPage,
+};
 pub use metadata::{SetMetadataRequest, SetVisibilityRequest};
 pub use operations::{ConcatRequest, RemasterVariation};
 pub use persona::{
@@ -45,4 +62,16 @@ pub use upload::{
     AudioUploadInitResponse, AudioUploadStatus, CreateAudioUploadRequest, CreateAudioUploadSpec,
     CreateImageUploadRequest, FinishAudioUploadRequest, FinishImageUploadResponse,
     ImageUploadInitResponse, InitializeAudioClipRequest, InitializeAudioClipResponse,
+};
+pub use visual::{
+    CoverArtApplyResponse, CoverArtBatchDescriptor, CoverArtBatchSubmission, CoverArtCost,
+    CoverArtHistoryRequest, CoverArtHistoryResponse, CoverArtImageGenerateRequest,
+    CoverArtModelCategory, CoverArtModelConfigs, CoverArtPendingBatches, CoverArtPollResponse,
+    CoverArtPromptImage, CoverArtVideoGenerateRequest, PromptImageRequest, PromptImageResponse,
+    VideoGenerationStatus,
+};
+pub use voice::{
+    CreateVoiceVerificationRequest, ProcessVoiceSampleRequest, ProcessVoiceSampleResponse,
+    ProcessVoiceVerificationRecordingRequest, ProcessVoiceVerificationRecordingResponse,
+    ProcessedVoiceStatus, VoicePhrase, VoiceVerification,
 };
