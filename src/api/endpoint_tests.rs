@@ -1,3 +1,6 @@
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
+use clap::Parser;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
@@ -9,12 +12,14 @@ use super::inspiration::InspirationOptions;
 use super::lyrics::CowriteLyricsOptions;
 use super::types::{
     Clip, ClipReaction, ControlSliders, CreateAudioUploadRequest, CreateAudioUploadSpec,
-    CreateImageUploadRequest, CreatePersonaRequest, EditPersonaRequest, FeedFilters,
-    FinishAudioUploadRequest, GenerateRequest, InitializeAudioClipRequest, PersonaListScope,
-    PlaylistReaction, SetMetadataRequest,
+    CreateImageUploadRequest, CreatePersonaRequest, CreateVoiceVerificationRequest,
+    EditPersonaRequest, FeedFilters, FinishAudioUploadRequest, GenerateRequest,
+    InitializeAudioClipRequest, PersonaListScope, PlaylistReaction, ProcessVoiceSampleRequest,
+    ProcessVoiceVerificationRecordingRequest, SetMetadataRequest,
 };
 use crate::auth::{AuthState, BrowserEnvironment};
-use crate::core::CliError;
+use crate::cli::{Cli, Commands};
+use crate::core::{AppConfig, CliError};
 
 struct CapturedRequest {
     method: String,
@@ -260,9 +265,32 @@ impl MockServer {
         }
     }
 
+    async fn truncated_json_once(response_body: &str) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let addr = listener.local_addr().expect("mock server address");
+        let (tx, rx) = oneshot::channel();
+        let response_body = response_body.to_string();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            let captured = read_request(&mut stream).await;
+            write_truncated_json_response(&mut stream, &response_body).await;
+            drop(stream);
+            let _ = tx.send(vec![captured]);
+        });
+
+        Self {
+            base_url: format!("http://{addr}"),
+            requests: rx,
+            idle_timeout: MOCK_SERVER_IDLE_TIMEOUT,
+        }
+    }
+
     fn client(&self) -> SunoClient {
         self.client_with_auth(AuthState {
-            jwt: Some("test-jwt".into()),
+            jwt: Some(test_jwt_with_subject("user-1")),
             device_id: Some("device-1".into()),
             ..AuthState::default()
         })
@@ -284,6 +312,13 @@ impl MockServer {
             .expect("mock server did not finish capturing requests")
             .expect("captured requests")
     }
+}
+
+fn test_jwt_with_subject(subject: &str) -> String {
+    let header = BASE64URL.encode(r#"{"alg":"none","typ":"JWT"}"#);
+    let claims =
+        BASE64URL.encode(serde_json::json!({"sub": subject, "exp": 4_102_444_800_u64}).to_string());
+    format!("{header}.{claims}.test-signature")
 }
 
 async fn capture_request(mut stream: TcpStream, response_body: &str) -> CapturedRequest {
@@ -3273,9 +3308,13 @@ async fn opus_download_posts_convert_when_file_url_is_missing() {
 
 #[tokio::test]
 async fn stems_posts_current_web_contract() {
-    let billing = billing_info_response("tier-pro");
+    let mut billing =
+        serde_json::from_str::<serde_json::Value>(&billing_with_features(&["get_stems"]))
+            .expect("billing fixture");
+    billing["models"] = serde_json::json!([]);
+    let billing = billing.to_string();
     let server = MockServer::json_sequence(&[
-        r#"{"id":"clip-a","title":"Source Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z"}"#,
+        r#"{"id":"clip-a","title":"Source Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z","is_trashed":false,"action_config":{"actions":[{"action_type":"get_stems","visible":true,"disabled":false}]}}"#,
         billing.as_str(),
         r#"{"required":false}"#,
         r#"{"clips":[{"id":"stem-1","title":"Source Song (Vocals)","status":"submitted","model_name":"chirp-stem","created_at":"2026-06-30T00:00:00Z"},{"id":"stem-2","title":"Source Song (Drums)","status":"submitted","model_name":"chirp-stem","created_at":"2026-06-30T00:00:00Z"}]}"#,
@@ -3303,6 +3342,7 @@ async fn stems_posts_current_web_contract() {
     assert_eq!(body["task"], "gen_stem");
     assert_eq!(body["mv"], "chirp-v3-0");
     assert_eq!(body["title"], "Source Song");
+    assert_eq!(body["tags"], "");
     assert_eq!(body["prompt"], "");
     assert_eq!(body["make_instrumental"], true);
     assert_eq!(body["continue_clip_id"], "clip-a");
@@ -3323,9 +3363,9 @@ async fn stems_posts_current_web_contract() {
 
 #[tokio::test]
 async fn stems_with_challenge_token_posts_generate_without_preflight_contract() {
-    let billing = billing_info_response("tier-pro");
+    let billing = billing_with_features(&["get_stems"]);
     let server = MockServer::json_sequence(&[
-        r#"{"id":"clip-a","title":"Source Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z"}"#,
+        r#"{"id":"clip-a","title":"Source Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z","is_trashed":false,"action_config":{"actions":[{"action_type":"get_stems","visible":true,"disabled":false}]}}"#,
         billing.as_str(),
         r#"{"clips":[{"id":"stem-1","title":"Source Song (Vocals)","status":"submitted","model_name":"chirp-stem","created_at":"2026-06-30T00:00:00Z"}]}"#,
     ])
@@ -3351,6 +3391,110 @@ async fn stems_with_challenge_token_posts_generate_without_preflight_contract() 
     assert_eq!(body["metadata"]["user_tier"], "tier-pro");
     assert_eq!(body["token"], "captcha-token");
     assert_eq!(body["token_provider"], 1);
+}
+
+#[tokio::test]
+async fn split_from_mix_posts_the_current_target_stem_contract() {
+    let billing = billing_with_features(&["get_stems"]);
+    let server = MockServer::json_sequence(&[
+        r#"{"id":"clip-a","title":"Source Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-06-30T00:00:00Z","is_trashed":false,"action_config":{"actions":[{"action_type":"get_stems","visible":true,"disabled":false}]}}"#,
+        billing.as_str(),
+        r#"{"required":false}"#,
+        r#"{"clips":[{"id":"stem-target","title":"Source Song (Vocals)","status":"submitted","model_name":"chirp-stem","created_at":"2026-06-30T00:00:00Z"},{"id":"stem-rest","title":"Source Song (Instrumental)","status":"submitted","model_name":"chirp-stem","created_at":"2026-06-30T00:00:00Z"}]}"#,
+    ])
+    .await;
+    let client = server.client();
+
+    let request = client
+        .prepare_split_stems_request("clip-a", "Vocals", "Lead Vocal", None)
+        .await
+        .expect("split request");
+    let result = client.generate(&request).await.expect("split from mix");
+
+    assert_eq!(result.len(), 2);
+    let requests = server.captured_all().await;
+    let body = serde_json::from_str::<serde_json::Value>(&requests[3].body).expect("request json");
+    assert_eq!(body["task"], "gen_stem");
+    assert_eq!(body["stem_type_id"], 91);
+    assert_eq!(body["stem_type_group_name"], "Vocals");
+    assert_eq!(body["stem_name"], "Lead Vocal");
+    assert_eq!(body["stem_task"], "extract");
+}
+
+#[tokio::test]
+async fn existing_stem_results_use_current_pages_and_page_routes() {
+    let server = MockServer::json_sequence(&[
+        r#"{"pages":2}"#,
+        r#"{"stems":[{"id":"stem-1"}]}"#,
+        r#"{"stems":[{"id":"stem-2"}]}"#,
+        r#"{"clips":[{"id":"stem-2","title":"Drums","status":"complete","model_name":"chirp-stem","created_at":"2026-08-24T00:00:00Z","metadata":{"stem_type_group_name":"Drums"}},{"id":"stem-1","title":"Vocals","status":"complete","model_name":"chirp-stem","created_at":"2026-08-24T00:00:00Z","metadata":{"stem_type_group_name":"Vocals"}}],"has_more":false}"#,
+    ])
+    .await;
+    let client = server.client();
+
+    let results = client.get_all_stem_results("clip-a").await.expect("stems");
+
+    assert_eq!(results.pages, 2);
+    assert_eq!(results.banks.len(), 2);
+    assert_eq!(results.banks[0].page, 0);
+    assert_eq!(results.banks[0].stems[0].id, "stem-1");
+    assert_eq!(results.banks[1].page, 1);
+    assert_eq!(results.banks[1].stems[0].id, "stem-2");
+    let requests = server.captured_all().await;
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].path, "/api/clip/clip-a/stems/pages");
+    assert_eq!(requests[1].path, "/api/clip/clip-a/stems?page=0");
+    assert_eq!(requests[2].path, "/api/clip/clip-a/stems?page=1");
+    assert_eq!(requests[3].method, "POST");
+    assert_eq!(requests[3].path, "/api/feed/v3");
+    let body =
+        serde_json::from_str::<serde_json::Value>(&requests[3].body).expect("stem hydration body");
+    assert_eq!(
+        body["filters"]["ids"]["clipIds"],
+        serde_json::json!(["stem-1", "stem-2"])
+    );
+}
+
+#[tokio::test]
+async fn empty_or_null_stem_results_match_current_web_fallbacks() {
+    let null_pages = MockServer::json(r#"{"pages":null}"#).await;
+    let client = null_pages.client();
+    let results = client
+        .get_all_stem_results("clip-empty")
+        .await
+        .expect("null page count is empty");
+    assert_eq!(results.pages, 0);
+    assert!(results.banks.is_empty());
+    assert_eq!(null_pages.captured_all().await.len(), 1);
+
+    let null_stems = MockServer::json(r#"{"stems":null}"#).await;
+    let client = null_stems.client();
+    let bank = client
+        .get_stem_result_page("clip-empty", 0)
+        .await
+        .expect("null stems are empty");
+    assert!(bank.stems.is_empty());
+    assert!(bank.missing_clip_ids.is_empty());
+    assert_eq!(null_stems.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
+async fn stem_hydration_preserves_missing_reference_ids() {
+    let server = MockServer::json_sequence(&[
+        r#"{"pages":1}"#,
+        r#"{"stems":[{"id":"stem-present"},{"id":"stem-missing"}]}"#,
+        r#"{"clips":[{"id":"stem-present","title":"Vocals","status":"complete","model_name":"chirp-stem","created_at":"2026-08-24T00:00:00Z"}],"has_more":false}"#,
+    ])
+    .await;
+    let client = server.client();
+
+    let results = client
+        .get_all_stem_results("clip-a")
+        .await
+        .expect("partial hydration remains inspectable");
+
+    assert_eq!(results.banks[0].stems[0].id, "stem-present");
+    assert_eq!(results.banks[0].missing_clip_ids, ["stem-missing"]);
 }
 
 #[tokio::test]
@@ -4345,6 +4489,345 @@ async fn create_persona_posts_current_web_contract() {
             "is_public": false
         })
     );
+}
+
+#[tokio::test]
+async fn voice_phrase_uses_the_current_language_query_contract() {
+    let server = MockServer::json(r#"{"phrase_id":"phrase-1","phrase_text":"Read this"}"#).await;
+    let client = server.client();
+
+    let phrase = client.get_voice_phrase("zh").await.expect("voice phrase");
+
+    assert_eq!(phrase.phrase_id, "phrase-1");
+    assert_eq!(phrase.phrase_text, "Read this");
+    let request = server.captured().await;
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.path, "/api/voice-verification/phrase/?language=zh");
+}
+
+#[tokio::test]
+async fn voice_status_reads_use_current_processed_and_verification_routes() {
+    let server = MockServer::json_sequence(&[
+        r#"{"id":"processed-1","status":"completed","voice_recording_id":"recording-1"}"#,
+        r#"{"id":"verification-1","status":"approved"}"#,
+    ])
+    .await;
+    let client = server.client();
+
+    let processed = client
+        .get_processed_voice_status("processed-1")
+        .await
+        .expect("processed status");
+    let verification = client
+        .get_voice_verification("verification-1")
+        .await
+        .expect("verification status");
+
+    assert_eq!(processed.status, "completed");
+    assert_eq!(verification.status, "approved");
+    let requests = server.captured_all().await;
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].path, "/api/processed_clip/processed-1");
+    assert_eq!(requests[1].method, "GET");
+    assert_eq!(requests[1].path, "/api/voice-verification/verification-1");
+}
+
+#[tokio::test]
+async fn voice_status_reads_reject_mismatched_response_identities() {
+    let server = MockServer::json_sequence(&[
+        r#"{"id":"processed-other","status":"completed"}"#,
+        r#"{"id":"verification-other","status":"approved"}"#,
+    ])
+    .await;
+    let client = server.client();
+
+    let processed_error = client
+        .get_processed_voice_status("processed-expected")
+        .await
+        .expect_err("processed status identity must match its path");
+    let verification_error = client
+        .get_voice_verification("verification-expected")
+        .await
+        .expect_err("verification identity must match its path");
+
+    assert!(matches!(
+        processed_error,
+        CliError::Api {
+            code: "schema_drift",
+            ..
+        }
+    ));
+    assert!(matches!(
+        verification_error,
+        CliError::Api {
+            code: "schema_drift",
+            ..
+        }
+    ));
+    assert_eq!(server.captured_all().await.len(), 2);
+}
+
+#[tokio::test]
+async fn voice_processing_posts_distinct_main_and_verification_bodies() {
+    let server = MockServer::json_sequence(&[
+        r#"{"id":"processed-1","voice_recording_id":"recording-main"}"#,
+        r#"{"id":"processed-verify","voice_recording_id":"recording-verify"}"#,
+    ])
+    .await;
+    let client = server.client();
+
+    client
+        .process_voice_sample(
+            "workflow-1",
+            &ProcessVoiceSampleRequest {
+                upload_id: "upload-main".into(),
+                vocal_start_s: 0.0,
+                vocal_end_s: 42.35,
+            },
+        )
+        .await
+        .expect("process main sample");
+    client
+        .process_voice_verification_recording(
+            "workflow-1",
+            &ProcessVoiceVerificationRecordingRequest::new("upload-verify".into()),
+        )
+        .await
+        .expect("process verification recording");
+
+    let requests = server.captured_all().await;
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].path, "/api/processed_clip/voice-vox-stem");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[0].body).expect("main body"),
+        serde_json::json!({
+            "upload_id": "upload-main",
+            "vocal_start_s": 0.0,
+            "vocal_end_s": 42.35
+        })
+    );
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[1].path, "/api/processed_clip/voice-vox-stem");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[1].body)
+            .expect("verification recording body"),
+        serde_json::json!({
+            "upload_id": "upload-verify",
+            "recording_type": "verification"
+        })
+    );
+}
+
+#[tokio::test]
+async fn voice_verification_posts_all_current_server_identities() {
+    let server = MockServer::json(r#"{"id":"verification-1","status":"pending"}"#).await;
+    let client = server.client();
+
+    let verification = client
+        .create_voice_verification(
+            "workflow-1",
+            &CreateVoiceVerificationRequest {
+                voice_recording_id: "recording-main".into(),
+                verification_recording_id: "recording-verify".into(),
+                phrase_id: "phrase-1".into(),
+            },
+        )
+        .await
+        .expect("create voice verification");
+
+    assert_eq!(verification.id, "verification-1");
+    let request = server.captured().await;
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/api/voice-verification/");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&request.body).expect("request body"),
+        serde_json::json!({
+            "voice_recording_id": "recording-main",
+            "verification_recording_id": "recording-verify",
+            "phrase_id": "phrase-1"
+        })
+    );
+}
+
+#[tokio::test]
+async fn verified_voice_persona_posts_the_exact_private_vox_body() {
+    let server = MockServer::json(
+        r#"{"id":"persona-1","name":"My Voice","is_public":false,"persona_type":"vox"}"#,
+    )
+    .await;
+    let client = server.client();
+
+    let persona = client
+        .create_verified_voice_persona(
+            "workflow-1",
+            &CreatePersonaRequest {
+                root_clip_id: None,
+                name: Some("My Voice".into()),
+                description: Some(String::new()),
+                image_s3_id: None,
+                is_public: Some(false),
+                is_suno_persona: None,
+                persona_type: Some("vox".into()),
+                vox_audio_id: Some("processed-1".into()),
+                vocal_start_s: Some(0.0),
+                vocal_end_s: Some(42.35),
+                user_input_styles: Some("warm soul".into()),
+                source: Some("random_song".into()),
+                singer_skill_level: Some("Advanced".into()),
+                clips: None,
+                is_voice_recording: Some(true),
+                voice_recording_id: Some("recording-main".into()),
+                verification_id: Some("verification-1".into()),
+            },
+        )
+        .await
+        .expect("create verified Voice persona");
+
+    assert_eq!(persona.id, "persona-1");
+    let request = server.captured().await;
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/api/persona/create/");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&request.body).expect("request body"),
+        serde_json::json!({
+            "is_voice_recording": true,
+            "voice_recording_id": "recording-main",
+            "name": "My Voice",
+            "description": "",
+            "is_public": false,
+            "persona_type": "vox",
+            "source": "random_song",
+            "user_input_styles": "warm soul",
+            "singer_skill_level": "Advanced",
+            "verification_id": "verification-1",
+            "vox_audio_id": "processed-1",
+            "vocal_start_s": 0.0,
+            "vocal_end_s": 42.35
+        })
+    );
+}
+
+#[tokio::test]
+async fn verified_voice_persona_conflict_is_not_replayed_and_preserves_recovery_identity() {
+    let server =
+        MockServer::json_status_sequence(&[(409, r#"{"detail":"voice persona already exists"}"#)])
+            .await;
+    let client = server.client();
+
+    let error = client
+        .create_verified_voice_persona(
+            "workflow-1",
+            &CreatePersonaRequest {
+                root_clip_id: None,
+                name: Some("My Voice".into()),
+                description: Some(String::new()),
+                image_s3_id: None,
+                is_public: Some(false),
+                is_suno_persona: None,
+                persona_type: Some("vox".into()),
+                vox_audio_id: Some("processed-1".into()),
+                vocal_start_s: Some(0.0),
+                vocal_end_s: Some(42.35),
+                user_input_styles: Some("warm soul".into()),
+                source: Some("random_song".into()),
+                singer_skill_level: Some("Advanced".into()),
+                clips: None,
+                is_voice_recording: Some(true),
+                voice_recording_id: Some("recording-main".into()),
+                verification_id: Some("verification-1".into()),
+            },
+        )
+        .await
+        .expect_err("HTTP 409 must stay ambiguous and must not replay");
+
+    let details = error.details().expect("ambiguity details");
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    assert_eq!(details["stage"], "persona_create_conflict");
+    assert_eq!(details["voice_recording_id"], "recording-main");
+    assert_eq!(details["verification_id"], "verification-1");
+    assert_eq!(details["recovery"]["resumable"], false);
+    assert_eq!(
+        details["recovery"]["inspection_commands"],
+        serde_json::json!(["sunox persona list --json"])
+    );
+    assert_eq!(server.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
+async fn voice_mutation_schema_loss_is_ambiguous_and_is_not_replayed() {
+    let server = MockServer::json_status_sequence(&[(200, "not-json")]).await;
+    let client = server.client();
+
+    let error = client
+        .create_voice_verification(
+            "workflow-1",
+            &CreateVoiceVerificationRequest {
+                voice_recording_id: "recording-main".into(),
+                verification_recording_id: "recording-verify".into(),
+                phrase_id: "phrase-1".into(),
+            },
+        )
+        .await
+        .expect_err("successful write with unreadable schema is ambiguous");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("ambiguity details");
+    assert_eq!(details["operation"], "voice_create");
+    assert_eq!(details["operation_id"], "workflow-1");
+    assert_eq!(details["stage"], "verification_create_response_schema");
+    assert_eq!(server.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
+async fn voice_mutation_server_error_is_ambiguous_and_is_not_replayed() {
+    let server =
+        MockServer::json_status_sequence(&[(500, r#"{"detail":"unknown accepted state"}"#)]).await;
+    let client = server.client();
+
+    let error = client
+        .create_voice_verification(
+            "workflow-1",
+            &CreateVoiceVerificationRequest {
+                voice_recording_id: "recording-main".into(),
+                verification_recording_id: "recording-verify".into(),
+                phrase_id: "phrase-1".into(),
+            },
+        )
+        .await
+        .expect_err("5xx cannot prove the Voice write was rejected");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    assert_eq!(
+        error.details().expect("details")["stage"],
+        "verification_create_response_status"
+    );
+    assert_eq!(server.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
+async fn voice_mutation_auth_failure_is_not_refreshed_or_replayed() {
+    let server =
+        MockServer::json_status_sequence(&[(401, r#"{"detail":"Token validation failed."}"#)])
+            .await;
+    let client = server.client();
+
+    let error = client
+        .create_voice_verification(
+            "workflow-1",
+            &CreateVoiceVerificationRequest {
+                voice_recording_id: "recording-main".into(),
+                verification_recording_id: "recording-verify".into(),
+                phrase_id: "phrase-1".into(),
+            },
+        )
+        .await
+        .expect_err("Voice writes must not enter the auth-refresh replay path");
+
+    assert!(matches!(error, CliError::AuthExpired));
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].path, "/api/voice-verification/");
 }
 
 #[tokio::test]
@@ -5566,4 +6049,1908 @@ async fn remaster_submit_keeps_an_explicit_server_error_non_ambiguous() {
             ..
         }
     ));
+}
+
+fn complete_clip_fixture(id: &str, action: Option<&str>, image_url: Option<&str>) -> String {
+    let actions = action
+        .map(|action| {
+            serde_json::json!([{
+                "action_type": action,
+                "visible": true,
+                "disabled": false,
+            }])
+        })
+        .unwrap_or_else(|| serde_json::json!([]));
+    serde_json::json!({
+        "id": id,
+        "user_id": "user-1",
+        "title": "Verified source",
+        "status": "complete",
+        "model_name": "chirp-fenix",
+        "created_at": "2026-08-24T00:00:00Z",
+        "is_trashed": false,
+        "image_url": image_url,
+        "action_config": {"actions": actions}
+    })
+    .to_string()
+}
+
+fn billing_with_features(features: &[&str]) -> String {
+    let mut billing = serde_json::from_str::<serde_json::Value>(&billing_info_response("tier-pro"))
+        .expect("billing fixture");
+    billing["accessible_features"] = serde_json::json!(features);
+    billing.to_string()
+}
+
+fn lyrics_project_fixture(id: &str, title: &str, lyrics: &str, updated_at: &str) -> String {
+    serde_json::json!({
+        "id": id,
+        "title": title,
+        "lyrics": lyrics,
+        "created_at": "2026-08-24T00:00:00Z",
+        "updated_at": updated_at,
+        "future_project_field": {"preserved": true}
+    })
+    .to_string()
+}
+
+fn parsed_lyrics_project_generation_request(project_id: &str) -> GenerateRequest {
+    let cli = Cli::try_parse_from([
+        "sunox",
+        "create",
+        "--lyrics",
+        "[Verse]\nhello",
+        "--lyrics-project-id",
+        project_id,
+        "--model",
+        "chirp-v4-5",
+    ])
+    .expect("lyrics project generation CLI");
+    let Some(Commands::Create(args)) = cli.command else {
+        panic!("expected create command");
+    };
+    let args = crate::commands::create::build_generate_args_from_create(args);
+    crate::commands::create::build_generate_request(&args, &AppConfig::default())
+        .expect("generation request")
+}
+
+#[tokio::test]
+async fn custom_model_create_preflights_every_source_then_posts_the_exact_contract() {
+    let clip_ids = (1..=6)
+        .map(|index| format!("clip-{index}"))
+        .collect::<Vec<_>>();
+    let mut responses = vec![(200, billing_with_features(&["custom_models"]))];
+    responses.extend(
+        clip_ids
+            .iter()
+            .map(|clip_id| (200, complete_clip_fixture(clip_id, None, None))),
+    );
+    responses.push((200, r#"{"id":"custom-1","training_eta_s":120}"#.to_string()));
+    responses.push((
+        200,
+        r#"{"has_pending":true,"pending_models":[{"id":"custom-1","name":"My Sound"}]}"#
+            .to_string(),
+    ));
+    responses.push((200, billing_info_response("tier-pro")));
+    let server = MockServer::response_sequence(responses).await;
+    let client = server.client();
+
+    let created = client
+        .create_custom_model(&clip_ids, "My Sound", true)
+        .await
+        .expect("create custom model");
+
+    assert_eq!(created.id, "custom-1");
+    assert_eq!(created.extra["training_eta_s"], 120);
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 10);
+    assert_eq!(requests[0].path, "/api/billing/info/");
+    for (index, clip_id) in clip_ids.iter().enumerate() {
+        assert_eq!(requests[index + 1].method, "GET");
+        assert_eq!(requests[index + 1].path, format!("/api/clip/{clip_id}"));
+    }
+    assert_eq!(requests[7].method, "POST");
+    assert_eq!(requests[7].path, "/api/custom-model/create/");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[7].body).expect("create body"),
+        serde_json::json!({"clip_ids": clip_ids, "name": "My Sound"})
+    );
+    assert_eq!(requests[8].path, "/api/custom-model/pending/");
+    assert_eq!(requests[9].path, "/api/billing/info/");
+}
+
+#[tokio::test]
+async fn custom_model_create_rejects_an_unusable_source_before_training_submit() {
+    let source = serde_json::json!({
+        "id": "clip-1",
+        "user_id": "user-1",
+        "title": "Still rendering",
+        "status": "processing",
+        "model_name": "chirp-fenix",
+        "created_at": "2026-08-24T00:00:00Z",
+        "is_trashed": false
+    })
+    .to_string();
+    let server = MockServer::json(&source).await;
+    let client = server.client();
+    let clip_ids = (1..=6)
+        .map(|index| format!("clip-{index}"))
+        .collect::<Vec<_>>();
+
+    let error = client
+        .create_custom_model_after_ui_gate(
+            &clip_ids,
+            "My Sound",
+            super::PollingOptions {
+                timeout: Duration::from_millis(200),
+                interval: Duration::from_millis(1),
+            },
+        )
+        .await
+        .expect_err("processing source must stop training");
+
+    assert!(matches!(error, CliError::Config(message) if message.contains("must be complete")));
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "GET");
+}
+
+#[tokio::test]
+async fn custom_model_create_requires_every_source_to_match_the_authenticated_owner() {
+    let clip_ids = (1..=6)
+        .map(|index| format!("clip-{index}"))
+        .collect::<Vec<_>>();
+    let mut mismatched =
+        serde_json::from_str::<serde_json::Value>(&complete_clip_fixture("clip-1", None, None))
+            .expect("clip fixture");
+    mismatched["user_id"] = serde_json::json!("user-other");
+    let server = MockServer::json(&mismatched.to_string()).await;
+    let client = server.client();
+
+    let error = client
+        .create_custom_model_after_ui_gate(
+            &clip_ids,
+            "My Sound",
+            super::PollingOptions {
+                timeout: Duration::from_millis(200),
+                interval: Duration::from_millis(1),
+            },
+        )
+        .await
+        .expect_err("a source owned by another account must stop training");
+
+    assert!(
+        matches!(error, CliError::Config(message) if message.contains("owned by the authenticated account"))
+    );
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "GET");
+}
+
+#[tokio::test]
+async fn custom_model_create_api_rejects_duplicate_sources_before_network_access() {
+    let server = MockServer::json("{}").await;
+    let client = server.client();
+    let clip_ids = vec!["clip-1".to_string(); 6];
+
+    let error = client
+        .create_custom_model(&clip_ids, "My Sound", true)
+        .await
+        .expect_err("duplicate sources must fail at the API boundary");
+
+    assert!(matches!(error, CliError::Config(message) if message.contains("duplicated")));
+    assert!(server.captured_all().await.is_empty());
+}
+
+#[tokio::test]
+async fn custom_model_create_requires_the_account_feature_before_clip_reads() {
+    let server = MockServer::json(&billing_with_features(&[])).await;
+    let client = server.client();
+    let clip_ids = (1..=6)
+        .map(|index| format!("clip-{index}"))
+        .collect::<Vec<_>>();
+
+    let error = client
+        .create_custom_model(&clip_ids, "My Sound", true)
+        .await
+        .expect_err("missing Custom Model entitlement must fail closed");
+
+    assert!(matches!(error, CliError::Config(message) if message.contains("custom_models")));
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/api/billing/info/");
+}
+
+#[tokio::test]
+async fn custom_model_create_requires_explicit_ui_availability_confirmation() {
+    let billing = billing_with_features(&["custom_models"]);
+    let server = MockServer::json(&billing).await;
+    let client = server.client();
+    let clip_ids = (1..=6)
+        .map(|index| format!("clip-{index}"))
+        .collect::<Vec<_>>();
+
+    let error = client
+        .create_custom_model(&clip_ids, "My Sound", false)
+        .await
+        .expect_err("missing UI availability confirmation must fail closed");
+
+    assert!(
+        matches!(error, CliError::Config(message) if message.contains("custom-model-ui") && message.contains("--confirm-ui-available"))
+    );
+    let requests = server.captured_all().await;
+    assert_eq!(
+        requests.len(),
+        1,
+        "gate uncertainty must stop before clip reads"
+    );
+    assert_eq!(requests[0].path, "/api/billing/info/");
+}
+
+#[tokio::test]
+async fn custom_model_create_reports_ambiguous_missing_id_without_replay() {
+    let clip_ids = (1..=6)
+        .map(|index| format!("clip-{index}"))
+        .collect::<Vec<_>>();
+    let mut responses = Vec::new();
+    responses.extend(
+        clip_ids
+            .iter()
+            .map(|clip_id| (200, complete_clip_fixture(clip_id, None, None))),
+    );
+    responses.push((200, r#"{"name":"missing recovery id"}"#.to_string()));
+    let server = MockServer::response_sequence(responses).await;
+    let client = server.client();
+
+    let error = client
+        .create_custom_model_after_ui_gate(
+            &clip_ids,
+            "My Sound",
+            super::PollingOptions {
+                timeout: Duration::from_millis(200),
+                interval: Duration::from_millis(1),
+            },
+        )
+        .await
+        .expect_err("missing create ID must be ambiguous");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("ambiguity details");
+    assert_eq!(details["operation"], "custom_model_create");
+    assert_eq!(details["recovery"]["resumable"], false);
+    assert_eq!(server.captured_all().await.len(), 7);
+}
+
+#[tokio::test]
+async fn custom_model_create_treats_a_server_error_after_submit_as_ambiguous() {
+    let clip_ids = (1..=6)
+        .map(|index| format!("clip-{index}"))
+        .collect::<Vec<_>>();
+    let mut responses = clip_ids
+        .iter()
+        .map(|clip_id| (200, complete_clip_fixture(clip_id, None, None)))
+        .collect::<Vec<_>>();
+    responses.push((500, r#"{"error":"unknown accepted state"}"#.into()));
+    let server = MockServer::response_sequence(responses).await;
+    let client = server.client();
+
+    let error = client
+        .create_custom_model_after_ui_gate(
+            &clip_ids,
+            "My Sound",
+            super::PollingOptions {
+                timeout: Duration::from_millis(200),
+                interval: Duration::from_millis(1),
+            },
+        )
+        .await
+        .expect_err("5xx after training submit has an unknown accepted state");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    assert_eq!(
+        error.details().expect("details")["stage"],
+        "response_status"
+    );
+    assert_eq!(server.captured_all().await.len(), 7);
+}
+
+#[tokio::test]
+async fn custom_model_create_readback_converges_without_replaying_training() {
+    let clip_ids = (1..=6)
+        .map(|index| format!("clip-{index}"))
+        .collect::<Vec<_>>();
+    let mut responses = Vec::new();
+    responses.extend(
+        clip_ids
+            .iter()
+            .map(|clip_id| (200, complete_clip_fixture(clip_id, None, None))),
+    );
+    responses.push((200, r#"{"id":"custom-1"}"#.to_string()));
+    responses.push((
+        200,
+        r#"{"has_pending":false,"pending_models":[]}"#.to_string(),
+    ));
+    responses.push((200, billing_info_response("tier-pro")));
+    responses.push((
+        200,
+        r#"{"has_pending":true,"pending_models":[{"id":"custom-1","name":"My Sound"}]}"#
+            .to_string(),
+    ));
+    responses.push((200, billing_info_response("tier-pro")));
+    let server = MockServer::response_sequence(responses).await;
+    let client = server.client();
+
+    let created = client
+        .create_custom_model_after_ui_gate(
+            &clip_ids,
+            "My Sound",
+            super::PollingOptions {
+                timeout: Duration::from_millis(200),
+                interval: Duration::from_millis(1),
+            },
+        )
+        .await
+        .expect("eventually visible training should be confirmed");
+
+    assert_eq!(created.id, "custom-1");
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 11);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.method == "POST")
+            .count(),
+        1,
+        "readback convergence must not replay training"
+    );
+}
+
+#[tokio::test]
+async fn custom_model_archive_posts_then_proves_absence_in_pending_and_billing() {
+    let before_pending =
+        r#"{"has_pending":true,"pending_models":[{"id":"custom-1","name":"My Sound"}]}"#;
+    let before_models = serde_json::json!([{
+        "name": "My Sound",
+        "external_key": "custom-1",
+        "can_use": true,
+        "is_default_model": false,
+        "description": "trained model",
+        "badges": ["custom"],
+        "max_lengths": {}
+    }]);
+    let before_billing = billing_info_with_models("tier-pro", before_models);
+    let after_billing = billing_info_with_models("tier-pro", serde_json::json!([]));
+    let server = MockServer::response_sequence(vec![
+        (200, before_pending.to_string()),
+        (200, before_billing),
+        (200, "{}".into()),
+        (200, r#"{"has_pending":false,"pending_models":[]}"#.into()),
+        (200, after_billing),
+    ])
+    .await;
+    let client = server.client();
+
+    client
+        .archive_custom_model("custom-1")
+        .await
+        .expect("archive with readback");
+
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 5);
+    assert_eq!(requests[0].path, "/api/custom-model/pending/");
+    assert_eq!(requests[1].path, "/api/billing/info/");
+    assert_eq!(requests[2].method, "POST");
+    assert_eq!(requests[2].path, "/api/custom-model/archive/");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[2].body).expect("archive body"),
+        serde_json::json!({"id": "custom-1"})
+    );
+    assert_eq!(requests[3].path, "/api/custom-model/pending/");
+    assert_eq!(requests[4].path, "/api/billing/info/");
+}
+
+#[tokio::test]
+async fn custom_model_archive_treats_a_server_error_after_submit_as_ambiguous() {
+    let pending = r#"{"has_pending":true,"pending_models":[{"id":"custom-1","name":"My Sound"}]}"#;
+    let server = MockServer::response_sequence(vec![
+        (200, pending.into()),
+        (200, billing_info_response("tier-pro")),
+        (500, r#"{"error":"unknown accepted state"}"#.into()),
+    ])
+    .await;
+    let client = server.client();
+
+    let error = client
+        .archive_custom_model("custom-1")
+        .await
+        .expect_err("5xx after archive submit has an unknown accepted state");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    assert_eq!(
+        error.details().expect("details")["stage"],
+        "response_status"
+    );
+    assert_eq!(server.captured_all().await.len(), 3);
+}
+
+#[tokio::test]
+async fn ready_only_custom_model_archive_converges_without_replaying_the_write() {
+    let pending = r#"{"has_pending":false,"pending_models":[]}"#;
+    let ready_models = serde_json::json!([{
+        "id": "custom-1",
+        "name": "My Sound",
+        "external_key": "chirp-custom-1",
+        "can_use": true,
+        "is_default_model": false,
+        "description": "trained model",
+        "badges": ["custom"],
+        "max_lengths": {}
+    }]);
+    let ready_billing = billing_info_with_models("tier-pro", ready_models);
+    let absent_billing = billing_info_with_models("tier-pro", serde_json::json!([]));
+    let server = MockServer::response_sequence(vec![
+        (200, pending.into()),
+        (200, ready_billing.clone()),
+        (200, "{}".into()),
+        (200, pending.into()),
+        (200, ready_billing),
+        (200, pending.into()),
+        (200, absent_billing),
+    ])
+    .await;
+    let client = server.client();
+
+    client
+        .archive_custom_model_with_readback(
+            "custom-1",
+            super::PollingOptions {
+                timeout: Duration::from_millis(200),
+                interval: Duration::from_millis(1),
+            },
+        )
+        .await
+        .expect("ready-only archive should converge through read-only polling");
+
+    let requests = server.captured_all().await;
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.method == "POST")
+            .count(),
+        1,
+        "archive must never be replayed during convergence"
+    );
+    assert_eq!(requests.len(), 7);
+}
+
+#[tokio::test]
+async fn custom_model_archive_does_not_treat_a_base_model_custom_badge_as_identity() {
+    let pending = r#"{"has_pending":false,"pending_models":[]}"#;
+    let base_models = serde_json::json!([{
+        "id": "base-model-1",
+        "name": "v5.5",
+        "external_key": "chirp-fenix",
+        "can_use": true,
+        "is_default_model": true,
+        "description": "base model that supports custom prompting",
+        "badges": ["custom"],
+        "max_lengths": {}
+    }]);
+    let billing = billing_info_with_models("tier-pro", base_models);
+    let server = MockServer::json_sequence(&[pending, &billing]).await;
+    let client = server.client();
+
+    let error = client
+        .archive_custom_model("base-model-1")
+        .await
+        .expect_err("base model must fail closed before archive submit");
+
+    assert!(matches!(error, CliError::NotFound(_)));
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|request| request.method == "GET"));
+}
+
+#[tokio::test]
+async fn lyrics_projects_list_follows_the_exact_cursor_contract() {
+    let first = serde_json::json!({
+        "projects": [serde_json::from_str::<serde_json::Value>(&lyrics_project_fixture(
+            "project-1", "First", "A", "2026-08-24T01:00:00Z"
+        )).expect("project fixture")],
+        "next_cursor": "cursor-2"
+    })
+    .to_string();
+    let second = serde_json::json!({
+        "projects": [serde_json::from_str::<serde_json::Value>(&lyrics_project_fixture(
+            "project-2", "Second", "B", "2026-08-24T00:00:00Z"
+        )).expect("project fixture")],
+        "next_cursor": null
+    })
+    .to_string();
+    let server = MockServer::json_sequence(&[&first, &second]).await;
+    let client = server.client();
+
+    let projects = client.lyrics_projects().await.expect("project list");
+
+    assert_eq!(projects.len(), 2);
+    assert_eq!(projects[0].extra["future_project_field"]["preserved"], true);
+    let requests = server.captured_all().await;
+    assert_eq!(
+        requests[0].path,
+        "/api/lyrics-projects?limit=50&sort=updated_at"
+    );
+    assert_eq!(
+        requests[1].path,
+        "/api/lyrics-projects?limit=50&sort=updated_at&cursor=cursor-2"
+    );
+}
+
+#[tokio::test]
+async fn lyrics_projects_list_rejects_a_missing_projects_field() {
+    let server = MockServer::json(r#"{"next_cursor":null}"#).await;
+    let client = server.client();
+
+    let error = client
+        .lyrics_projects()
+        .await
+        .expect_err("the list envelope must contain projects");
+
+    assert_eq!(error.error_code(), "schema_drift");
+
+    let empty = MockServer::json(r#"{"projects":[],"next_cursor":null}"#).await;
+    let client = empty.client();
+    assert!(
+        client
+            .lyrics_projects()
+            .await
+            .expect("a present empty projects array is valid")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn lyrics_project_get_rejects_a_mismatched_response_identity() {
+    let response =
+        lyrics_project_fixture("project-other", "Draft", "lyrics", "2026-08-24T00:00:00Z");
+    let server = MockServer::json(&response).await;
+    let client = server.client();
+
+    let error = client
+        .lyrics_project("project-1")
+        .await
+        .expect_err("a project GET must preserve the requested identity");
+
+    assert_eq!(error.error_code(), "schema_drift");
+    assert!(error.to_string().contains("project-other"));
+}
+
+#[tokio::test]
+async fn lyrics_project_get_requires_title_and_lyrics_fields_even_when_they_may_be_empty() {
+    for response in [
+        r#"{"id":"project-1","lyrics":"","created_at":"2026-08-24T00:00:00Z","updated_at":"2026-08-24T00:00:00Z"}"#,
+        r#"{"id":"project-1","title":"","created_at":"2026-08-24T00:00:00Z","updated_at":"2026-08-24T00:00:00Z"}"#,
+    ] {
+        let server = MockServer::json(response).await;
+        let client = server.client();
+
+        let error = client
+            .lyrics_project("project-1")
+            .await
+            .expect_err("consumed project fields must be present");
+
+        assert_eq!(error.error_code(), "schema_drift");
+    }
+
+    let empty = lyrics_project_fixture("project-1", "", "", "2026-08-24T00:00:00Z");
+    let server = MockServer::json(&empty).await;
+    let client = server.client();
+    client
+        .lyrics_project("project-1")
+        .await
+        .expect("present empty values remain valid");
+}
+
+#[tokio::test]
+async fn generation_with_lyrics_project_preflights_identity_then_posts_the_exact_reference() {
+    let project = lyrics_project_fixture(
+        "project-1",
+        "Draft",
+        "[Verse]\nhello",
+        "2026-08-24T00:00:00Z",
+    );
+    let billing = billing_info_response("tier-pro");
+    let server = MockServer::json_sequence(&[
+        &project,
+        &billing,
+        r#"{"required":false}"#,
+        r#"{"clips":[{"id":"clip-1","title":"Draft","status":"submitted","model_name":"chirp-v4-5","created_at":"2026-08-24T00:00:00Z"}]}"#,
+    ])
+    .await;
+    let client = server.client();
+    let request = parsed_lyrics_project_generation_request("project-1");
+
+    crate::commands::create::validate_lyrics_project_reference(&request, &client)
+        .await
+        .expect("matching project preflight");
+    client
+        .generate(&request)
+        .await
+        .expect("generation submit after project preflight");
+
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].path, "/api/lyrics-projects/project-1");
+    assert_eq!(requests[1].path, "/api/billing/info/");
+    assert_eq!(requests[2].method, "POST");
+    assert_eq!(requests[2].path, "/api/c/check");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[2].body)
+            .expect("challenge request JSON"),
+        serde_json::json!({"ctype": "generation"})
+    );
+    assert_eq!(requests[3].method, "POST");
+    assert_eq!(requests[3].path, "/api/generate/v2-web/");
+    let body = serde_json::from_str::<serde_json::Value>(&requests[3].body)
+        .expect("generation request JSON");
+    assert_eq!(body["prompt"], "[Verse]\nhello");
+    assert_eq!(body["lyrics_project_id"], "project-1");
+}
+
+#[tokio::test]
+async fn generation_with_lyrics_project_identity_mismatch_never_submits() {
+    let mismatched = lyrics_project_fixture(
+        "project-other",
+        "Draft",
+        "[Verse]\nhello",
+        "2026-08-24T00:00:00Z",
+    );
+    let server = MockServer::json(&mismatched).await;
+    let client = server.client();
+    let request = parsed_lyrics_project_generation_request("project-1");
+
+    let error = crate::commands::create::validate_lyrics_project_reference(&request, &client)
+        .await
+        .expect_err("mismatched project identity must stop before submit");
+
+    assert_eq!(error.error_code(), "schema_drift");
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].path, "/api/lyrics-projects/project-1");
+}
+
+#[tokio::test]
+async fn lyrics_project_create_posts_then_reads_back_the_created_project() {
+    let created = lyrics_project_fixture("project-1", "Draft", "", "2026-08-24T00:00:00Z");
+    let readback = lyrics_project_fixture("project-1", "Draft", "", "2026-08-24T00:00:01Z");
+    let server = MockServer::json_sequence(&[&created, &readback]).await;
+    let client = server.client();
+
+    let project = client
+        .create_lyrics_project("Draft")
+        .await
+        .expect("create with readback");
+
+    assert_eq!(project.updated_at.as_deref(), Some("2026-08-24T00:00:01Z"));
+    let requests = server.captured_all().await;
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].path, "/api/lyrics-projects");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[0].body).expect("create body"),
+        serde_json::json!({"title": "Draft"})
+    );
+    assert_eq!(requests[1].path, "/api/lyrics-projects/project-1");
+}
+
+#[tokio::test]
+async fn lyrics_project_rename_and_flush_use_exact_bodies_and_business_readback() {
+    let original = lyrics_project_fixture("project-1", "Old", "old", "2026-08-24T00:00:00Z");
+    let renamed = lyrics_project_fixture("project-1", "New", "old", "2026-08-24T00:00:01Z");
+    let flushed = lyrics_project_fixture("project-1", "New", "new lyrics", "2026-08-24T00:00:02Z");
+    let server = MockServer::json_sequence(&[
+        &original,
+        &renamed,
+        &renamed,
+        &renamed,
+        r#"{"updated_at":"2026-08-24T00:00:02Z"}"#,
+        &flushed,
+    ])
+    .await;
+    let client = server.client();
+
+    client
+        .rename_lyrics_project("project-1", "New")
+        .await
+        .expect("rename with readback");
+    let flush = client
+        .flush_lyrics_project("project-1", "new lyrics")
+        .await
+        .expect("flush with readback");
+    assert_eq!(flush.updated_at, "2026-08-24T00:00:02Z");
+
+    let requests = server.captured_all().await;
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[1].method, "PATCH");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[1].body).expect("rename body"),
+        serde_json::json!({"title": "New"})
+    );
+    assert_eq!(requests[2].method, "GET");
+    assert_eq!(requests[3].method, "GET");
+    assert_eq!(requests[4].method, "POST");
+    assert_eq!(requests[4].path, "/api/lyrics-projects/project-1/flush");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[4].body).expect("flush body"),
+        serde_json::json!({"lyrics": "new lyrics"})
+    );
+    assert_eq!(requests[5].method, "GET");
+}
+
+#[tokio::test]
+async fn lyrics_project_delete_accepts_204_then_requires_not_found_readback() {
+    let original = lyrics_project_fixture("project-1", "Draft", "lyrics", "2026-08-24T00:00:00Z");
+    let server = MockServer::response_sequence(vec![
+        (200, original),
+        (204, String::new()),
+        (404, String::new()),
+    ])
+    .await;
+    let client = server.client();
+
+    client
+        .delete_lyrics_project("project-1")
+        .await
+        .expect("delete with absence readback");
+
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[1].method, "DELETE");
+    assert_eq!(requests[1].path, "/api/lyrics-projects/project-1");
+    assert_eq!(requests[1].body, "");
+    assert_eq!(requests[2].method, "GET");
+}
+
+#[tokio::test]
+async fn lyrics_project_create_missing_id_is_ambiguous_and_not_replayed() {
+    let server = MockServer::json(r#"{"title":"Draft"}"#).await;
+    let client = server.client();
+
+    let error = client
+        .create_lyrics_project("Draft")
+        .await
+        .expect_err("missing project ID must be ambiguous");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    assert_eq!(
+        error.details().expect("ambiguity")["recovery"]["resumable"],
+        false
+    );
+    assert_eq!(server.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
+async fn lyrics_project_write_server_error_is_ambiguous_and_not_replayed() {
+    let server =
+        MockServer::json_status_sequence(&[(500, r#"{"detail":"unknown accepted state"}"#)]).await;
+    let client = server.client();
+
+    let error = client
+        .create_lyrics_project("Draft")
+        .await
+        .expect_err("5xx cannot prove the project write was rejected");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    assert_eq!(
+        error.details().expect("details")["stage"],
+        "response_status"
+    );
+    assert_eq!(server.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
+async fn prompt_image_workflow_preflights_generates_applies_and_reads_back() {
+    let billing = billing_with_features(&["generate_song_image"]);
+    let source = complete_clip_fixture("clip-1", Some("generate_cover_art"), None);
+    let readback = complete_clip_fixture(
+        "clip-1",
+        Some("generate_cover_art"),
+        Some("https://cdn.example/generated.jpeg"),
+    );
+    let server = MockServer::json_sequence(&[
+        &billing,
+        &source,
+        r#"{"image_url":"https://cdn.example/generated.jpeg","asset_id":"asset-1"}"#,
+        "{}",
+        &readback,
+    ])
+    .await;
+    let client = server.client();
+
+    let result =
+        crate::workflow::visual::generate_and_apply_clip_image(&client, "clip-1", "neon rain")
+            .await
+            .expect("generated image with readback");
+
+    assert_eq!(result.image_url, "https://cdn.example/generated.jpeg");
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 5);
+    assert_eq!(requests[0].path, "/api/billing/info/");
+    assert_eq!(requests[1].path, "/api/clip/clip-1");
+    assert_eq!(requests[2].method, "POST");
+    assert_eq!(requests[2].path, "/api/gen/prompt_image/");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[2].body).expect("prompt body"),
+        serde_json::json!({"prompt": "neon rain"})
+    );
+    assert_eq!(requests[3].path, "/api/gen/clip-1/set_metadata/");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[3].body).expect("metadata body"),
+        serde_json::json!({"image_url": "https://cdn.example/generated.jpeg"})
+    );
+    assert_eq!(requests[4].path, "/api/clip/clip-1");
+}
+
+#[tokio::test]
+async fn prompt_image_readback_converges_without_replaying_either_write() {
+    let billing = billing_with_features(&["generate_song_image"]);
+    let source = complete_clip_fixture("clip-1", Some("generate_cover_art"), None);
+    let stale = complete_clip_fixture("clip-1", Some("generate_cover_art"), None);
+    let converged = complete_clip_fixture(
+        "clip-1",
+        Some("generate_cover_art"),
+        Some("https://cdn.example/generated.jpeg"),
+    );
+    let server = MockServer::json_sequence(&[
+        &billing,
+        &source,
+        r#"{"image_url":"https://cdn.example/generated.jpeg"}"#,
+        "{}",
+        &stale,
+        &converged,
+    ])
+    .await;
+    let client = server.client();
+
+    let result = crate::workflow::visual::generate_and_apply_clip_image_with_readback(
+        &client,
+        "clip-1",
+        "neon rain",
+        super::PollingOptions {
+            timeout: Duration::from_millis(200),
+            interval: Duration::from_millis(1),
+        },
+    )
+    .await
+    .expect("stale clip image should converge through bounded GET polling");
+
+    assert_eq!(result.image_url, "https://cdn.example/generated.jpeg");
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 6);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.method == "POST")
+            .count(),
+        2,
+        "readback convergence must not replay image generation or metadata"
+    );
+}
+
+#[tokio::test]
+async fn image_generation_uses_the_cover_action_not_download_eligibility() {
+    let billing = billing_with_features(&["generate_song_image"]);
+    let mut source = serde_json::from_str::<serde_json::Value>(&complete_clip_fixture(
+        "clip-1",
+        Some("generate_cover_art"),
+        None,
+    ))
+    .expect("source fixture");
+    source["download_disabled_reason"] = serde_json::json!("rights_restricted");
+    let source = source.to_string();
+    let readback = complete_clip_fixture(
+        "clip-1",
+        Some("generate_cover_art"),
+        Some("https://cdn.example/generated.jpeg"),
+    );
+    let server = MockServer::json_sequence(&[
+        &billing,
+        &source,
+        r#"{"image_url":"https://cdn.example/generated.jpeg"}"#,
+        "{}",
+        &readback,
+    ])
+    .await;
+    let client = server.client();
+
+    let generated =
+        crate::workflow::visual::generate_and_apply_clip_image(&client, "clip-1", "neon rain")
+            .await
+            .expect("an enabled cover action remains authoritative for image generation");
+
+    assert_eq!(generated.image_url, "https://cdn.example/generated.jpeg");
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 5);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.method == "POST")
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn image_generation_requires_the_exact_authenticated_clip_owner_before_submit() {
+    let billing = billing_with_features(&["generate_song_image"]);
+    let mut source = serde_json::from_str::<serde_json::Value>(&complete_clip_fixture(
+        "clip-1",
+        Some("generate_cover_art"),
+        None,
+    ))
+    .expect("source fixture");
+    source["user_id"] = serde_json::json!("user-other");
+    let server = MockServer::json_sequence(&[&billing, &source.to_string()]).await;
+    let client = server.client();
+
+    let error =
+        crate::workflow::visual::generate_and_apply_clip_image(&client, "clip-1", "neon rain")
+            .await
+            .expect_err("a different clip owner must stop before credit-bearing submit");
+
+    assert!(
+        matches!(error, CliError::Config(message) if message.contains("owned by the authenticated account"))
+    );
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|request| request.method == "GET"));
+}
+
+#[tokio::test]
+async fn prompt_image_unusable_2xx_is_ambiguous_without_replay() {
+    let server = MockServer::json(r#"{"image_url":" "}"#).await;
+    let client = server.client();
+
+    let error = client
+        .generate_prompt_image("neon rain")
+        .await
+        .expect_err("blank generated URL must be ambiguous");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    assert_eq!(server.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
+async fn prompt_image_lost_2xx_body_is_ambiguous_without_replay() {
+    let server =
+        MockServer::truncated_json_once(r#"{"image_url":"https://cdn.example/generated.jpeg"}"#)
+            .await;
+    let client = server.client();
+
+    let error = client
+        .generate_prompt_image("neon rain")
+        .await
+        .expect_err("lost accepted response body must be ambiguous");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("ambiguity details");
+    assert_eq!(details["stage"], "response_body");
+    assert_eq!(details["recovery"]["resumable"], false);
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 1, "prompt image submit must not replay");
+    assert_eq!(requests[0].method, "POST");
+}
+
+#[tokio::test]
+async fn legacy_video_generation_fails_closed_without_a_proven_clip_eligibility_seam() {
+    let billing = billing_with_features(&["generate_song_video"]);
+    let source = complete_clip_fixture("clip-1", None, None);
+    let server = MockServer::json_sequence(&[&billing, &source]).await;
+    let client = server.client();
+
+    let error = crate::workflow::visual::generate_video_and_wait(
+        &client,
+        "clip-1",
+        super::PollingOptions {
+            timeout: Duration::from_secs(1),
+            interval: Duration::from_millis(1),
+        },
+    )
+    .await
+    .expect_err("unproven ownership/download eligibility must stop submit");
+
+    assert!(
+        matches!(error, CliError::Config(message) if message.contains("ownership") && message.contains("eligibility") && message.contains("status"))
+    );
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|request| request.method == "GET"));
+}
+
+#[tokio::test]
+async fn existing_video_status_errors_and_terminal_failures_remain_explicit() {
+    let server =
+        MockServer::response_sequence(vec![(400, r#"{"detail":"status unavailable"}"#.into())])
+            .await;
+    let client = server.client();
+    let error = crate::workflow::visual::wait_for_existing_video(
+        &client,
+        "clip-1",
+        super::PollingOptions {
+            timeout: Duration::from_secs(1),
+            interval: Duration::from_millis(1),
+        },
+    )
+    .await
+    .expect_err("read-only status errors must remain explicit");
+    assert_ne!(error.error_code(), "ambiguous_mutation");
+    assert_eq!(server.captured_all().await.len(), 1);
+
+    let terminal = MockServer::json(r#"{"status":"failed","error_message":"render failed"}"#).await;
+    let terminal_client = terminal.client();
+    let error = crate::workflow::visual::wait_for_existing_video(
+        &terminal_client,
+        "clip-1",
+        super::PollingOptions {
+            timeout: Duration::from_secs(1),
+            interval: Duration::from_millis(1),
+        },
+    )
+    .await
+    .expect_err("terminal failure stays explicit");
+    assert!(matches!(error, CliError::GenerationFailed(_)));
+}
+
+#[tokio::test]
+async fn cover_art_discovers_models_and_costs_from_current_server_contract() {
+    let configs = r#"{
+        "image_model_categories":[{"category":"image-v1","display_name":"Image V1","description":"still"}],
+        "video_model_categories":[{"category":"video-v1","display_name":"Video V1","description":"motion","image":"supported","allowed_durations":[5,10],"allowed_durations_with_image":[5]}]
+    }"#;
+    let server = MockServer::json_sequence(&[
+        configs,
+        r#"{"cost":8,"remaining_gens":4}"#,
+        r#"{"cost":20,"remaining_gens":2}"#,
+    ])
+    .await;
+    let client = server.client();
+
+    let discovered = client
+        .cover_art_model_configs()
+        .await
+        .expect("dynamic model configs");
+    assert_eq!(discovered.image_model_categories[0].category, "image-v1");
+    assert_eq!(
+        discovered.video_model_categories[0].allowed_durations,
+        vec![5, 10]
+    );
+    let image_cost = client
+        .cover_art_image_cost("image-v1")
+        .await
+        .expect("image cost");
+    let video_cost = client
+        .cover_art_video_cost("video-v1", 5)
+        .await
+        .expect("video cost");
+    assert_eq!(image_cost.cost, 8.0);
+    assert_eq!(video_cost.remaining_gens, Some(2));
+
+    let requests = server.captured_all().await;
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].path, "/api/video_gen/model-configs");
+    assert_eq!(requests[1].path, "/api/video_gen/cost/image");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[1].body).expect("image cost body"),
+        serde_json::json!({"image_gen_category":"image-v1","prompt":""})
+    );
+    assert_eq!(requests[2].path, "/api/video_gen/cost/video");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[2].body).expect("video cost body"),
+        serde_json::json!({"video_gen_category":"video-v1","duration":5})
+    );
+}
+
+#[tokio::test]
+async fn cover_art_image_and_video_submit_exact_batch_contracts_once() {
+    use crate::api::types::{
+        CoverArtImageGenerateRequest, CoverArtPromptImage, CoverArtVideoGenerateRequest,
+    };
+
+    let server = MockServer::json_sequence(&[
+        r#"{"batch_id":"batch-image","image_ids":["image-1","image-2"]}"#,
+        r#"{"batch_id":"batch-video","video_ids":["video-1","video-2"]}"#,
+    ])
+    .await;
+    let client = server.client();
+
+    let image = client
+        .submit_cover_art_image(&CoverArtImageGenerateRequest {
+            generated_text_id: None,
+            prompt: "neon rain".into(),
+            clip_id: "clip-1".into(),
+            quantity: 2,
+            image_gen_category: Some("image-v1".into()),
+            prompt_images: vec![CoverArtPromptImage::uploaded("upload-1")],
+            aspect_ratio: Some("1:1".into()),
+        })
+        .await
+        .expect("image batch submit");
+    assert_eq!(image.batch_id, "batch-image");
+    assert_eq!(image.image_ids, vec!["image-1", "image-2"]);
+
+    let video = client
+        .submit_cover_art_video(&CoverArtVideoGenerateRequest {
+            generated_text_id: None,
+            prompt_start_image: Some(CoverArtPromptImage::generated("image-1")),
+            clip_id: Some("clip-1".into()),
+            prompt: "slow camera push".into(),
+            quantity: 2,
+            video_gen_category: Some("video-v1".into()),
+            duration: 5,
+            clip_start_time: None,
+            clip_end_time: None,
+            aspect_ratio: Some("1:1".into()),
+        })
+        .await
+        .expect("video batch submit");
+    assert_eq!(video.batch_id, "batch-video");
+    assert_eq!(video.video_ids, vec!["video-1", "video-2"]);
+
+    let requests = server.captured_all().await;
+    assert_eq!(requests[0].path, "/api/video_gen/image/generate");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[0].body).expect("image body"),
+        serde_json::json!({
+            "prompt":"neon rain",
+            "clip_id":"clip-1",
+            "quantity":2,
+            "image_gen_category":"image-v1",
+            "prompt_images":[{"id":"upload-1","type":"uploaded"}],
+            "aspect_ratio":"1:1"
+        })
+    );
+    assert_eq!(requests[1].path, "/api/video_gen/video/generate");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[1].body).expect("video body"),
+        serde_json::json!({
+            "prompt_start_image":{"id":"image-1","type":"generated"},
+            "clip_id":"clip-1",
+            "prompt":"slow camera push",
+            "quantity":2,
+            "video_gen_category":"video-v1",
+            "duration":5,
+            "aspect_ratio":"1:1"
+        })
+    );
+}
+
+#[tokio::test]
+async fn cover_art_recovery_poll_and_apply_use_current_batch_identities() {
+    use crate::api::types::{CoverArtBatchDescriptor, CoverArtHistoryRequest};
+
+    let server = MockServer::json_sequence(&[
+        r#"{"batch_ids":[{"id":"batch-1","type":"image"}]}"#,
+        r#"{"history":[{"batch_id":"batch-1","type":"image","prompt":"neon","items":[]}]}"#,
+        r#"{"batches":{"batch-1":[{"id":"image-1","clip_id":"clip-1","type":"image","status":"complete","url":"https://cdn.example/image-1.jpeg","gen_category":"image-v1"}]}}"#,
+        r#"{"image_url":"https://cdn.example/image-1.jpeg"}"#,
+        r#"{"image_url":"https://cdn.example/frame.jpeg","video_cover_url":"https://cdn.example/video.mp4","preview_url":"https://cdn.example/preview.mp4"}"#,
+    ])
+    .await;
+    let client = server.client();
+
+    let pending = client
+        .pending_cover_art_batches()
+        .await
+        .expect("pending batches");
+    assert_eq!(pending.batch_ids[0].id, "batch-1");
+    let history = client
+        .cover_art_history(&CoverArtHistoryRequest {
+            clip_id: None,
+            created_at_offset: None,
+            favorites_only: false,
+            media_type: Some("image".into()),
+            limit: 20,
+        })
+        .await
+        .expect("history");
+    assert_eq!(history.history[0].batch_id, "batch-1");
+    let polled = client
+        .poll_cover_art_batches(&[CoverArtBatchDescriptor::new("batch-1", "image")])
+        .await
+        .expect("poll batch");
+    assert_eq!(polled.batches["batch-1"][0].status, "complete");
+    client
+        .apply_generated_cover_image("clip-1", "image-1", "session-1")
+        .await
+        .expect("apply generated image");
+    client
+        .apply_generated_cover_video("clip-1", "video-upload-1", "session-2")
+        .await
+        .expect("apply generated video");
+
+    let requests = server.captured_all().await;
+    assert_eq!(requests[0].path, "/api/video_gen/pending_batches");
+    assert_eq!(requests[0].body, "{}");
+    assert_eq!(requests[1].path, "/api/video_gen/history");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[1].body).expect("history body"),
+        serde_json::json!({
+            "clip_id":null,
+            "created_at_offset":null,
+            "favorites_only":false,
+            "media_type":"image",
+            "limit":20
+        })
+    );
+    assert_eq!(requests[2].path, "/api/video_gen/poll_batches");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[2].body).expect("poll body"),
+        serde_json::json!({"batch_ids":[{"id":"batch-1","type":"image"}]})
+    );
+    assert_eq!(requests[3].path, "/api/gen/clip-1/set_metadata/");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[3].body).expect("image apply body"),
+        serde_json::json!({
+            "cover_image":{"id":"image-1","type":"generated"},
+            "cover_art_session_id":"session-1"
+        })
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[4].body).expect("video apply body"),
+        serde_json::json!({
+            "video_cover_upload_id":"video-upload-1",
+            "cover_art_session_id":"session-2"
+        })
+    );
+}
+
+#[tokio::test]
+async fn cover_art_image_workflow_preflights_costs_and_preserves_batch_ids_without_auto_apply() {
+    let billing = billing_with_features(&["generate_song_image"]);
+    let source = complete_clip_fixture("clip-1", Some("generate_cover_art"), None);
+    let configs = r#"{
+        "image_model_categories":[{"category":"image-v1","display_name":"Image V1"}],
+        "video_model_categories":[]
+    }"#;
+    let server = MockServer::json_sequence(&[
+        &billing,
+        &source,
+        configs,
+        r#"{"cost":8,"remaining_gens":4}"#,
+        r#"{"batch_id":"batch-image","image_ids":["image-1","image-2"]}"#,
+    ])
+    .await;
+    let client = server.client();
+
+    let result = crate::workflow::visual::generate_cover_art_image_batch(
+        &client,
+        "clip-1",
+        "neon rain",
+        Some("Image V1"),
+        None,
+        None,
+    )
+    .await
+    .expect("safe no-wait image submit");
+
+    assert_eq!(result.model_category, "image-v1");
+    assert_eq!(result.submission.batch_id, "batch-image");
+    assert!(result.batch.is_none());
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 5);
+    assert_eq!(requests[0].path, "/api/billing/info/");
+    assert_eq!(requests[1].path, "/api/clip/clip-1");
+    assert_eq!(requests[2].path, "/api/video_gen/model-configs");
+    assert_eq!(requests[3].path, "/api/video_gen/cost/image");
+    assert_eq!(requests[4].path, "/api/video_gen/image/generate");
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.body.contains("cover_image"))
+    );
+}
+
+#[tokio::test]
+async fn cover_art_video_workflow_uses_dynamic_duration_and_bounded_batch_polling() {
+    let billing = billing_with_features(&["generate_song_video"]);
+    let source = complete_clip_fixture("clip-1", Some("generate_cover_art"), None);
+    let configs = r#"{
+        "image_model_categories":[],
+        "video_model_categories":[{"category":"video-v1","allowed_durations":[5,10],"allowed_durations_with_image":[5]}]
+    }"#;
+    let server = MockServer::json_sequence(&[
+        &billing,
+        &source,
+        configs,
+        r#"{"cost":20,"remaining_gens":2}"#,
+        r#"{"batch_id":"batch-video","video_ids":["video-1","video-2"]}"#,
+        r#"{"batches":{"batch-video":[{"id":"video-1","type":"video","status":"processing"},{"id":"video-2","type":"video","status":"processing"}]}}"#,
+        r#"{"batches":{"batch-video":[{"id":"video-1","type":"video","status":"complete","url":"https://cdn.example/video-1.mp4","video_upload_id":"upload-1"},{"id":"video-2","type":"video","status":"complete","url":"https://cdn.example/video-2.mp4","video_upload_id":"upload-2"}]}}"#,
+    ])
+    .await;
+    let client = server.client();
+
+    let result = crate::workflow::visual::generate_cover_art_video_batch(
+        &client,
+        "clip-1",
+        "slow camera push",
+        Some("video-v1"),
+        Some(10),
+        None,
+        Some(super::PollingOptions {
+            timeout: Duration::from_millis(200),
+            interval: Duration::from_millis(1),
+        }),
+    )
+    .await
+    .expect("video batch converges");
+
+    assert_eq!(result.submission.batch_id, "batch-video");
+    assert!(result.batch.is_some());
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 7);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[3].body).expect("cost body"),
+        serde_json::json!({"video_gen_category":"video-v1","duration":10})
+    );
+    assert_eq!(requests[5].path, "/api/video_gen/poll_batches");
+    assert_eq!(requests[6].path, "/api/video_gen/poll_batches");
+}
+
+#[tokio::test]
+async fn cover_art_submit_waits_for_every_returned_media_id_not_a_partial_poll_page() {
+    let billing = billing_with_features(&["generate_song_image"]);
+    let source = complete_clip_fixture("clip-1", Some("generate_cover_art"), None);
+    let configs =
+        r#"{"image_model_categories":[{"category":"image-v1"}],"video_model_categories":[]}"#;
+    let server = MockServer::response_sequence_with_idle_timeout(
+        vec![
+            (200, billing),
+            (200, source),
+            (200, configs.into()),
+            (200, r#"{"cost":8,"remaining_gens":4}"#.into()),
+            (200, r#"{"batch_id":"batch-image","image_ids":["image-1","image-2"]}"#.into()),
+            (200, r#"{"batches":{"batch-image":[{"id":"image-1","type":"image","status":"complete","url":"https://cdn.example/image-1.jpeg"}]}}"#.into()),
+            (200, r#"{"batches":{"batch-image":[{"id":"image-1","type":"image","status":"complete","url":"https://cdn.example/image-1.jpeg"},{"id":"image-2","type":"image","status":"complete","url":"https://cdn.example/image-2.jpeg"}]}}"#.into()),
+        ],
+        Duration::from_millis(100),
+    )
+    .await;
+    let client = server.client();
+
+    let result = crate::workflow::visual::generate_cover_art_image_batch(
+        &client,
+        "clip-1",
+        "neon rain",
+        None,
+        None,
+        Some(super::PollingOptions {
+            timeout: Duration::from_millis(300),
+            interval: Duration::from_millis(1),
+        }),
+    )
+    .await
+    .expect("all returned image IDs must complete");
+
+    assert_eq!(
+        result.batch.expect("terminal batch").batches["batch-image"].len(),
+        2
+    );
+    assert_eq!(server.captured_all().await.len(), 7);
+}
+
+#[tokio::test]
+async fn cover_art_recovery_waits_for_both_fixed_quantity_results() {
+    let server = MockServer::response_sequence(vec![
+        (200, r#"{"batches":{"batch-image":[{"id":"image-1","type":"image","status":"complete","url":"https://cdn.example/image-1.jpeg"}]}}"#.into()),
+        (200, r#"{"batches":{"batch-image":[{"id":"image-1","type":"image","status":"complete","url":"https://cdn.example/image-1.jpeg"},{"id":"image-2","type":"image","status":"complete","url":"https://cdn.example/image-2.jpeg"}]}}"#.into()),
+    ])
+    .await;
+    let client = server.client();
+
+    let result = crate::workflow::visual::wait_for_cover_art_batch(
+        &client,
+        &crate::api::types::CoverArtBatchDescriptor::new("batch-image", "image"),
+        super::PollingOptions {
+            timeout: Duration::from_millis(200),
+            interval: Duration::from_millis(1),
+        },
+    )
+    .await
+    .expect("recovery must wait for both fixed-quantity results");
+
+    assert_eq!(result.batches["batch-image"].len(), 2);
+    assert_eq!(server.captured_all().await.len(), 2);
+}
+
+#[tokio::test]
+async fn cover_art_apply_workflow_requires_owner_and_exact_clip_readback() {
+    let billing = billing_with_features(&["generate_song_image"]);
+    let source = complete_clip_fixture("clip-1", Some("generate_cover_art"), None);
+    let readback = complete_clip_fixture(
+        "clip-1",
+        Some("generate_cover_art"),
+        Some("https://cdn.example/image-1.jpeg"),
+    );
+    let server = MockServer::json_sequence(&[
+        &billing,
+        &source,
+        r#"{"batches":{"batch-image":[{"id":"image-1","clip_id":"clip-1","type":"image","status":"complete","url":"https://cdn.example/image-1.jpeg"}]}}"#,
+        r#"{"image_url":"https://cdn.example/image-1.jpeg"}"#,
+        &readback,
+    ])
+    .await;
+    let client = server.client();
+
+    let applied =
+        crate::workflow::visual::apply_cover_art_image(&client, "clip-1", "batch-image", "image-1")
+            .await
+            .expect("applied image readback");
+
+    assert_eq!(
+        applied.clip.image_url,
+        Some("https://cdn.example/image-1.jpeg".into())
+    );
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 5);
+    assert_eq!(requests[2].path, "/api/video_gen/poll_batches");
+    assert_eq!(requests[3].path, "/api/gen/clip-1/set_metadata/");
+    assert_eq!(requests[4].path, "/api/clip/clip-1");
+}
+
+#[tokio::test]
+async fn cover_art_apply_rejects_a_completed_result_from_another_clip() {
+    let billing = billing_with_features(&["generate_song_image"]);
+    let source = complete_clip_fixture("clip-1", Some("generate_cover_art"), None);
+    let foreign_batch = r#"{"batches":{"batch-image":[{"id":"image-1","clip_id":"clip-2","type":"image","status":"complete","url":"https://cdn.example/image-1.jpeg"}]}}"#;
+    let server = MockServer::json_sequence(&[&billing, &source, foreign_batch]).await;
+    let client = server.client();
+
+    let error =
+        crate::workflow::visual::apply_cover_art_image(&client, "clip-1", "batch-image", "image-1")
+            .await
+            .expect_err("a result from another clip must never be applied");
+
+    assert!(matches!(error, CliError::Config(message) if message.contains("does not prove")));
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[2].path, "/api/video_gen/poll_batches");
+}
+
+#[tokio::test]
+async fn cover_art_video_apply_proves_upload_provenance_and_reads_flattened_cover_url() {
+    let billing = billing_with_features(&["generate_song_video"]);
+    let source = complete_clip_fixture("clip-1", Some("generate_cover_art"), None);
+    let batch = r#"{"batches":{"batch-video":[{"id":"video-1","clip_id":"clip-1","type":"video","status":"complete","url":"https://cdn.example/video-1.mp4","video_upload_id":"upload-1"}]}}"#;
+    let mut readback: serde_json::Value = serde_json::from_str(&complete_clip_fixture(
+        "clip-1",
+        Some("generate_cover_art"),
+        None,
+    ))
+    .expect("clip fixture");
+    readback["video_cover_url"] = serde_json::json!("https://cdn.example/video-1.mp4");
+    let readback = serde_json::to_string(&readback).expect("clip JSON");
+    let server = MockServer::json_sequence(&[
+        &billing,
+        &source,
+        batch,
+        r#"{"image_url":"https://cdn.example/fallback.jpeg","video_cover_url":"https://cdn.example/video-1.mp4"}"#,
+        &readback,
+    ])
+    .await;
+    let client = server.client();
+
+    let applied = crate::workflow::visual::apply_cover_art_video(
+        &client,
+        "clip-1",
+        "batch-video",
+        "upload-1",
+    )
+    .await
+    .expect("video apply readback");
+
+    assert_eq!(applied.media_id, "upload-1");
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 5);
+    assert_eq!(requests[2].path, "/api/video_gen/poll_batches");
+    assert_eq!(requests[3].path, "/api/gen/clip-1/set_metadata/");
+}
+
+#[tokio::test]
+async fn cover_art_video_rejects_an_image_for_a_model_that_does_not_support_it() {
+    let billing = billing_with_features(&["generate_song_video"]);
+    let source = complete_clip_fixture("clip-1", Some("generate_cover_art"), None);
+    let configs = r#"{
+        "image_model_categories":[],
+        "video_model_categories":[{"category":"video-v1","image":"not_supported","allowed_durations":[5],"allowed_durations_with_image":[]}]
+    }"#;
+    let server = MockServer::json_sequence(&[&billing, &source, configs]).await;
+    let client = server.client();
+
+    let error = crate::workflow::visual::generate_cover_art_video_batch(
+        &client,
+        "clip-1",
+        "",
+        Some("video-v1"),
+        None,
+        Some(crate::api::types::CoverArtPromptImage::generated("image-1")),
+        None,
+    )
+    .await
+    .expect_err("unsupported image-to-video model must stop before cost or submit");
+
+    assert!(
+        matches!(error, CliError::Config(message) if message.contains("does not support a start image"))
+    );
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 3);
+    assert!(requests.iter().all(|request| request.method == "GET"));
+}
+
+#[tokio::test]
+async fn cover_art_cost_with_no_remaining_generations_stops_before_submit() {
+    let billing = billing_with_features(&["generate_song_image"]);
+    let source = complete_clip_fixture("clip-1", Some("generate_cover_art"), None);
+    let configs = r#"{
+        "image_model_categories":[{"category":"image-v1"}],
+        "video_model_categories":[]
+    }"#;
+    let server = MockServer::json_sequence(&[
+        &billing,
+        &source,
+        configs,
+        r#"{"cost":8,"remaining_gens":0}"#,
+    ])
+    .await;
+    let client = server.client();
+
+    let error = crate::workflow::visual::generate_cover_art_image_batch(
+        &client,
+        "clip-1",
+        "neon rain",
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect_err("zero remaining generations must stop submit");
+
+    assert!(matches!(error, CliError::Config(message) if message.contains("no remaining image")));
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[3].path, "/api/video_gen/cost/image");
+}
+
+#[tokio::test]
+async fn cover_art_credit_and_moderation_gates_remain_structured_and_non_ambiguous() {
+    let creation_limit = MockServer::json_status_sequence(&[(
+        402,
+        r#"{"error_type":"creation_limit_reached","detail":"daily creation limit reached"}"#,
+    )])
+    .await;
+    let error = creation_limit
+        .client()
+        .cover_art_image_cost("image-v1")
+        .await
+        .expect_err("creation limit must remain explicit");
+    assert_eq!(error.error_code(), "creation_limit_reached");
+    assert_ne!(error.error_code(), "ambiguous_mutation");
+    assert_eq!(creation_limit.captured_all().await.len(), 1);
+
+    let insufficient = MockServer::json_status_sequence(&[(
+        402,
+        r#"{"error_type":"insufficient_credits","detail":"not enough credits"}"#,
+    )])
+    .await;
+    let request = crate::api::types::CoverArtImageGenerateRequest {
+        generated_text_id: None,
+        prompt: "neon rain".into(),
+        clip_id: "clip-1".into(),
+        quantity: 2,
+        image_gen_category: Some("image-v1".into()),
+        prompt_images: Vec::new(),
+        aspect_ratio: Some("1:1".into()),
+    };
+    let error = insufficient
+        .client()
+        .submit_cover_art_image(&request)
+        .await
+        .expect_err("insufficient credits must remain explicit");
+    assert_eq!(error.error_code(), "insufficient_credits");
+    assert_ne!(error.error_code(), "ambiguous_mutation");
+    assert_eq!(insufficient.captured_all().await.len(), 1);
+
+    let moderation = MockServer::json_status_sequence(&[(
+        400,
+        r#"{"error_type":"moderation_error","detail":"prompt rejected","reasons":["policy"]}"#,
+    )])
+    .await;
+    let error = moderation
+        .client()
+        .submit_cover_art_image(&request)
+        .await
+        .expect_err("moderation must remain explicit");
+    assert_eq!(error.error_code(), "moderation_error");
+    assert_eq!(moderation.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
+async fn cover_art_submit_and_apply_treat_server_errors_as_ambiguous_without_replay() {
+    let request = crate::api::types::CoverArtImageGenerateRequest {
+        generated_text_id: None,
+        prompt: "neon rain".into(),
+        clip_id: "clip-1".into(),
+        quantity: 2,
+        image_gen_category: Some("image-v1".into()),
+        prompt_images: Vec::new(),
+        aspect_ratio: Some("1:1".into()),
+    };
+    let submit = MockServer::json_status_sequence(&[(
+        500,
+        r#"{"error_type":"server_error","detail":"upstream lost response"}"#,
+    )])
+    .await;
+    let error = submit
+        .client()
+        .submit_cover_art_image(&request)
+        .await
+        .expect_err("server error cannot prove the paid submit was rejected");
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    assert_eq!(
+        error.details().expect("submit ambiguity")["recovery"]["resumable"],
+        false
+    );
+    assert_eq!(submit.captured_all().await.len(), 1);
+
+    let apply = MockServer::json_status_sequence(&[(
+        500,
+        r#"{"error_type":"server_error","detail":"metadata outcome unknown"}"#,
+    )])
+    .await;
+    let error = apply
+        .client()
+        .apply_generated_cover_image("clip-1", "image-1", "session-1")
+        .await
+        .expect_err("server error cannot prove metadata was not applied");
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    assert_eq!(
+        error.details().expect("apply ambiguity")["recovery"]["resumable"],
+        false
+    );
+    assert_eq!(apply.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
+async fn new_mutation_submit_does_not_retry_an_explicit_401() {
+    let server = MockServer::response_sequence_with_idle_timeout(
+        vec![(401, String::new())],
+        Duration::from_millis(50),
+    )
+    .await;
+    let client = server.client();
+
+    let error = client
+        .generate_prompt_image("neon rain")
+        .await
+        .expect_err("explicit auth rejection must be returned");
+
+    assert!(matches!(error, CliError::AuthExpired));
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 1, "mutation submit must not auth-retry");
+    assert_eq!(requests[0].method, "POST");
+}
+
+#[tokio::test]
+async fn lyrics_rewrite_posts_the_current_selection_body_once() {
+    let server = MockServer::json(
+        r#"{"generated_lyrics":"new chorus","lyrics_request_id":"request-1","lyrics_id":"lyrics-1","variant":"current"}"#,
+    )
+    .await;
+    let client = server.client();
+
+    let result = client
+        .rewrite_lyrics(super::lyrics_editor::LyricsRewriteOptions {
+            prompt: "make it brighter",
+            prefix: "verse\n",
+            edit: "old chorus",
+            suffix: "\noutro",
+            title: "Draft",
+            create_session_token: "session-1",
+        })
+        .await
+        .expect("lyrics rewrite");
+
+    assert_eq!(result.generated_lyrics, "new chorus");
+    assert_eq!(result.lyrics_request_id.as_deref(), Some("request-1"));
+    assert_eq!(result.lyrics_id.as_deref(), Some("lyrics-1"));
+    let request = server.captured().await;
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/api/generate/lyrics-infill/");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&request.body).expect("rewrite request JSON"),
+        serde_json::json!({
+            "prompt": "make it brighter",
+            "context_lyrics_prefix": "verse\n",
+            "context_lyrics_edit": "old chorus",
+            "context_lyrics_suffix": "\noutro",
+            "create_session_token": "session-1",
+            "title": "Draft"
+        })
+    );
+}
+
+#[tokio::test]
+async fn lyrics_rewrite_has_a_fixed_thirty_second_bound_and_never_auth_replays() {
+    assert_eq!(
+        super::lyrics_editor::LYRICS_REWRITE_TIMEOUT,
+        Duration::from_secs(30)
+    );
+
+    let server = MockServer::response_sequence_with_idle_timeout(
+        vec![
+            (401, String::new()),
+            (200, r#"{"generated_lyrics":"duplicate"}"#.into()),
+        ],
+        Duration::from_millis(50),
+    )
+    .await;
+    let client = server.client();
+    let error = client
+        .rewrite_lyrics(super::lyrics_editor::LyricsRewriteOptions {
+            prompt: "rewrite",
+            prefix: "",
+            edit: "old",
+            suffix: "",
+            title: "",
+            create_session_token: "session-1",
+        })
+        .await
+        .expect_err("mutation must return explicit auth rejection");
+    assert!(matches!(error, CliError::AuthExpired));
+    assert_eq!(server.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
+async fn lyrics_editor_submits_treat_server_errors_as_ambiguous_without_replay() {
+    let rewrite_server =
+        MockServer::json_status_sequence(&[(500, r#"{"detail":"unknown accepted state"}"#)]).await;
+    let rewrite_error = rewrite_server
+        .client()
+        .rewrite_lyrics(super::lyrics_editor::LyricsRewriteOptions {
+            prompt: "rewrite",
+            prefix: "",
+            edit: "old",
+            suffix: "",
+            title: "",
+            create_session_token: "session-1",
+        })
+        .await
+        .expect_err("rewrite 5xx is ambiguous");
+    assert_eq!(rewrite_error.error_code(), "ambiguous_mutation");
+    assert_eq!(rewrite_server.captured_all().await.len(), 1);
+
+    let mashup_server =
+        MockServer::json_status_sequence(&[(500, r#"{"detail":"unknown accepted state"}"#)]).await;
+    let mashup_error = mashup_server
+        .client()
+        .start_lyrics_mashup(super::lyrics_editor::LyricsMashupOptions {
+            lyrics_a: "first",
+            lyrics_b: "second",
+            create_session_token: "session-2",
+        })
+        .await
+        .expect_err("mashup 5xx is ambiguous");
+    assert_eq!(mashup_error.error_code(), "ambiguous_mutation");
+    assert_eq!(mashup_server.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
+async fn lyrics_mashup_posts_exact_sources_then_polls_the_returned_id() {
+    let server = MockServer::json_sequence(&[
+        r#"{"lyrics_request_id":"request-2","mashup_id":"mashup-2"}"#,
+        r#"{"status":"pending"}"#,
+        r#"{"status":"complete","text":"combined lyrics","title":"A x B (Mashup)","id":"mashup-2"}"#,
+    ])
+    .await;
+    let client = server.client();
+
+    let submission = client
+        .start_lyrics_mashup(super::lyrics_editor::LyricsMashupOptions {
+            lyrics_a: "first lyrics",
+            lyrics_b: "second lyrics",
+            create_session_token: "session-2",
+        })
+        .await
+        .expect("mashup submit");
+    assert_eq!(submission.mashup_id, "mashup-2");
+    let result = client
+        .wait_for_submitted_lyrics_mashup(
+            &submission.mashup_id,
+            super::PollingOptions {
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_millis(1),
+            },
+        )
+        .await
+        .expect("mashup completes");
+    assert_eq!(result.status, "complete");
+    assert_eq!(result.text.as_deref(), Some("combined lyrics"));
+
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].path, "/api/generate/lyrics-mashup");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[0].body).expect("mashup request JSON"),
+        serde_json::json!({
+            "lyrics_a": "first lyrics",
+            "lyrics_b": "second lyrics",
+            "create_session_token": "session-2",
+            "source": "create_ui"
+        })
+    );
+    assert_eq!(requests[1].path, "/api/generate/lyrics/mashup-2");
+    assert_eq!(requests[2].path, "/api/generate/lyrics/mashup-2");
+}
+
+#[tokio::test]
+async fn lyrics_mashup_poll_failure_preserves_the_known_id_without_replaying_submit() {
+    let server = MockServer::response_sequence(vec![
+        (
+            200,
+            r#"{"lyrics_request_id":"request-3","mashup_id":"mashup-3"}"#.into(),
+        ),
+        (500, r#"{"detail":"poll unavailable"}"#.into()),
+    ])
+    .await;
+    let client = server.client();
+    let submission = client
+        .start_lyrics_mashup(super::lyrics_editor::LyricsMashupOptions {
+            lyrics_a: "first lyrics",
+            lyrics_b: "second lyrics",
+            create_session_token: "session-3",
+        })
+        .await
+        .expect("mashup submit");
+    let error = client
+        .wait_for_submitted_lyrics_mashup(
+            &submission.mashup_id,
+            super::PollingOptions {
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_millis(1),
+            },
+        )
+        .await
+        .expect_err("poll failure must retain the accepted submit handle");
+
+    assert_eq!(error.error_code(), "partial_mutation");
+    let details = error.details().expect("partial mutation details");
+    assert_eq!(details["mashup_id"], "mashup-3");
+    assert_eq!(details["recovery"]["resumable"], true);
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2, "submit must not be replayed");
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[1].method, "GET");
+}
+
+#[tokio::test]
+async fn read_only_lyrics_mashup_wait_keeps_poll_errors_explicit() {
+    let server =
+        MockServer::response_sequence(vec![(500, r#"{"detail":"poll unavailable"}"#.into())]).await;
+    let client = server.client();
+
+    let error = client
+        .wait_for_existing_lyrics_mashup(
+            "mashup-existing",
+            super::PollingOptions {
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_millis(1),
+            },
+        )
+        .await
+        .expect_err("a read-only poll failure is not a partial mutation");
+
+    assert_eq!(error.error_code(), "api_error");
+    assert_eq!(server.captured_all().await.len(), 1);
 }

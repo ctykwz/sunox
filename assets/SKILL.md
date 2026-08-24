@@ -308,6 +308,16 @@ sunox clip fade <clip_id> --in 2.0 --out 78.5
 # Extract stems (vocals + instruments)
 sunox clip stems <clip_id>
 
+# Current multi-result cover-art workflow (generation never auto-applies)
+sunox clip cover-art models
+sunox clip cover-art image <clip_id> --prompt "neon rain" --no-wait
+sunox clip cover-art video <clip_id> --prompt "slow camera push" --duration 5 --no-wait
+sunox clip cover-art status <batch_id> --media image --wait
+sunox clip cover-art pending
+sunox clip cover-art history --media image
+sunox clip cover-art apply-image <clip_id> <batch_id> <generated_image_id>
+sunox clip cover-art apply-video <clip_id> <batch_id> <video_upload_id>
+
 # Word-level timed lyrics (LRC format for synced display)
 sunox clip timed-lyrics <clip_id> --lrc > song.lrc
 
@@ -386,6 +396,7 @@ key emitted in `capabilities` are accepted by `--model`.
 - Suno write commands are account-scoped serial by default; do not pass --parallel or disable `serial_mutations` unless the user explicitly allows same-account concurrent writes.
 - For simple audio analysis, prefer clip `audio_url` media from `sunox clip info <clip_id> --json`; use the prepared download command only when a local file is needed. `clip info` also includes `attribution`, `comments`, `remix_count`, `similar_clips`, and non-fatal `supplemental_errors`. Reserve explicit formats, generation-backed stems, or Pro video for requests that name that format or need deep/lossless analysis. Studio functionality is outside this CLI's scope.
 - A transport/body interruption after generation, Remaster, conversion, or a submitted edit can return `ambiguous_mutation`. Never blindly replay it; inspect `error.details.operation_id`, `recovery.resumable`, and read-only inspection commands first.
+- `clip cover-art image` and `clip cover-art video` discover model categories, allowed durations, and cost at runtime, then return a two-result batch. They require exact authenticated clip ownership, explicit non-trashed state, the enabled `generate_cover_art` action, and the matching plan feature. They never auto-apply a candidate. Use `status`, `pending`, and `history` for recovery, then explicitly select `apply-image` or `apply-video` with the batch ID; apply first proves that the completed result belongs to the selected clip. A lost submit response is never replayed because the batch protocol exposes no client idempotency key.
 - Download output directories are created automatically. Do not pass `--force` unless the user explicitly requests replacing an existing local download; ordinary downloads refuse to overwrite a matching file.
 - MP3 downloads abort on auth/rate-limit failures while fetching timed lyrics. Other timed-lyrics failures preserve the MP3 with available plain lyrics and add a structured `warnings` entry. Downloads have a two-hour total deadline and 2 GiB size limit; Ctrl-C cleans staging files.
 - `--quiet` suppresses download progress and ordinary status output. A batch download that has already written any output and then fails returns `partial_download`; inspect `error.details.succeeded`, `error.details.failed`, and `error.details.not_attempted_clip_ids`, then retry only the required IDs.

@@ -34,35 +34,44 @@ impl SunoClient {
         clip_id: &str,
         req: &SetMetadataRequest,
     ) -> Result<(), CliError> {
-        self.with_auth_retry(|| async {
-            let resp = self
-                .post(&format!("/api/gen/{clip_id}/set_metadata/"))
-                .json(req)
-                .send()
-                .await?;
-            let resp = self.check_response(resp).await?;
-            let text = resp.text().await?;
-            if text.trim().is_empty() {
-                return Ok(());
-            }
-            let body: serde_json::Value = serde_json::from_str(&text)?;
-            if let Some(error_type) = body.get("error_type").and_then(|value| value.as_str()) {
-                let detail = body
-                    .get("moderation_error_message")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("Suno rejected the clip metadata update")
-                    .to_string();
-                return Err(CliError::SunoApi {
-                    code: "metadata_update_rejected",
-                    status: 200,
-                    message: format!("{error_type}: {detail}"),
-                    retryable: Some(false),
-                    details: Some(body),
-                });
-            }
-            Ok(())
-        })
-        .await
+        self.with_auth_retry(|| self.set_metadata_once(clip_id, req))
+            .await
+    }
+
+    /// Submit metadata exactly once. Multi-step mutation workflows use this
+    /// after an authenticated read preflight so an auth failure cannot replay
+    /// a write whose outcome is already uncertain.
+    pub(crate) async fn set_metadata_once(
+        &self,
+        clip_id: &str,
+        req: &SetMetadataRequest,
+    ) -> Result<(), CliError> {
+        let resp = self
+            .post(&format!("/api/gen/{clip_id}/set_metadata/"))
+            .json(req)
+            .send()
+            .await?;
+        let resp = self.check_response(resp).await?;
+        let text = resp.text().await?;
+        if text.trim().is_empty() {
+            return Ok(());
+        }
+        let body: serde_json::Value = serde_json::from_str(&text)?;
+        if let Some(error_type) = body.get("error_type").and_then(|value| value.as_str()) {
+            let detail = body
+                .get("moderation_error_message")
+                .and_then(|value| value.as_str())
+                .unwrap_or("Suno rejected the clip metadata update")
+                .to_string();
+            return Err(CliError::SunoApi {
+                code: "metadata_update_rejected",
+                status: 200,
+                message: format!("{error_type}: {detail}"),
+                retryable: Some(false),
+                details: Some(body),
+            });
+        }
+        Ok(())
     }
 
     /// Set clip visibility (public/private).

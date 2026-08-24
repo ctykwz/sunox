@@ -10,11 +10,24 @@ use crate::workflow::generation::{build_control_sliders, build_tags};
 use super::support::{ChallengeMode, execute_generation_submission, output_generation};
 
 pub async fn create(args: CreateArgs, ctx: &AppContext) -> Result<(), CliError> {
+    validate_create_lyrics_project_mode(&args)?;
     if args.instrumental || args.lyrics.is_some() || args.lyrics_file.is_some() {
         return generate(build_generate_args_from_create(args), ctx).await;
     }
 
     describe(build_describe_args_from_create(args)?, ctx).await
+}
+
+fn validate_create_lyrics_project_mode(args: &CreateArgs) -> Result<(), CliError> {
+    if args.lyrics_project_id.is_some()
+        && (args.instrumental || (args.lyrics.is_none() && args.lyrics_file.is_none()))
+    {
+        return Err(CliError::Config(
+            "--lyrics-project-id requires explicit custom lyrics from --lyrics or --lyrics-file and cannot be used for description or unconstrained instrumental mode"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 fn build_describe_args_from_create(args: CreateArgs) -> Result<DescribeArgs, CliError> {
@@ -40,7 +53,7 @@ fn build_describe_args_from_create(args: CreateArgs) -> Result<DescribeArgs, Cli
     })
 }
 
-fn build_generate_args_from_create(args: CreateArgs) -> GenerateArgs {
+pub(crate) fn build_generate_args_from_create(args: CreateArgs) -> GenerateArgs {
     let tags = if args.instrumental {
         merge_instrumental_prompt_and_tags(args.prompt, args.tags)
     } else {
@@ -53,6 +66,7 @@ fn build_generate_args_from_create(args: CreateArgs) -> GenerateArgs {
         exclude: args.exclude,
         lyrics: args.lyrics,
         lyrics_file: args.lyrics_file,
+        lyrics_project_id: args.lyrics_project_id,
         model: args.model,
         duration: args.duration,
         vocal: if args.instrumental { None } else { args.vocal },
@@ -117,6 +131,7 @@ async fn generate(args: GenerateArgs, ctx: &AppContext) -> Result<(), CliError> 
     }
     let clips = execute_generation_submission(token, challenge_mode, ctx, move || async move {
         let client = ctx.client().await?;
+        validate_lyrics_project_reference(&req, &client).await?;
         resolve_persona_reference(&mut req, &client).await?;
         if should_enhance_tags {
             let limits = client
@@ -134,13 +149,21 @@ async fn generate(args: GenerateArgs, ctx: &AppContext) -> Result<(), CliError> 
     Ok(())
 }
 
-fn build_generate_request(
+pub(crate) fn build_generate_request(
     args: &GenerateArgs,
     config: &AppConfig,
 ) -> Result<GenerateRequest, CliError> {
     if args.instrumental && (args.lyrics.is_some() || args.lyrics_file.is_some()) {
         return Err(CliError::Config(
             "--instrumental cannot be combined with --lyrics or --lyrics-file; use --instrumental alone for an unconstrained instrumental, or omit it and use bracketed [Instrumental] structure through --lyrics/--lyrics-file"
+                .into(),
+        ));
+    }
+    if args.lyrics_project_id.is_some()
+        && (args.instrumental || (args.lyrics.is_none() && args.lyrics_file.is_none()))
+    {
+        return Err(CliError::Config(
+            "--lyrics-project-id requires explicit custom lyrics from --lyrics or --lyrics-file and cannot be used for description or unconstrained instrumental mode"
                 .into(),
         ));
     }
@@ -170,6 +193,17 @@ fn build_generate_request(
     req.duration = args.duration;
     req.make_instrumental = args.instrumental;
     req.persona_id = args.persona.clone();
+    req.lyrics_project_id = args
+        .lyrics_project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
+    if args.lyrics_project_id.is_some() && req.lyrics_project_id.is_none() {
+        return Err(CliError::Config(
+            "--lyrics-project-id must not be empty".into(),
+        ));
+    }
     req.metadata.control_sliders = control_sliders;
     req.metadata.vocal_gender = vocal.map(|gender| match gender {
         crate::cli::VocalGender::Male => "m".to_string(),
@@ -179,6 +213,17 @@ fn build_generate_request(
         req.override_fields = vec!["prompt".to_string(), "tags".to_string()];
     }
     Ok(req)
+}
+
+pub(crate) async fn validate_lyrics_project_reference(
+    req: &GenerateRequest,
+    client: &SunoClient,
+) -> Result<(), CliError> {
+    let Some(project_id) = req.lyrics_project_id.as_deref() else {
+        return Ok(());
+    };
+    client.lyrics_project(project_id).await?;
+    Ok(())
 }
 
 const EMPTY_CLIP_ID: &str = "00000000-0000-0000-0000-000000000000";
@@ -242,10 +287,7 @@ fn apply_persona_reference(
         )));
     }
 
-    let is_vox = persona
-        .persona_type
-        .as_deref()
-        .is_some_and(|kind| kind.eq_ignore_ascii_case("vox"));
+    let is_vox = persona.is_vox_persona();
     let root_clip_id = usable_persona_root_clip_id(persona.root_clip_id.as_deref());
     if !is_vox && root_clip_id.is_none() {
         return Err(CliError::Config(format!(
@@ -426,6 +468,7 @@ mod tests {
     use super::{
         apply_persona_reference, build_describe_args_from_create, build_describe_request,
         build_generate_args_from_create, build_generate_request, mark_tags_override,
+        validate_create_lyrics_project_mode,
     };
 
     fn persona_fixture(id: &str, persona_type: &str, root_clip_id: Option<&str>) -> PersonaInfo {
@@ -562,6 +605,7 @@ mod tests {
             exclude: None,
             lyrics: None,
             lyrics_file: None,
+            lyrics_project_id: None,
             model: Some("v5.5".into()),
             duration: Some(222.0),
             vocal: None,
@@ -593,6 +637,7 @@ mod tests {
             exclude: Some("metal, spoken word".into()),
             lyrics: None,
             lyrics_file: None,
+            lyrics_project_id: None,
             model: None,
             duration: None,
             vocal: None,
@@ -621,6 +666,7 @@ mod tests {
             exclude: None,
             lyrics: Some("[Verse]\nHello".into()),
             lyrics_file: None,
+            lyrics_project_id: None,
             model: None,
             duration: None,
             vocal: None,
@@ -657,6 +703,73 @@ mod tests {
     }
 
     #[test]
+    fn custom_request_transmits_the_validated_lyrics_project_id_exactly() {
+        let args = crate::cli::GenerateArgs {
+            title: Some("Project Draft".into()),
+            tags: Some("indie pop".into()),
+            exclude: None,
+            lyrics: Some("[Verse]\nhello".into()),
+            lyrics_file: None,
+            lyrics_project_id: Some("project-1".into()),
+            model: None,
+            duration: None,
+            vocal: None,
+            weirdness: None,
+            style_influence: None,
+            enhance_tags: false,
+            instrumental: false,
+            token: None,
+            captcha: false,
+            no_captcha: false,
+            persona: None,
+        };
+
+        let request = build_generate_request(&args, &AppConfig::default()).expect("request");
+        let body = serde_json::to_value(request).expect("request JSON");
+        assert_eq!(body["prompt"], "[Verse]\nhello");
+        assert_eq!(body["lyrics_project_id"], "project-1");
+        assert_eq!(body["metadata"]["create_mode"], "custom");
+    }
+
+    #[test]
+    fn lyrics_project_id_fails_closed_for_description_or_instrumental_mode() {
+        let description = CreateArgs {
+            prompt: Some("describe a song".into()),
+            title: None,
+            tags: None,
+            exclude: None,
+            lyrics: None,
+            lyrics_file: None,
+            lyrics_project_id: Some("project-1".into()),
+            model: None,
+            duration: None,
+            vocal: None,
+            weirdness: None,
+            style_influence: None,
+            enhance_tags: false,
+            instrumental: false,
+            token: None,
+            captcha: false,
+            no_captcha: false,
+            persona: None,
+        };
+        let error = validate_create_lyrics_project_mode(&description)
+            .expect_err("description mode must reject project ID");
+        assert!(
+            error
+                .to_string()
+                .contains("requires explicit custom lyrics")
+        );
+
+        let instrumental = CreateArgs {
+            instrumental: true,
+            ..description
+        };
+        validate_create_lyrics_project_mode(&instrumental)
+            .expect_err("unconstrained instrumental mode must reject project ID");
+    }
+
+    #[test]
     fn custom_request_uses_current_web_vocal_gender_field() {
         let args = crate::cli::GenerateArgs {
             title: Some("Morning Reset".into()),
@@ -664,6 +777,7 @@ mod tests {
             exclude: None,
             lyrics: Some("[Verse]\nHello".into()),
             lyrics_file: None,
+            lyrics_project_id: None,
             model: None,
             duration: Some(180.0),
             vocal: Some(crate::cli::VocalGender::Female),
@@ -693,6 +807,7 @@ mod tests {
             exclude: None,
             lyrics: Some("[Verse]\nHello".into()),
             lyrics_file: None,
+            lyrics_project_id: None,
             model: None,
             duration: None,
             vocal: None,
@@ -733,6 +848,27 @@ mod tests {
             None,
         )
         .expect("rootless Vox reference");
+
+        assert_eq!(req.task.as_deref(), Some("vox"));
+        assert_eq!(req.persona_id.as_deref(), Some("persona-vox"));
+        assert!(req.artist_clip_id.is_none());
+        assert_eq!(req.artist_start_s, Some(0.0));
+        assert!(req.artist_end_s.is_none());
+    }
+
+    #[test]
+    fn flattened_vox_flag_uses_current_rootless_advanced_contract() {
+        let mut req = GenerateRequest::new("auto", "custom");
+        req.persona_id = Some("persona-vox".into());
+        let persona: PersonaInfo = serde_json::from_value(serde_json::json!({
+            "id": "persona-vox",
+            "name": "Verified Voice",
+            "is_vox_persona": true
+        }))
+        .expect("flattened Vox Persona fixture");
+
+        apply_persona_reference(&mut req, "persona-vox", persona, None)
+            .expect("rootless flattened Vox reference");
 
         assert_eq!(req.task.as_deref(), Some("vox"));
         assert_eq!(req.persona_id.as_deref(), Some("persona-vox"));
@@ -784,6 +920,7 @@ mod tests {
             exclude: None,
             lyrics: Some("[Verse]\nHello".into()),
             lyrics_file: None,
+            lyrics_project_id: None,
             model: None,
             duration: None,
             vocal: None,
@@ -816,6 +953,7 @@ mod tests {
             exclude: Some("vocals, spoken word".into()),
             lyrics: Some(structure.into()),
             lyrics_file: None,
+            lyrics_project_id: None,
             model: None,
             duration: None,
             vocal: None,
@@ -852,6 +990,7 @@ mod tests {
             exclude: Some("vocal, spoken word".into()),
             lyrics: None,
             lyrics_file: None,
+            lyrics_project_id: None,
             model: Some("v5.5".into()),
             duration: None,
             vocal: Some(crate::cli::VocalGender::Female),

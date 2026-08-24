@@ -27,6 +27,9 @@ impl SunoClient {
         &self,
         req: &mut GenerateRequest,
     ) -> Result<(), CliError> {
+        if req.task.as_deref() == Some("gen_stem") {
+            return self.prepare_stem_generation_request(req).await;
+        }
         self.prepare_generation_request_internal(req, &[])
             .await
             .map(drop)

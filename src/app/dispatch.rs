@@ -55,6 +55,7 @@ async fn dispatch_command(
                     exclude: None,
                     lyrics: None,
                     lyrics_file: None,
+                    lyrics_project_id: None,
                     model: None,
                     duration: None,
                     vocal: None,
@@ -91,10 +92,30 @@ async fn dispatch_command(
         }
         Some(Commands::Auth(args)) => commands::auth::run(args, ctx).await,
         Some(Commands::Credits) => commands::account::credits(ctx).await,
-        Some(Commands::Models) => commands::account::models(ctx).await,
+        Some(Commands::Models(args)) => match args.command {
+            Some(crate::cli::ModelsCommand::Custom(custom)) => {
+                commands::custom_model::run(custom, ctx).await
+            }
+            None => commands::account::models(ctx).await,
+        },
         Some(Commands::Capabilities) => commands::account::capabilities(ctx).await,
-        Some(Commands::Lyrics(args)) => commands::create::lyrics(args, ctx).await,
+        Some(Commands::Lyrics(mut args)) => match args.command.take() {
+            Some(crate::cli::LyricsCommand::Rewrite(rewrite)) => {
+                commands::lyrics_editor::rewrite(rewrite, ctx).await
+            }
+            Some(crate::cli::LyricsCommand::Mashup(mashup)) => {
+                commands::lyrics_editor::mashup(mashup, ctx).await
+            }
+            Some(crate::cli::LyricsCommand::MashupStatus(status)) => {
+                commands::lyrics_editor::mashup_status(status, ctx).await
+            }
+            Some(crate::cli::LyricsCommand::Projects(projects)) => {
+                commands::lyrics_project::run(projects, ctx).await
+            }
+            None => commands::create::lyrics(args, ctx).await,
+        },
         Some(Commands::Persona(args)) => commands::persona::run(args, ctx).await,
+        Some(Commands::Voice(args)) => commands::voice::run(args, ctx).await,
         Some(Commands::Playlist(args)) => commands::playlist::run(args, ctx).await,
         Some(Commands::Config(args)) => commands::config::run(args, ctx).await,
         Some(Commands::AgentInfo) => commands::agent::agent_info(ctx).await,
@@ -136,6 +157,11 @@ async fn run_clip(command: ClipCommand, ctx: &AppContext) -> Result<(), CliError
         ClipCommand::Crop(args) => commands::create::crop(args, ctx).await,
         ClipCommand::Fade(args) => commands::create::fade(args, ctx).await,
         ClipCommand::Stems(args) => commands::create::stems(args, ctx).await,
+        ClipCommand::GetStems(args) => commands::stems::get(args, ctx).await,
+        ClipCommand::GenerateImage(args) => commands::visual::generate_image(args, ctx).await,
+        ClipCommand::GenerateVideo(args) => commands::visual::generate_video(args, ctx).await,
+        ClipCommand::VideoStatus(args) => commands::visual::video_status(args, ctx).await,
+        ClipCommand::CoverArt(args) => commands::visual::cover_art(args, ctx).await,
     }
 }
 

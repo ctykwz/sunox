@@ -295,3 +295,14 @@ pub struct PersonaInfo {
     #[serde(default, flatten)]
     pub extra: BTreeMap<String, Value>,
 }
+
+impl PersonaInfo {
+    /// Suno currently identifies a verified Voice in either the typed Persona
+    /// field or the flattened Web response flag, depending on the endpoint.
+    pub fn is_vox_persona(&self) -> bool {
+        self.persona_type
+            .as_deref()
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("vox"))
+            || self.extra.get("is_vox_persona").and_then(Value::as_bool) == Some(true)
+    }
+}

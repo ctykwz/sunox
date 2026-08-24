@@ -1,7 +1,7 @@
 # sunox
 
 `sunox` 是一个非官方 Suno 命令行工具，用 Rust 编写。它把网页端常用的创作、下载、
-歌单、Persona、翻唱、重制、音频编辑和上传能力带到了终端里。
+歌单、Persona/Voice、Custom Model、分轨、封面媒体、音频编辑和上传能力带到了终端里。
 
 [![crates.io](https://img.shields.io/crates/v/sunox)](https://crates.io/crates/sunox)
 [![CI](https://github.com/ctykwz/sunox/actions/workflows/ci.yml/badge.svg)](https://github.com/ctykwz/sunox/actions/workflows/ci.yml)
@@ -20,8 +20,10 @@
 - 根据一句描述、自定义歌词、风格标签、Persona 或纯音乐要求创建歌曲。
 - 等待异步任务完成，并下载 MP3、M4A、WAV、Opus 或视频。
 - 查询、搜索、编辑、公开、删除、恢复和下载歌曲。
-- 对已有歌曲做翻唱、续写、拼接、重制、变速、反转、裁剪、淡入淡出或分轨生成。
-- 管理歌单和声音 Persona，上传本地音频或封面。
+- 对已有歌曲做翻唱、续写、拼接、重制、变速、反转、裁剪、淡入淡出或 Pro 分轨。
+- 读取/下载已有分轨结果，管理歌词项目和 Custom Model，并从本地录音创建私有验证 Voice。
+- 生成并应用封面图，并查询已有歌曲视频状态；旧视频提交在 Clip 资格可证明前保持 fail-closed。
+- 管理歌单和 Persona，上传本地音频或封面。
 - 在终端里看表格，也可以给脚本或 Coding Agent 输出稳定的 JSON。
 
 Suno Studio 相关能力不在本项目范围内。
@@ -117,6 +119,12 @@ sunox download <clip_id_1> <clip_id_2> --output ./songs
 sunox <描述>                       根据一句描述创建歌曲
 sunox create [描述]                使用完整参数创建歌曲
 sunox lyrics                       只生成歌词
+sunox lyrics rewrite --prompt "..." --edit-file selection.txt
+                                     重写一段选中的歌词
+sunox lyrics mashup --lyrics-a-file a.txt --lyrics-b-file b.txt
+                                     启动双源歌词混合
+sunox lyrics mashup-status <id> --wait
+                                     只读等待已有混合任务完成
 
 sunox clip list                    查看自己的歌曲
 sunox clip search <关键词>         搜索歌曲
@@ -133,7 +141,22 @@ sunox clip speed <id>              调整速度
 sunox clip reverse <id>            反转音频
 sunox clip crop <id>               保留或移除一段音频
 sunox clip fade <id>               添加淡入淡出
-sunox clip stems <id>              生成分轨
+sunox clip stems <id>              Pro Auto Split（当前 50 credits）
+sunox clip stems <id> --mode split --stem vocals
+                                     Pro Split from Mix（当前一对 20 credits）
+sunox clip get-stems <id>          只读已有分轨结果，不启动拆分
+sunox clip generate-image <id> --prompt "..."
+                                     生成并应用封面图
+sunox clip generate-video <id>     校验旧视频资格（当前提交 fail-closed）
+sunox clip video-status <id>       只读视频任务状态
+sunox clip cover-art models        查看当前图片/视频模型类别与允许时长
+sunox clip cover-art image <id> --prompt "..."
+                                     生成两个图片候选，不自动应用
+sunox clip cover-art video <id> --prompt "..."
+                                     生成两个视频候选，不自动应用
+sunox clip cover-art status <batch_id> --media image --wait
+sunox clip cover-art apply-image <id> <batch_id> <image_id>
+sunox clip cover-art apply-video <id> <batch_id> <video_upload_id>
 
 sunox playlist list                查看歌单
 sunox playlist create              创建歌单
@@ -141,6 +164,25 @@ sunox add <clip_ids> --to <id>     把歌曲加入歌单
 
 sunox persona list                 查看声音 Persona
 sunox persona create <clip_id>     从歌曲创建 Persona
+sunox voice phrase --language zh   获取当前验证短语
+sunox voice create --help          用两个 WAV 文件创建私有验证 Voice
+
+sunox models custom pending        查看训练中的 Custom Model
+sunox models custom train --help   查看权利与 Web UI 显式确认要求
+sunox models custom archive <id> -y
+                                     归档 Custom Model
+
+sunox lyrics projects list         查看歌词项目
+sunox lyrics projects info <id>    精确读取一个歌词项目
+sunox lyrics projects create       创建歌词项目
+sunox lyrics projects rename <id> --title "..."
+                                     重命名并读回歌词项目
+sunox lyrics projects flush <id> --lyrics-file lyrics.txt
+                                     立即保存歌词项目
+sunox lyrics projects delete <id> -y
+                                     显式确认后删除歌词项目
+sunox create --lyrics-file lyrics.txt --lyrics-project-id <id>
+                                     将精确歌词项目关联到自定义歌词生成
 
 sunox clip upload <文件>           上传本地音频
 sunox models                       查看账号可用模型
@@ -150,6 +192,47 @@ sunox update                       更新到最新 GitHub Release
 ```
 
 完整参数以 `sunox --help` 和 `sunox <命令> --help` 为准。
+
+### 这次补齐的 Pro 能力边界
+
+`clip stems` 会启动计费的 `gen_stem` 任务；`clip get-stems` 只读取已有结果页，只有显式
+`--download` 才下载。Pro 支持 Auto Split 和 12 个规范目标的 Split from Mix；Premier 专属的
+任意 Advanced Split 乐器仍然不开放，避免按未确认映射扣费。只要分页结果中有任何 stem ID 无法
+补全，下载就会 fail-closed。MP3 分轨下载不会额外请求时间轴歌词；WAV/OPUS 在未传 `--no-convert`
+且非全局 `--read-only` 时仍可能发起转换，prepared download 也可能消耗套餐下载额度。
+
+创建 Voice 前先用 `voice phrase` 获取动态短语。把演唱样本和该短语录音准备成 WAV 后，使用
+`voice create --confirm-rights --confirm-eligibility --confirm-biometric-consent`。三项分别确认录音
+权利、当前 18+/地区/音频上传资格，以及 Suno 对录音可能构成生物识别数据的收集处理；Suno 条款、
+隐私政策、训练用途/账号选择和服务端门禁仍是最终依据。CLI 会完成两次上传、处理、所有权验证、
+私有 Vox Persona 创建，并读回确认 `is_public=false` 和 Vox 类型；CLI 本身不直接录制麦克风。
+每个服务端 ID 都会原子写入 Sunox 管理配置目录下的 checkpoint，供中断后检查，但不代表多写流程
+可以安全续跑。Web 会先裁切演唱样本再上传，因此 Sunox 只接受已经预裁切、实测 WAV 时长与
+`--sample-duration` 精确一致的样本，绝不会静默多上传音频。当前 Web 规则是源文件不足 10 秒时
+整段使用，否则选择 10 到 240 秒；验证录音仍以服务端为准，Web 当前目标约 15 秒，通用上传上限
+为 900 秒。后续用 Persona ID 配合
+`create --persona`，当前 Voice 生成要求账号可用的 v5.5 模型。
+
+Lyrics 2.0 的选区重写、双源 mashup 轮询、歌词项目 CRUD/flush，以及
+`create --lyrics-project-id` 精确关联分别使用各自当前路由。rewrite 是单次 30 秒同步请求，mashup
+默认等待且轮询有明确上限；`--no-wait` 会返回 ID，供只读 `mashup-status` 查询，后者的
+`--timeout` 必须和 `--wait` 一起使用。传输结果不确定时都不会自动重放，歌词项目删除必须显式
+传 `-y/--yes`。音频 underpaint/overpaint 和 Song Editor 区段替换不属于这些歌词命令，也没有被
+冒充为已支持。
+
+Custom Model 训练至少需要 6 个不同源 Clip ID、`--confirm-rights`、账号实时可见的
+`custom_models` entitlement，以及 `--confirm-ui-available`：后者只能在当前 Suno Web 账号确实能看到
+训练 UI 后显式传入。缺少该 UI 确认时，CLI 不会发送训练 POST。当前 Web 显示 100 credits，最终资格与
+计费仍以服务端为准。pending 查询、精确 ID archive 和已就绪模型选择也可用；已就绪模型会出现在
+`sunox models`，可传给 `create --model`。archive 不代表永久删除或承诺可恢复。
+
+`clip generate-image` 实现直接的 `prompt_image` 加 `set_metadata` 组合；独立的 `clip cover-art`
+命名空间实现新版多结果 `SONG_COVER_ART` 图片/视频工作流，包括动态模型/时长、费用预检、
+pending/history 恢复、bounded polling 和显式 apply。生成不会自动应用第一个结果。两条路径都要求
+JWT 账号与 Clip owner 精确一致、明确未删除，并且 `generate_cover_art` action 可用。
+旧逐 Clip 视频 POST/status 是另一套独立协议；路由虽已确认，
+但精确的 ownership/download eligibility seam 尚未确认，因此 `clip generate-video` 会在 POST 前
+fail-closed；`clip video-status` 保留为 bounded 只读状态查询。
 
 Cowrite 歌词模型会在运行时从 Suno 查询。可用
 `sunox lyrics --prompt "..." --model <模型>` 按 ID 或展示名选择模型；只有模型声明支持时

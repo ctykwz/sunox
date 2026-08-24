@@ -8,30 +8,43 @@ mod config;
 mod create;
 mod doctor;
 mod library;
+mod lyrics_editor;
+mod lyrics_project;
 mod media;
 mod models;
 mod persona;
 mod playlist;
 mod update;
+mod voice;
 mod wait;
 
 pub use crate::api::types::RemasterVariation;
 pub use agent::{InstallSkillArgs, SkillTarget};
 pub use auth::AuthArgs;
 pub use browser_extension::InstallBrowserExtensionArgs;
-pub use clip::{ClipArgs, ClipCommand};
+pub use clip::{
+    ClipArgs, ClipCommand, CoverArtArgs, CoverArtCommand, CoverArtHistoryArgs, CoverArtImageArgs,
+    CoverArtPromptImageArg, CoverArtPromptImageKind, CoverArtStatusArgs, CoverArtVideoArgs,
+    GenerateImageArgs, GenerateVideoArgs, GetStemsArgs, VideoStatusArgs,
+};
 pub use config::{ConfigAction, ConfigArgs};
 pub use create::{
     ConcatArgs, CoverArgs, CreateArgs, CropArgs, DescribeArgs, ExtendArgs, FadeArgs, GenerateArgs,
-    InspireArgs, LyricsArgs, RemasterArgs, ReverseArgs, SpeedArgs, StemsArgs,
+    InspireArgs, LyricsArgs, RemasterArgs, ReverseArgs, SpeedArgs, StemGroup, StemMode, StemsArgs,
 };
 pub use doctor::DoctorArgs;
 pub use library::{
     DeleteArgs, EmptyTrashArgs, InfoArgs, ListArgs, ListSort, PublishArgs, PurgeArgs, ReactionArgs,
     RestoreArgs, SearchArgs, SetArgs, StatusArgs,
 };
+pub use lyrics_editor::{
+    LYRICS_MASHUP_DEFAULT_TIMEOUT_SECS, LyricsMashupArgs, LyricsMashupStatusArgs, LyricsRewriteArgs,
+};
+pub use lyrics_project::{LyricsCommand, LyricsProjectCommand, LyricsProjectsArgs};
 pub use media::{DownloadArgs, DownloadFormat, TimedLyricsArgs, UploadArgs, UploadStatusArgs};
-pub use models::{RemasterModel, VocalGender};
+pub use models::{
+    CustomModelCommand, CustomModelsArgs, ModelsArgs, ModelsCommand, RemasterModel, VocalGender,
+};
 pub use persona::{
     PersonaArgs, PersonaClipsArgs, PersonaCommand, PersonaCreateArgs, PersonaDeleteArgs,
     PersonaInfoArgs, PersonaListArgs, PersonaListKind, PersonaLoveArgs, PersonaPublishArgs,
@@ -44,6 +57,10 @@ pub use playlist::{
     PlaylistTracksArgs,
 };
 pub use update::UpdateArgs;
+pub use voice::{
+    VoiceArgs, VoiceCommand, VoiceCreateArgs, VoicePhraseArgs, VoiceProcessedStatusArgs,
+    VoiceVerificationStatusArgs,
+};
 pub use wait::WaitArgs;
 
 use clap::{Parser, Subcommand};
@@ -105,6 +122,9 @@ pub enum Commands {
     /// Manage voice personas
     Persona(PersonaArgs),
 
+    /// Create and verify Voices from your own recordings
+    Voice(VoiceArgs),
+
     /// Manage playlists
     Playlist(PlaylistArgs),
 
@@ -112,7 +132,7 @@ pub enum Commands {
     Credits,
 
     /// List available models
-    Models,
+    Models(ModelsArgs),
 
     /// Compare live account entitlements, models, and limits with CLI support
     Capabilities,
@@ -147,7 +167,10 @@ pub enum Commands {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, ClipCommand, Commands, RemasterVariation};
+    use super::{
+        Cli, ClipCommand, Commands, CustomModelCommand, ModelsCommand, RemasterVariation,
+        StemGroup, StemMode, VoiceCommand,
+    };
     use clap::Parser;
 
     #[test]
@@ -238,6 +261,24 @@ mod tests {
     }
 
     #[test]
+    fn create_accepts_a_lyrics_project_only_with_explicit_custom_lyrics() {
+        let cli = Cli::try_parse_from([
+            "sunox",
+            "create",
+            "--lyrics",
+            "[Verse]\nhello",
+            "--lyrics-project-id",
+            "project-1",
+        ])
+        .expect("lyrics project custom generation");
+
+        let Some(Commands::Create(args)) = cli.command else {
+            panic!("expected create command");
+        };
+        assert_eq!(args.lyrics_project_id.as_deref(), Some("project-1"));
+    }
+
+    #[test]
     fn cover_accepts_account_model_id() {
         let cli = Cli::try_parse_from([
             "sunox",
@@ -256,5 +297,234 @@ mod tests {
             panic!("expected cover command");
         };
         assert_eq!(args.model.as_deref(), Some("model-account-7"));
+    }
+
+    #[test]
+    fn custom_model_training_parses_both_confirmations_and_clip_ids() {
+        let cli = Cli::try_parse_from([
+            "sunox",
+            "models",
+            "custom",
+            "train",
+            "--name",
+            "My Sound",
+            "--confirm-rights",
+            "--confirm-ui-available",
+            "clip-1",
+            "clip-2",
+            "clip-3",
+            "clip-4",
+            "clip-5",
+            "clip-6",
+        ])
+        .expect("valid custom model training command");
+
+        let Some(Commands::Models(models)) = cli.command else {
+            panic!("expected models command");
+        };
+        let Some(ModelsCommand::Custom(custom)) = models.command else {
+            panic!("expected custom models command");
+        };
+        let CustomModelCommand::Train(args) = custom.command else {
+            panic!("expected train command");
+        };
+        assert_eq!(args.name, "My Sound");
+        assert!(args.confirm_rights);
+        assert!(args.confirm_ui_available);
+        assert_eq!(args.clip_ids.len(), 6);
+    }
+
+    #[test]
+    fn custom_model_delete_alias_still_requires_confirmation_in_the_command_payload() {
+        let cli = Cli::try_parse_from(["sunox", "models", "custom", "delete", "model-1", "-y"])
+            .expect("valid custom model delete alias");
+
+        let Some(Commands::Models(models)) = cli.command else {
+            panic!("expected models command");
+        };
+        let Some(ModelsCommand::Custom(custom)) = models.command else {
+            panic!("expected custom models command");
+        };
+        let CustomModelCommand::Archive(args) = custom.command else {
+            panic!("expected archive command");
+        };
+        assert_eq!(args.id, "model-1");
+        assert!(args.yes);
+    }
+
+    #[test]
+    fn stems_preserves_the_legacy_auto_split_default() {
+        let cli = Cli::try_parse_from(["sunox", "clip", "stems", "clip-a"])
+            .expect("legacy auto split command");
+        let Some(Commands::Clip(clip)) = cli.command else {
+            panic!("expected clip command");
+        };
+        let ClipCommand::Stems(args) = clip.command else {
+            panic!("expected stems command");
+        };
+        assert_eq!(args.mode, StemMode::Auto);
+        assert!(args.stem.is_none());
+    }
+
+    #[test]
+    fn stems_accepts_the_current_split_from_mix_shape() {
+        let cli = Cli::try_parse_from([
+            "sunox",
+            "clip",
+            "stems",
+            "clip-a",
+            "--mode",
+            "split-from-mix",
+            "--stem",
+            "vocals",
+        ])
+        .expect("split from mix command");
+        let Some(Commands::Clip(clip)) = cli.command else {
+            panic!("expected clip command");
+        };
+        let ClipCommand::Stems(args) = clip.command else {
+            panic!("expected stems command");
+        };
+        assert_eq!(args.mode, StemMode::Split);
+        assert_eq!(args.stem, Some(StemGroup::Vocals));
+    }
+
+    #[test]
+    fn get_stems_can_request_existing_wav_exports_without_conversion() {
+        let cli = Cli::try_parse_from([
+            "sunox",
+            "clip",
+            "get-stems",
+            "clip-a",
+            "--page",
+            "1",
+            "--download",
+            "--format",
+            "wav",
+            "--no-convert",
+        ])
+        .expect("existing stem export command");
+        let Some(Commands::Clip(clip)) = cli.command else {
+            panic!("expected clip command");
+        };
+        let ClipCommand::GetStems(args) = clip.command else {
+            panic!("expected get-stems command");
+        };
+        assert_eq!(args.clip_id, "clip-a");
+        assert_eq!(args.page, Some(1));
+        assert!(args.download);
+        assert!(args.no_convert);
+    }
+
+    #[test]
+    fn voice_phrase_defaults_to_english() {
+        let cli = Cli::try_parse_from(["sunox", "voice", "phrase"]).expect("voice phrase command");
+        let Some(Commands::Voice(voice)) = cli.command else {
+            panic!("expected voice command");
+        };
+        let VoiceCommand::Phrase(args) = voice.command else {
+            panic!("expected phrase command");
+        };
+        assert_eq!(args.language, "en");
+    }
+
+    #[test]
+    fn voice_create_requires_both_files_phrase_duration_and_rights() {
+        let cli = Cli::try_parse_from([
+            "sunox",
+            "voice",
+            "create",
+            "--sample",
+            "sample.wav",
+            "--verification",
+            "phrase.wav",
+            "--phrase-id",
+            "phrase-1",
+            "--sample-duration",
+            "42.35",
+            "--name",
+            "My Voice",
+            "--confirm-rights",
+            "--confirm-eligibility",
+            "--confirm-biometric-consent",
+        ])
+        .expect("voice create command");
+        let Some(Commands::Voice(voice)) = cli.command else {
+            panic!("expected voice command");
+        };
+        let VoiceCommand::Create(args) = voice.command else {
+            panic!("expected voice create command");
+        };
+        assert_eq!(args.sample.to_string_lossy(), "sample.wav");
+        assert_eq!(args.verification.to_string_lossy(), "phrase.wav");
+        assert_eq!(args.phrase_id, "phrase-1");
+        assert_eq!(args.sample_duration, 42.35);
+        assert_eq!(args.language, "en");
+        assert!(args.confirm_rights);
+        assert!(args.confirm_eligibility);
+        assert!(args.confirm_biometric_consent);
+
+        assert!(
+            Cli::try_parse_from([
+                "sunox",
+                "voice",
+                "create",
+                "--sample",
+                "sample.wav",
+                "--verification",
+                "phrase.wav",
+                "--phrase-id",
+                "phrase-1",
+                "--sample-duration",
+                "42.35",
+                "--name",
+                "My Voice",
+            ])
+            .is_err(),
+            "rights confirmation must be explicit"
+        );
+
+        assert!(
+            Cli::try_parse_from([
+                "sunox",
+                "voice",
+                "create",
+                "--sample",
+                "sample.wav",
+                "--verification",
+                "phrase.wav",
+                "--phrase-id",
+                "phrase-1",
+                "--sample-duration",
+                "42.35",
+                "--name",
+                "My Voice",
+                "--confirm-rights",
+            ])
+            .is_err(),
+            "age and regional eligibility confirmation must be explicit"
+        );
+
+        assert!(
+            Cli::try_parse_from([
+                "sunox",
+                "voice",
+                "create",
+                "--sample",
+                "sample.wav",
+                "--verification",
+                "phrase.wav",
+                "--phrase-id",
+                "phrase-1",
+                "--sample-duration",
+                "42.35",
+                "--name",
+                "My Voice",
+                "--confirm-rights",
+                "--confirm-eligibility",
+            ])
+            .is_err(),
+            "biometric processing consent must be explicit"
+        );
     }
 }

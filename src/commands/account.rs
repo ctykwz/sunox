@@ -142,7 +142,7 @@ fn capability_report(info: &BillingInfo) -> Value {
             "remaster": "The plan feature, selected remaster model, source clip state, and source action_config are checked before submission.",
             "downloads": "Downloads use Suno's prepared-format endpoints. A download may be plan-metered even though it is a GET.",
             "audio_conversion": "WAV/OPUS first read an existing file; conversion is a POST and can be forbidden with --no-convert.",
-            "ambiguous_writes": "A lost or unusable response after generation, Remaster, conversion, or a submitted edit is reported as ambiguous_mutation with an operation ID and recovery guidance; it must not be blindly retried.",
+            "ambiguous_writes": "A lost or unusable response after generation, Remaster, conversion, Voice creation, Custom Model training/archive, a lyrics-project write, visual generation, or another submitted edit is reported with recovery evidence; it must not be blindly retried.",
         }
     })
 }
@@ -261,18 +261,21 @@ fn feature_coverage(name: &str) -> FeatureCoverage {
                 "clip fade",
                 "clip speed",
                 "clip reverse",
+                "lyrics rewrite",
+                "lyrics mashup",
+                "lyrics mashup-status",
             ],
-            "Common non-Studio edits are implemented; infill, mashup, underpaint, and overpaint are not.",
+            "Common non-Studio clip edits plus Lyrics 2.0 selection rewrite (`lyrics-infill`) and lyrics mashup are implemented; Studio/audio underpaint, overpaint, and section replacement are not.",
         ),
         "persona" => (
             "partial",
-            &["create --persona", "persona"],
-            "Persona use and management are implemented; specialized Vox condition variants are not.",
+            &["create --persona", "persona", "voice"],
+            "Persona use/management and the current private verified Voice upload workflow are implemented; microphone capture remains external to the CLI.",
         ),
         "get_stems" => (
             "partial",
-            &["clip stems"],
-            "CLI stems are generation-backed extraction, not the Web Get Stems export workflow.",
+            &["clip stems", "clip get-stems"],
+            "Implements Pro Auto Split, Pro Split from Mix, and read/download of existing stem banks; Premier-only arbitrary Advanced Split instruments remain intentionally gated.",
         ),
         "long_uploads" => (
             "partial",
@@ -281,8 +284,8 @@ fn feature_coverage(name: &str) -> FeatureCoverage {
         ),
         "custom_models" => (
             "partial",
-            &["create --model"],
-            "Billing-listed usable custom models are selectable; training and management are not implemented.",
+            &["create --model", "models", "models custom"],
+            "Ready-model selection, pending inspection, exact-ID archive, and training are implemented. Training requires --confirm-rights, 6 to 100 distinct eligible source clips, a 1-to-16-character name, the live custom_models entitlement, and --confirm-ui-available after visibly confirming the current Suno Web training UI; without either attestation the CLI sends no training POST, and the server remains authoritative.",
         ),
         "commercial_rights" => (
             "account_only",
@@ -294,10 +297,24 @@ fn feature_coverage(name: &str) -> FeatureCoverage {
             &["credits"],
             "The CLI can read credits but does not purchase top-ups.",
         ),
-        "generate_song_image" | "generate_song_video" => (
-            "unsupported",
-            &[],
-            "The account exposes this feature, but the CLI has no matching generation workflow.",
+        "generate_song_image" => (
+            "implemented",
+            &[
+                "clip generate-image",
+                "clip cover-art image",
+                "clip cover-art apply-image",
+            ],
+            "Direct prompt-image apply and the current multi-result image batch workflow are implemented with ownership/action checks, dynamic model/cost discovery, bounded recovery, and business readback.",
+        ),
+        "generate_song_video" => (
+            "implemented",
+            &[
+                "clip cover-art video",
+                "clip cover-art status",
+                "clip cover-art apply-video",
+                "clip video-status",
+            ],
+            "The current multi-result cover-video batch workflow is implemented. The separate legacy per-clip submit remains fail-closed; its status read is retained.",
         ),
         _ => (
             "unknown",

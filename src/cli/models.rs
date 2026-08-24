@@ -1,4 +1,64 @@
-use clap::ValueEnum;
+use clap::{Subcommand, ValueEnum};
+
+#[derive(clap::Args)]
+pub struct ModelsArgs {
+    #[command(subcommand)]
+    pub command: Option<ModelsCommand>,
+}
+
+#[derive(Subcommand)]
+pub enum ModelsCommand {
+    /// Train and manage account-scoped Custom Models
+    Custom(CustomModelsArgs),
+}
+
+#[derive(clap::Args)]
+pub struct CustomModelsArgs {
+    #[command(subcommand)]
+    pub command: CustomModelCommand,
+}
+
+#[derive(Subcommand)]
+pub enum CustomModelCommand {
+    /// Show models that are still training
+    Pending,
+
+    /// Train after explicitly confirming the current account's Web UI exposes training
+    Train(CustomModelTrainArgs),
+
+    /// Archive a Custom Model
+    #[command(visible_alias = "delete")]
+    Archive(CustomModelArchiveArgs),
+}
+
+#[derive(clap::Args)]
+pub struct CustomModelTrainArgs {
+    /// Custom Model name (1-16 Unicode characters)
+    #[arg(long)]
+    pub name: String,
+
+    /// Confirm that you own the rights to every selected clip
+    #[arg(long)]
+    pub confirm_rights: bool,
+
+    /// Attest that the current Suno Web account visibly exposes training; server stays authoritative
+    #[arg(long)]
+    pub confirm_ui_available: bool,
+
+    /// 6-100 distinct Suno clip IDs (Artist accounts can use Web for up to 200)
+    #[arg(value_name = "CLIP_ID", num_args = 6..=100)]
+    pub clip_ids: Vec<String>,
+}
+
+#[derive(clap::Args)]
+pub struct CustomModelArchiveArgs {
+    /// Custom Model ID
+    pub id: String,
+
+    /// Confirm this destructive action
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+}
 
 #[derive(ValueEnum, Clone, Debug)]
 pub enum VocalGender {

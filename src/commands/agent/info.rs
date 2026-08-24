@@ -11,7 +11,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
         "version": env!("CARGO_PKG_VERSION"),
         "description": "Suno AI music generation CLI — direct Suno web workflow",
         "commands": [
-            "create", "download", "add", "lyrics", "clip", "persona", "playlist",
+            "create", "download", "add", "lyrics", "clip", "persona", "voice", "playlist",
             "credits", "models", "capabilities", "login", "logout", "auth", "config", "doctor", "agent-info",
             "install-skill", "install-browser-extension", "update"
         ],
@@ -43,7 +43,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             },
             "download_formats": {
                 "current_cli": "current CLI download uses Suno's official prepared MP3 endpoint by default; --format selects mp3|m4a|wav|opus and --video uses clip.video_url when present. WAV/OPUS check an existing URL first and --no-convert refuses the conversion POST. Download preparation and edit polling use configured deadlines.",
-                "web_pro_choices": "Suno Web exposes Pro download choices such as WAV Audio, Get Stems, and Video. This CLI supports explicit WAV download via --format wav, but `sunox clip stems` is generation-backed stems extraction and is not the same as Suno Web Pro Get Stems export.",
+                "web_pro_choices": "Suno Web exposes Pro choices such as WAV Audio, Get Stems, and Video. `clip stems` starts the current paid Auto Split or Split from Mix generation; `clip get-stems` reads or downloads existing stem banks without starting extraction. Explicit WAV uses --format wav.",
                 "agent_default": "Use clip info/audio_url when no local file is needed. When a file is requested, use the prepared default MP3; use another format, conversion, stems, or video only when explicitly requested and supported. Downloads may consume plan allowance."
             }
         },
@@ -76,6 +76,11 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "sunox clip inspire <clip_id> --title <title> --tags <tags> --lyrics-file <path> --json",
             "sunox clip download <clip_id> --json",
             "sunox clip download <clip_id> --format wav --json",
+            "sunox clip get-stems <clip_id> --json",
+            "sunox clip video-status <clip_id> --json",
+            "sunox voice phrase --language en --json",
+            "sunox models custom pending --json",
+            "sunox lyrics projects list --json",
             "sunox playlist add <playlist_id> <clip_id> --json",
             "sunox persona list --json",
             "sunox doctor --network --json"
@@ -101,8 +106,8 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
         "agent_safety": {
             "parallel_writes": "do not pass --parallel or disable serial_mutations unless the user explicitly asks to allow same-account concurrent writes",
             "read_only": "pass global --read-only for audits and inspections that must not write. It blocks account writes before submission, disables aligned-lyrics augmentation, and refuses missing WAV/OPUS conversion; prepared downloads remain allowed and may be plan-metered",
-            "ambiguous_mutation": "generation, Remaster, conversion, or submitted edit transport ambiguity returns error.code=ambiguous_mutation with an operation ID and recovery details. Never blindly replay; inspect read-only state and retry only when recovery.resumable=true",
-            "paid_or_credit_work": "create, inspire, cover, extend, stems, remaster, speed, reverse, crop, fade, upload, conversion, and prepared download/export workflows can be stateful, credit-sensitive, or plan-metered; only run the amount, operation, and format the user requested",
+            "ambiguous_mutation": "generation, Remaster, conversion, Voice, Custom Model, lyrics-project, visual, or another submitted-write ambiguity includes an operation ID and recovery details. Never blindly replay; inspect read-only state and retry only when recovery.resumable=true",
+            "paid_or_credit_work": "create, inspire, cover, extend, stems, remaster, speed, reverse, crop, fade, upload, Voice creation, Custom Model training, AI image/video generation, conversion, and prepared download/export workflows can be stateful, credit-sensitive, or plan-metered; only run the amount, operation, and format the user requested",
             "download_quality": "current CLI uses prepared MP3 by default and supports --format mp3|m4a|wav|opus plus --no-convert; agents should request a file/format only when needed",
             "public_visibility": "do not publish clips, playlists, or personas or make them public unless the user explicitly asks",
             "persona_create_visibility": "persona create is private by default and requires explicit --public to create a public persona",
@@ -180,8 +185,8 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             },
             "clip stems": {
                 "route": "POST /api/generate/v2-web/",
-                "status": "generation-backed stems extraction; not the same as Suno Web Pro Get Stems export",
-                "body_constraints": "task=gen_stem, mv=chirp-v3-0, make_instrumental=true, stem_type_id=91, stem_type_group_name=Twelve, stem_task=twelve",
+                "status": "current generation-backed Pro stem separation; Auto Split is the default and --mode split requires one canonical --stem target",
+                "body_constraints": "task=gen_stem, mv=chirp-v3-0, make_instrumental=true, stem_type_id=91; Auto uses group=Twelve/task=twelve, while Pro Split from Mix uses the selected current group/task=extract/canonical stem_name",
                 "response": "generation response with multiple chirp-stem clips"
             },
             "clip extend": {
@@ -264,7 +269,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "tags", "enhance_tags", "negative_tags", "vocal_gender",
             "weirdness", "style_influence", "audio_influence",
             "instrumental", "extend", "concat", "cover", "clip_inspiration", "remaster",
-            "stems", "clip_speed", "clip_reverse", "clip_crop", "clip_fade",
+            "stems", "existing_stem_banks", "clip_speed", "clip_reverse", "clip_crop", "clip_fade",
             "download_formats", "download_no_convert", "lyrics", "timed_lyrics", "set_metadata",
             "set_visibility", "search", "delete", "clip_restore", "clip_purge", "clip_trash_query",
             "clip_like", "clip_dislike", "optional_captcha_solver", "audio_upload", "audio_upload_status",
@@ -280,7 +285,13 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "playlist_save", "playlist_unsave",
             "playlist_like", "playlist_dislike",
             "playlist_restore", "playlist_delete", "playlist_cover_upload",
-            "image_upload", "clip_info"
+            "image_upload", "clip_generated_image", "clip_video_status", "clip_info",
+            "cover_art_models", "cover_art_cost", "cover_art_image_batch",
+            "cover_art_video_batch", "cover_art_pending", "cover_art_history",
+            "cover_art_poll", "cover_art_apply_image", "cover_art_apply_video",
+            "voice_phrase", "voice_verification", "voice_create_private",
+            "custom_model_pending", "custom_model_train", "custom_model_archive",
+            "lyrics_projects", "lyrics_rewrite", "lyrics_mashup", "lyrics_project_link"
         ],
         "unsupported_surfaces": {
             "video_upload": {
@@ -291,13 +302,9 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                 "status": "bundle_discovered_unverified",
                 "reason": "clip feedback-state mutation is visible in the bundle and intentionally not exposed"
             },
-            "social_profile_project_video": {
-                "status": "bundle_discovered_unverified",
-                "reason": "profile, social, project, and video surfaces are outside the current music creation/resource-management scope"
-            },
-            "voice_verification": {
-                "status": "stale_or_flow_specific",
-                "reason": "older captures include voice verification paths, but the refreshed non-Studio bundle did not confirm them"
+            "legacy_video_generation_submit": {
+                "status": "blocked_unconfirmed_clip_eligibility",
+                "reason": "the legacy POST/status routes are confirmed, but no exact current ownership/download eligibility seam is available; video-status remains read-only"
             },
             "studio_multitrack_export": {
                 "status": "out_of_scope",
@@ -319,7 +326,11 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                     "clip like", "clip dislike", "clip set", "clip publish",
                     "clip timed-lyrics", "clip extend", "clip concat",
                     "clip cover", "clip inspire", "clip remaster", "clip speed", "clip reverse",
-                    "clip crop", "clip fade", "clip stems"
+                    "clip crop", "clip fade", "clip stems", "clip get-stems",
+                    "clip generate-image", "clip generate-video", "clip video-status",
+                    "clip cover-art models", "clip cover-art pending", "clip cover-art history",
+                    "clip cover-art image", "clip cover-art video", "clip cover-art status",
+                    "clip cover-art apply-image", "clip cover-art apply-video"
                 ],
                 "cover_status": "clip set supports --image-url, --image-file, --remove-cover, and --remove-video-cover; local image files use POST /api/uploads/image/, presigned S3 form upload, POST /api/uploads/image/{id}/upload-finish/, then POST /api/gen/{clip_id}/set_metadata/ with image_s3_id; arbitrary external cover URLs use image_url"
             },
@@ -329,7 +340,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                     "persona set",
                     "persona publish", "persona unpublish",
                     "persona love", "persona unlove", "persona toggle-love",
-                    "persona delete", "persona restore", "persona purge"
+                    "persona delete", "persona restore", "persona purge", "voice phrase", "voice create"
                 ],
                 "clips_status": "implemented via GET /api/persona/get-persona-paginated/{id}/?page=N",
                 "edit_status": "implemented via PUT /api/persona/edit-persona/{id}/",
@@ -410,6 +421,58 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
         "mode": "apply_user_request",
         "request_contract": "current model discovery exposes id, display_name, family, and supports_thinking; --model resolves by ID or display name, otherwise the Web literal default is used; --thinking is rejected unless supported. The current Web submit body sends selected, context_before, context_after, instruction, title, style, mode, references, num_variants, lyricist_id, metadata.lyrics_model, metadata.enable_thinking, create_session_token, and lyrics_project_id; fresh CLI lyrics use empty selection/context/title/style and references, with the user prompt as instruction; no submit/status polling is used",
         "response_contract": "current bundle and a 2026-08-23 account submit confirm edited_lyrics, lyrics_request_id, lyrics_id, variants, artist_to_tag_mapping, next_prompts, plus preserved unknown response fields"
+    });
+    info["command_notes"]["clip get-stems"] = serde_json::json!({
+        "routes": ["GET /api/clip/{clip_id}/stems/pages", "GET /api/clip/{clip_id}/stems?page={zero_based_page}"],
+        "default": "read every existing stem bank without starting a new extraction",
+        "hydration": "page rows are ID references and are hydrated through exact clip reads; missing IDs remain explicit and make --download fail before any file is written",
+        "download": "--download uses prepared-format routes and may be plan-metered. Stem MP3s explicitly skip aligned-lyrics generation; WAV/OPUS conversion remains a separate write and --no-convert or global --read-only prevents starting it"
+    });
+    info["command_notes"]["voice"] = serde_json::json!({
+        "read_only": ["voice phrase", "voice processed-status", "voice verification-status"],
+        "create": "requires the active persona plan feature, refetches and matches the exact current phrase ID, uploads a pre-trimmed singing sample and dynamic-phrase recording as voice_recording assets, processes both through /api/processed_clip/voice-vox-stem, verifies ownership through /api/voice-verification/, creates a private vox Persona, then polls read-only detail until is_public=false and the vox type converge",
+        "input_boundary": "current Web accepts a source from 3 seconds; a source below 10 seconds is selected in full, while longer selection is 10..240 seconds. The CLI does not silently re-encode: --sample must be a valid WAV already trimmed to exactly the rounded --sample-duration. Verification is a valid WAV and the Web recorder targets about 15 seconds. Name/styles/description use current HTML UTF-16 limits 80/256/2000. The CLI does not capture microphone audio itself",
+        "polling": "processed audio is capped at 1s x 120 and verification at 1.5s x 40; user polling configuration may shorten but cannot expand those current Web budgets",
+        "generation": "the resulting Voice is managed through persona commands and selected with create --persona; current Suno Voice generation requires an eligible v5.5 model",
+        "safety": "--confirm-rights, --confirm-eligibility, and --confirm-biometric-consent are separate mandatory attestations. Suno Terms/Privacy, disclosed training use and account choices, Statsig gates, and server eligibility remain authoritative. Every server ID is atomically checkpointed for inspection, but the multi-write workflow has no generic safe resume command and no mutation POST is automatically replayed after an uncertain response"
+    });
+    info["command_notes"]["models custom"] = serde_json::json!({
+        "routes": ["POST /api/custom-model/create/", "GET /api/custom-model/pending/", "POST /api/custom-model/archive/"],
+        "train": "requires 6 to 100 distinct complete, explicitly non-trashed owned-source clip IDs, a non-empty name of at most 16 Unicode characters, --confirm-rights, the live custom_models entitlement, and --confirm-ui-available after visibly confirming that the current Suno Web account exposes training; without either attestation no training POST is sent, and server eligibility and charging remain authoritative",
+        "ready_models": "ready Custom Models are account billing model rows and are selected through create --model; pending training rows use models custom pending",
+        "archive": "archive is destructive from the CLI user's perspective, requires -y/--yes, and is not described as permanent deletion or recoverable; accepted archive state is verified with bounded pending/billing GETs without replaying POST"
+    });
+    info["command_notes"]["lyrics projects"] = serde_json::json!({
+        "routes": ["GET/POST /api/lyrics-projects", "GET/PATCH/DELETE /api/lyrics-projects/{id}", "POST /api/lyrics-projects/{id}/flush"],
+        "commands": ["list", "info", "create", "rename", "flush", "delete"],
+        "song_link": "create --lyrics-project-id <id> is valid only with explicit custom lyrics; it GET-validates the exact project identity before generation and sends the unchanged ID",
+        "safety": "delete requires -y/--yes; single-project reads require the exact requested ID and required title/lyrics fields; write responses are verified through stable project reads where the current protocol permits"
+    });
+    info["command_notes"]["lyrics rewrite"] = serde_json::json!({
+        "route": "POST /api/generate/lyrics-infill/",
+        "body": ["prompt", "context_lyrics_prefix", "context_lyrics_edit", "context_lyrics_suffix", "create_session_token", "title"],
+        "boundary": "one synchronous Lyrics 2.0 selection rewrite with a 30-second request timeout; transport ambiguity is never replayed automatically"
+    });
+    info["command_notes"]["lyrics mashup"] = serde_json::json!({
+        "routes": ["POST /api/generate/lyrics-mashup", "GET /api/generate/lyrics/{mashup_id}"],
+        "body": "lyrics_a, lyrics_b, create_session_token, source=create_ui",
+        "wait": "polling uses a 2.5-second interval and a configurable deadline (150 seconds by default); --no-wait returns IDs, and mashup-status is a read-only status/recovery command whose --timeout requires --wait",
+        "safety": "a submit that returned an ID is reported as a partial mutation if later observation fails; the read-only status command preserves ordinary read errors and never claims it submitted the job"
+    });
+    info["command_notes"]["clip generate-image"] = serde_json::json!({
+        "route": "POST /api/gen/prompt_image/ with {prompt}, then POST /api/gen/{clip_id}/set_metadata/ with the returned image_url",
+        "scope": "this is the direct prompt-image composition; use clip cover-art for the separate multi-result image/video batch workflow",
+        "safety": "requires exact authenticated ownership, the account feature, explicit non-trashed state, and an enabled generate_cover_art source action; the applied URL is read back from the clip"
+    });
+    info["command_notes"]["clip cover-art"] = serde_json::json!({
+        "routes": ["GET /api/video_gen/model-configs", "POST /api/video_gen/cost/image", "POST /api/video_gen/cost/video", "POST /api/video_gen/image/generate", "POST /api/video_gen/video/generate", "POST /api/video_gen/pending_batches", "POST /api/video_gen/history", "POST /api/video_gen/poll_batches", "POST /api/gen/{clip_id}/set_metadata/"],
+        "workflow": "models/pending/history/status are inspection surfaces; image/video submit two-result batches after dynamic model and cost preflight; apply-image/apply-video require the batch ID, prove that the exact completed result belongs to the selected clip, and perform clip readback",
+        "safety": "all writes require exact JWT-subject to clip-user_id ownership, explicit non-trashed state, enabled generate_cover_art action, and the matching plan feature; generation never auto-applies a result; a lost submit or apply response is never replayed because the protocol has no client idempotency key"
+    });
+    info["command_notes"]["clip generate-video"] = serde_json::json!({
+        "routes": ["POST /api/video/generate/{clip_id}/ with no body", "GET /api/video/generate/{clip_id}/status/"],
+        "status_command": "clip video-status is read-only; add --wait for a bounded poll without replaying submit",
+        "safety": "the route is known but no exact current response seam proves per-clip ownership and download eligibility; generate-video therefore fails closed before POST and does not guess an action name"
     });
     if let Some(models) = info["models"].as_object_mut() {
         models.insert(

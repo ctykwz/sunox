@@ -27,6 +27,11 @@ pub struct CreateArgs {
     #[arg(long)]
     pub lyrics_file: Option<String>,
 
+    /// Link explicit custom lyrics to an existing Lyrics 2.0 project.
+    /// Requires --lyrics or --lyrics-file and is not valid for description mode.
+    #[arg(long)]
+    pub lyrics_project_id: Option<String>,
+
     /// Generation model display name, external key, or account model ID
     #[arg(short, long)]
     pub model: Option<String>,
@@ -95,6 +100,10 @@ pub struct GenerateArgs {
     /// without --instrumental so the structure is sent to the model.
     #[arg(long)]
     pub lyrics_file: Option<String>,
+
+    /// Link these explicit custom lyrics to an existing Lyrics 2.0 project
+    #[arg(long)]
+    pub lyrics_project_id: Option<String>,
 
     /// Generation model display name, external key, or account model ID
     #[arg(short, long)]
@@ -207,9 +216,12 @@ pub struct DescribeArgs {
 
 #[derive(clap::Args)]
 pub struct LyricsArgs {
+    #[command(subcommand)]
+    pub command: Option<super::LyricsCommand>,
+
     /// What the song should be about
     #[arg(short, long)]
-    pub prompt: String,
+    pub prompt: Option<String>,
 
     /// Cowrite lyrics model ID or display name. Defaults to Suno's current default.
     #[arg(long)]
@@ -371,6 +383,14 @@ pub struct StemsArgs {
     /// Clip ID to extract stems from
     pub clip_id: String,
 
+    /// Pro stem workflow: 12-track Auto Split or two-track Split from Mix
+    #[arg(long, value_enum, default_value_t = StemMode::Auto)]
+    pub mode: StemMode,
+
+    /// Pro Split from Mix target group (mapped to Suno's canonical stem name)
+    #[arg(long, value_enum)]
+    pub stem: Option<StemGroup>,
+
     /// Challenge token (overrides the built-in solver)
     #[arg(long)]
     pub token: Option<String>,
@@ -382,6 +402,68 @@ pub struct StemsArgs {
     /// Disable automatic browser challenge verification; challenge preflight still runs.
     #[arg(long)]
     pub no_captcha: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum StemMode {
+    /// Auto Split into up to 12 stems (currently 50 credits on Pro)
+    Auto,
+
+    /// Split one named target from the rest of the mix (currently 20 credits total)
+    #[value(alias = "split-from-mix")]
+    Split,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum StemGroup {
+    Vocals,
+    BackingVocals,
+    Drums,
+    Bass,
+    Guitar,
+    Keyboard,
+    Percussion,
+    Strings,
+    Synth,
+    Fx,
+    Brass,
+    Woodwinds,
+}
+
+impl StemGroup {
+    pub fn api_group(self) -> &'static str {
+        match self {
+            Self::Vocals => "Vocals",
+            Self::BackingVocals => "Backing_Vocals",
+            Self::Drums => "Drums",
+            Self::Bass => "Bass",
+            Self::Guitar => "Guitar",
+            Self::Keyboard => "Keyboard",
+            Self::Percussion => "Percussion",
+            Self::Strings => "Strings",
+            Self::Synth => "Synth",
+            Self::Fx => "FX",
+            Self::Brass => "Brass",
+            Self::Woodwinds => "Woodwinds",
+        }
+    }
+
+    pub fn canonical_name(self) -> &'static str {
+        match self {
+            Self::Vocals => "Lead Vocal",
+            Self::BackingVocals => "Backing Vocals",
+            Self::Drums => "Drum Kit",
+            Self::Bass => "Bass",
+            Self::Guitar => "Guitar",
+            Self::Keyboard => "Keyboards",
+            Self::Percussion => "Percussion",
+            Self::Strings => "String Section",
+            Self::Synth => "Synth",
+            Self::Fx => "Sound Effects",
+            Self::Brass => "Brass Section",
+            Self::Woodwinds => "Woodwinds",
+        }
+    }
 }
 
 #[derive(clap::Args)]

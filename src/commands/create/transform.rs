@@ -1,6 +1,7 @@
 use crate::app::AppContext;
 use crate::cli::{
-    ConcatArgs, CoverArgs, CropArgs, FadeArgs, RemasterArgs, ReverseArgs, SpeedArgs, StemsArgs,
+    ConcatArgs, CoverArgs, CropArgs, FadeArgs, RemasterArgs, ReverseArgs, SpeedArgs, StemGroup,
+    StemMode, StemsArgs,
 };
 use crate::core::{AppConfig, CliError, normalize_generation_model_selector};
 
@@ -274,11 +275,36 @@ async fn require_source_clip(
 }
 
 pub async fn stems(args: StemsArgs, ctx: &AppContext) -> Result<(), CliError> {
+    let stem = validate_stem_mode(args.mode, args.stem)?;
+    if !ctx.quiet {
+        match args.mode {
+            StemMode::Auto => eprintln!(
+                "Starting Pro Auto Split (up to 12 stems; Suno currently charges 50 credits)..."
+            ),
+            StemMode::Split => eprintln!(
+                "Starting Pro Split from Mix for `{}` (target + complement; Suno currently charges 20 credits total)...",
+                stem.expect("validated split stem").canonical_name()
+            ),
+        }
+    }
     let challenge_mode = ChallengeMode::from_flags(args.captcha, args.no_captcha);
     let token = args.token.clone();
+    let mode = args.mode;
     let clips = execute_generation_submission(token, challenge_mode, ctx, move || async move {
         let client = ctx.client().await?;
-        let mut req = client.prepare_stems_request(&args.clip_id, None).await?;
+        let mut req = match mode {
+            StemMode::Auto => client.prepare_stems_request(&args.clip_id, None).await?,
+            StemMode::Split => {
+                client
+                    .prepare_split_stems_request(
+                        &args.clip_id,
+                        stem.expect("validated split stem").api_group(),
+                        stem.expect("validated split stem").canonical_name(),
+                        None,
+                    )
+                    .await?
+            }
+        };
         client.prepare_generation_request(&mut req).await?;
         Ok((client, req))
     })
@@ -287,13 +313,32 @@ pub async fn stems(args: StemsArgs, ctx: &AppContext) -> Result<(), CliError> {
     Ok(())
 }
 
+fn validate_stem_mode(
+    mode: StemMode,
+    stem: Option<StemGroup>,
+) -> Result<Option<StemGroup>, CliError> {
+    match (mode, stem) {
+        (StemMode::Auto, None) => Ok(None),
+        (StemMode::Auto, Some(_)) => Err(CliError::Config(
+            "--stem is only valid with --mode split".into(),
+        )),
+        (StemMode::Split, Some(stem)) => Ok(Some(stem)),
+        (StemMode::Split, None) => Err(CliError::Config(
+            "--mode split requires --stem with a current Pro target group".into(),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::api::types::RemasterModelInfo;
-    use crate::cli::RemasterModel;
+    use crate::cli::{RemasterModel, StemGroup, StemMode};
     use crate::core::CliError;
 
-    use super::{ensure_remaster_plan_access, resolve_remaster_model, select_remaster_model};
+    use super::{
+        ensure_remaster_plan_access, resolve_remaster_model, select_remaster_model,
+        validate_stem_mode,
+    };
 
     fn billing_fixture(
         accessible_features: Option<serde_json::Value>,
@@ -448,5 +493,48 @@ mod tests {
             resolve_remaster_model(Err(transport_error), None),
             Err(CliError::Io(_))
         ));
+    }
+
+    #[test]
+    fn split_from_mix_requires_a_non_empty_target() {
+        assert_eq!(
+            validate_stem_mode(StemMode::Split, Some(StemGroup::Vocals)).expect("target"),
+            Some(StemGroup::Vocals)
+        );
+        let error =
+            validate_stem_mode(StemMode::Split, None).expect_err("split target must be explicit");
+        assert!(error.to_string().contains("--stem"));
+    }
+
+    #[test]
+    fn auto_split_rejects_a_target_to_avoid_a_mixed_contract() {
+        assert_eq!(
+            validate_stem_mode(StemMode::Auto, None).expect("auto split"),
+            None
+        );
+        let error = validate_stem_mode(StemMode::Auto, Some(StemGroup::Vocals))
+            .expect_err("auto split cannot send stem_name");
+        assert!(error.to_string().contains("--mode split"));
+    }
+
+    #[test]
+    fn pro_stem_groups_map_to_current_canonical_default_names() {
+        for (group, api_group, canonical) in [
+            (StemGroup::Vocals, "Vocals", "Lead Vocal"),
+            (StemGroup::BackingVocals, "Backing_Vocals", "Backing Vocals"),
+            (StemGroup::Drums, "Drums", "Drum Kit"),
+            (StemGroup::Bass, "Bass", "Bass"),
+            (StemGroup::Guitar, "Guitar", "Guitar"),
+            (StemGroup::Keyboard, "Keyboard", "Keyboards"),
+            (StemGroup::Percussion, "Percussion", "Percussion"),
+            (StemGroup::Strings, "Strings", "String Section"),
+            (StemGroup::Synth, "Synth", "Synth"),
+            (StemGroup::Fx, "FX", "Sound Effects"),
+            (StemGroup::Brass, "Brass", "Brass Section"),
+            (StemGroup::Woodwinds, "Woodwinds", "Woodwinds"),
+        ] {
+            assert_eq!(group.api_group(), api_group);
+            assert_eq!(group.canonical_name(), canonical);
+        }
     }
 }

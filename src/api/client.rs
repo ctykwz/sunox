@@ -71,6 +71,10 @@ impl SunoClient {
         self.auth.lock().expect("auth mutex poisoned").clone()
     }
 
+    pub(crate) fn authenticated_user_id(&self) -> Option<String> {
+        self.auth_state_snapshot().account_user_id()
+    }
+
     pub(crate) fn set_device_id(&self, device_id: String) {
         self.auth.lock().expect("auth mutex poisoned").device_id = Some(device_id.clone());
         *self

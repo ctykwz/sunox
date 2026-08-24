@@ -27,6 +27,7 @@ struct DownloadFileOptions<'a> {
     quiet: bool,
     format: DownloadFormat,
     no_convert: bool,
+    skip_timed_lyrics: bool,
 }
 
 pub async fn download(args: DownloadArgs, ctx: &AppContext) -> Result<(), CliError> {
@@ -57,6 +58,7 @@ pub async fn download(args: DownloadArgs, ctx: &AppContext) -> Result<(), CliErr
             quiet: ctx.quiet,
             format,
             no_convert: args.no_convert,
+            skip_timed_lyrics: args.skip_timed_lyrics,
         };
         let (path, warning) = match download_file(clip, options, ctx, &client).await {
             Ok(result) => result,
@@ -127,7 +129,7 @@ async fn download_file(
     .await?;
     let url =
         official_download_url(ctx, client, &clip.id, options.format, options.no_convert).await?;
-    if options.format == DownloadFormat::Mp3 {
+    if should_fetch_timed_lyrics(options.format, options.skip_timed_lyrics) {
         download_mp3_with_lyrics(
             clip,
             options.output_dir,
@@ -150,6 +152,10 @@ async fn download_file(
         .await
         .map(|path| (path, None))
     }
+}
+
+fn should_fetch_timed_lyrics(format: DownloadFormat, skip_timed_lyrics: bool) -> bool {
+    format == DownloadFormat::Mp3 && !skip_timed_lyrics
 }
 
 async fn download_mp3_with_lyrics(
@@ -463,7 +469,7 @@ mod tests {
     use super::{
         DownloadFileOptions, TimedLyricsRender, audio_download_format, clip_alignment_lyrics,
         download_file, json_value_is_truthy, partial_download_error, preflight_download_batch,
-        timed_lyrics_render,
+        should_fetch_timed_lyrics, timed_lyrics_render,
     };
 
     fn clip() -> crate::api::types::Clip {
@@ -515,6 +521,13 @@ mod tests {
         assert!(DownloadFormat::Opus.requires_mutation_lock());
     }
 
+    #[test]
+    fn stem_download_safety_switch_prevents_aligned_lyrics_generation() {
+        assert!(should_fetch_timed_lyrics(DownloadFormat::Mp3, false));
+        assert!(!should_fetch_timed_lyrics(DownloadFormat::Mp3, true));
+        assert!(!should_fetch_timed_lyrics(DownloadFormat::Wav, true));
+    }
+
     #[tokio::test]
     async fn existing_audio_destinations_fail_before_prepared_or_conversion_endpoints() {
         let dir = tempfile::tempdir().expect("download output directory");
@@ -543,6 +556,7 @@ mod tests {
                     quiet: true,
                     format,
                     no_convert: false,
+                    skip_timed_lyrics: false,
                 },
                 &context(),
                 &client,

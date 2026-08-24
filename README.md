@@ -1,7 +1,8 @@
 # sunox
 
 `sunox` is an unofficial Rust CLI for using Suno from a terminal. It supports song creation,
-lyrics, downloads, playlists, personas, covers, remasters, clip edits, stems, and audio uploads.
+lyrics projects, downloads, playlists, verified Voices, Custom Models, generated cover media,
+remasters, clip edits, stems, and audio uploads.
 
 [![crates.io](https://img.shields.io/crates/v/sunox)](https://crates.io/crates/sunox)
 [![CI](https://github.com/ctykwz/sunox/actions/workflows/ci.yml/badge.svg)](https://github.com/ctykwz/sunox/actions/workflows/ci.yml)
@@ -21,8 +22,12 @@ English · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) ·
   brief.
 - Wait for asynchronous generations and download the resulting MP3, M4A, WAV, Opus, or video.
 - Browse, search, edit, publish, trash, restore, and download clips.
-- Cover, extend, concatenate, remaster, reverse, crop, fade, change speed, or generate stems.
-- Manage playlists and voice personas, and upload local audio or cover images.
+- Cover, extend, concatenate, remaster, reverse, crop, fade, change speed, or split stems.
+- Read/download existing stem banks, manage lyrics projects and Custom Models, and create private
+  verified Voices from local recordings.
+- Generate and apply a prompt image, and inspect existing per-clip video status; legacy video submit
+  remains fail-closed until clip eligibility is provable.
+- Manage playlists and personas, and upload local audio or cover images.
 - Use table output in a terminal or stable JSON envelopes in scripts and coding agents.
 
 ## Install
@@ -123,6 +128,12 @@ prepared downloads according to the account plan.
 sunox <prompt>                    Create from a short description
 sunox create [prompt]             Create with full generation options
 sunox lyrics                      Generate lyrics only
+sunox lyrics rewrite --prompt "..." --edit-file selection.txt
+                                    Rewrite one selected lyrics passage
+sunox lyrics mashup --lyrics-a-file a.txt --lyrics-b-file b.txt
+                                    Start a two-source lyrics mashup
+sunox lyrics mashup-status <id> --wait
+                                    Observe an existing mashup to completion
 
 sunox clip list                   List your songs
 sunox clip search <query>         Search your songs
@@ -139,7 +150,22 @@ sunox clip speed <id>             Change playback speed
 sunox clip reverse <id>           Reverse audio
 sunox clip crop <id>              Keep or remove a time range
 sunox clip fade <id>              Add a fade
-sunox clip stems <id>             Generate stems
+sunox clip stems <id>             Pro Auto Split (paid; current default is 50 credits)
+sunox clip stems <id> --mode split --stem vocals
+                                    Pro Split from Mix (paid; current pair is 20 credits)
+sunox clip get-stems <id>         Read existing stem-result banks without extracting
+sunox clip generate-image <id> --prompt "..."
+                                    Generate and apply a cover image
+sunox clip generate-video <id>    Validate legacy video eligibility (submit currently fail-closed)
+sunox clip video-status <id>      Inspect an existing video job
+sunox clip cover-art models       List current image/video categories and durations
+sunox clip cover-art image <id> --prompt "..."
+                                    Generate two image candidates; does not auto-apply
+sunox clip cover-art video <id> --prompt "..."
+                                    Generate two video candidates; does not auto-apply
+sunox clip cover-art status <batch_id> --media image --wait
+sunox clip cover-art apply-image <id> <batch_id> <image_id>
+sunox clip cover-art apply-video <id> <batch_id> <video_upload_id>
 
 sunox playlist list               List playlists
 sunox playlist create             Create a playlist
@@ -147,6 +173,25 @@ sunox add <clip_ids> --to <id>    Add clips to a playlist
 
 sunox persona list                List voice personas
 sunox persona create <clip_id>    Create a persona from a clip
+sunox voice phrase --language en  Fetch the current verification phrase
+sunox voice create --help         Create a private verified Voice from two WAV files
+
+sunox models custom pending       Inspect Custom Models still training
+sunox models custom train --help  Review the required rights and Web-UI attestations
+sunox models custom archive <id> -y
+                                    Archive a Custom Model
+
+sunox lyrics projects list        List autosaved lyrics projects
+sunox lyrics projects info <id>   Read one exact project
+sunox lyrics projects create      Create a lyrics project
+sunox lyrics projects rename <id> --title "..."
+                                    Rename and read back a project
+sunox lyrics projects flush <id> --lyrics-file lyrics.txt
+                                    Save project lyrics immediately
+sunox lyrics projects delete <id> -y
+                                    Delete a project after explicit confirmation
+sunox create --lyrics-file lyrics.txt --lyrics-project-id <id>
+                                    Link an exact project to custom-lyrics generation
 
 sunox clip upload <file>          Upload local audio
 sunox credits                     Show credits and plan information
@@ -183,6 +228,60 @@ requires an exact complete, non-trashed, non-infill source of at most 960 second
 `variation_category`; passing `--variation` with that model is rejected locally.
 
 Run `sunox --help` or `sunox <command> --help` for the complete set of options.
+
+### Current Pro workflows added to the CLI
+
+Stem extraction and existing-result export are separate commands. `clip stems` starts a
+credit-bearing `gen_stem` job; `clip get-stems` only reads existing result pages unless
+`--download` is requested. Pro exposes Auto Split and the 12 canonical Split from Mix targets.
+Premier-only arbitrary Advanced Split instruments are intentionally not offered. Existing-result
+downloads fail closed if any paged stem reference cannot be hydrated. MP3 stem export deliberately
+skips the separate aligned-lyrics POST; WAV/OPUS export can still request a conversion unless
+`--no-convert` or global `--read-only` is used, and prepared downloads may consume plan allowance.
+
+Voice creation first fetches a dynamic phrase with `voice phrase`. Record that exact phrase and
+prepare both it and the singing sample as WAV files, then use `voice create` with
+`--confirm-rights`, `--confirm-eligibility`, and `--confirm-biometric-consent`. These separately
+cover recording rights, the current 18+/regional/audio-upload gates, and Suno's possible-biometric
+data processing disclosure; Suno's Terms, Privacy Policy, training-use/account choices, and server
+checks remain authoritative. The CLI uploads and verifies both recordings, creates the resulting
+Vox Persona as private, and reads the privacy/type state back. It does not record microphone audio
+itself. Every server identity is atomically checkpointed under the managed Sunox config directory
+for inspection after interruption; the checkpoint is not a promise that the multi-write flow can
+be safely resumed.
+The Web client trims the singing source before upload. Sunox therefore accepts only a pre-trimmed
+sample whose measured WAV duration exactly matches `--sample-duration`; it never silently uploads
+extra audio. Current Web selection rules are the whole source below 10 seconds, otherwise 10 to
+240 seconds. The verification recording remains server-authoritative; Web currently targets about
+15 seconds and the generic upload ceiling is 900 seconds.
+Voice-backed generation uses the resulting Persona ID through `create --persona` and requires an
+eligible current v5.5 account model.
+
+Lyrics 2.0 selection rewrite, two-source mashup polling, lyrics-project CRUD/flush, and exact
+project linking through `create --lyrics-project-id` use their distinct current routes. Rewrite is
+a single 30-second synchronous request; mashup polling is bounded, and neither transport ambiguity
+is replayed automatically. Mashup waits by default; `--no-wait` returns its IDs for the read-only
+`mashup-status`, whose `--timeout` requires `--wait`. Project deletion requires `-y/--yes`.
+Audio underpaint/overpaint and Song Editor section replacement are not claimed by these lyrics
+commands.
+
+Custom Model training requires at least six distinct source clip IDs, `--confirm-rights`, the live
+`custom_models` account entitlement, and `--confirm-ui-available` after visibly confirming that the
+current Suno Web account exposes the training UI. Without that UI attestation the CLI sends no
+training POST. The current Web UI displays a 100-credit cost, while server eligibility and charging
+remain authoritative. Pending inspection, exact-ID archive, and ready-model selection are also
+available. Ready Custom Models appear in `sunox models` and are selectable with `create --model`;
+archive is not described as permanent deletion or recoverable.
+
+`clip generate-image` implements the direct `/api/gen/prompt_image/` plus clip metadata workflow.
+The separate `clip cover-art` namespace implements the current multi-result `SONG_COVER_ART`
+image/video workflow with dynamic model/duration discovery, cost preflight, pending/history recovery,
+bounded polling, and explicit apply commands. Generation never auto-applies the first result. Both
+paths require exact authenticated ownership, non-trashed state, and an enabled `generate_cover_art`
+action. The legacy per-clip
+video POST/status routes are separate and known, but their exact ownership/download-eligibility seam is not;
+`clip generate-video` therefore fails closed before POST. `clip video-status` remains a bounded,
+read-only status check.
 
 ## Generation challenges
 
