@@ -55,27 +55,6 @@ fn download_progress_bar(total: u64, quiet: bool) -> ProgressBar {
     }
 }
 
-pub async fn download_clip(
-    clip: &Clip,
-    output_dir: &str,
-    video: bool,
-    force: bool,
-    quiet: bool,
-) -> Result<String, CliError> {
-    let url = if video {
-        clip.video_url
-            .as_deref()
-            .ok_or_else(|| CliError::Download("no video URL available".into()))?
-    } else {
-        clip.audio_url
-            .as_deref()
-            .ok_or_else(|| CliError::Download("no audio URL available".into()))?
-    };
-
-    let ext = if video { "mp4" } else { "mp3" };
-    download_clip_url(clip, output_dir, url, ext, force, quiet).await
-}
-
 pub async fn download_clip_url(
     clip: &Clip,
     output_dir: &str,
@@ -117,8 +96,16 @@ pub async fn preflight_clip_download(
 ) -> Result<(), CliError> {
     let output_dir = Path::new(output_dir);
     ensure_output_directory(output_dir).await?;
-    reject_existing_output(&output_dir.join(download_filename(clip, ext)), force).await?;
+    reject_existing_output(&planned_clip_download_path(clip, output_dir, ext), force).await?;
     verify_output_directory_writable(output_dir).await
+}
+
+pub(crate) fn planned_clip_download_path(
+    clip: &Clip,
+    output_dir: impl AsRef<Path>,
+    ext: &str,
+) -> PathBuf {
+    output_dir.as_ref().join(download_filename(clip, ext))
 }
 
 async fn stage_clip_url_with_idle_timeout(
@@ -159,7 +146,7 @@ async fn stage_clip_url_with_limits(
     let filename = download_filename(clip, ext);
     let output_dir = Path::new(output_dir);
     ensure_output_directory(output_dir).await?;
-    let path = output_dir.join(&filename);
+    let path = planned_clip_download_path(clip, output_dir, ext);
     reject_existing_output(&path, force).await?;
 
     let resp = tokio::time::timeout(idle_timeout, http::download_client()?.get(url).send())
@@ -373,6 +360,7 @@ mod tests {
             image_url: None,
             created_at: "2026-07-10T00:00:00Z".into(),
             is_trashed: None,
+            is_download_unlocked: None,
             action_config: None,
             play_count: 0,
             upvote_count: 0,

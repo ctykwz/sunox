@@ -11,6 +11,28 @@ backward-compatible features, upstream protocol adaptations, and fixes.
 
 ## [Unreleased]
 
+### Added
+
+- Added the current clip-level download authorization contract, including strict
+  `is_download_unlocked` handling, one-shot `POST /api/download/authorize`, typed live
+  `download_usage`, and preserved download-credit pack metadata.
+- Added prepared WAV and MP4 download routes. Existing OPUS, WAV conversion, and direct-video
+  compatibility paths now run only after the source clip is confirmed unlocked; existing stem
+  exports authorize their parent source once rather than each stem.
+
+### Fixed
+
+- Fail generation model preflight before challenge or `/api/generate/v2-web/` whenever current
+  account billing information is unavailable, instead of substituting the compiled-in
+  `chirp-auk-turbo` model after a transport failure.
+- Fail read-only downloads closed when the source is locked or its unlock state is absent, and
+  never blindly replay a potentially metered authorization after an ambiguous response. Download
+  limits are read from current billing fields rather than inferred from a plan name.
+- Prevent 307/308 redirects from replaying download authorization and reconcile them as ambiguous
+  outcomes through clip/billing readback; reject duplicate batch output paths before authorization
+  even with `--force`; and omit unknown billing fields from sanitized capability and
+  mutation-recovery output while preserving them in raw credits JSON.
+
 ## [0.3.0] - 2026-08-24
 
 ### Added
@@ -468,7 +490,7 @@ backward-compatible features, upstream protocol adaptations, and fixes.
 - Keep generic `invalid token` responses on the JWT refresh path for ordinary API requests while
   preserving them as structured challenge errors when a generation request carries a solved token.
 - Compare self-update versions semantically and avoid reporting an older release as an update.
-- Resolve the default generation model and field limits from the current account, with an explicit fallback only when billing information is unavailable.
+- Resolve the default generation model and field limits from the current account.
 - Preserve Suno HTTP status, retryability, and structured error details instead of treating API failures as network errors.
 - Use the project-specific `SUNOX_*` environment prefix and reject unresolved auth storage paths.
 - Removed known vulnerable transitive dependency versions from the release build.

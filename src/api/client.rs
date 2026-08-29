@@ -11,6 +11,7 @@ pub(crate) const BASE_URL: &str = "https://studio-api-prod.suno.com";
 
 pub struct SunoClient {
     pub(crate) client: Client,
+    no_redirect_client: Client,
     http1_read_client: Client,
     pub(crate) clerk_client: Client,
     base_url: String,
@@ -33,6 +34,7 @@ impl SunoClient {
 
         Ok(Self {
             client,
+            no_redirect_client: http::browser_no_redirect_client()?,
             http1_read_client: http::browser_http1_client()?,
             clerk_client,
             base_url: BASE_URL.to_string(),
@@ -47,6 +49,7 @@ impl SunoClient {
     pub(crate) fn new_for_auth_validation(auth: AuthState) -> Result<Self, CliError> {
         Ok(Self {
             client: http::browser_client()?,
+            no_redirect_client: http::browser_no_redirect_client()?,
             http1_read_client: http::browser_http1_client()?,
             clerk_client: http::clerk_client()?,
             base_url: BASE_URL.to_string(),
@@ -59,6 +62,7 @@ impl SunoClient {
     pub(crate) fn new_for_tests(base_url: String, auth: AuthState) -> Result<Self, CliError> {
         Ok(Self {
             client: http::browser_client()?,
+            no_redirect_client: http::browser_no_redirect_client()?,
             http1_read_client: http::browser_http1_client()?,
             clerk_client: http::clerk_client()?,
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -93,6 +97,12 @@ impl SunoClient {
 
     pub(crate) fn post(&self, path: &str) -> reqwest::RequestBuilder {
         self.client.post(self.url(path)).headers(self.headers())
+    }
+
+    pub(crate) fn post_without_redirect(&self, path: &str) -> reqwest::RequestBuilder {
+        self.no_redirect_client
+            .post(self.url(path))
+            .headers(self.headers())
     }
 
     pub(crate) fn patch(&self, path: &str) -> reqwest::RequestBuilder {

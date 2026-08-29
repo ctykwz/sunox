@@ -16,6 +16,8 @@ pub struct Clip {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_trashed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_download_unlocked: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action_config: Option<ClipActionConfig>,
     #[serde(default)]
     pub play_count: u64,
@@ -89,6 +91,7 @@ mod tests {
             "model_name": "chirp-carp",
             "created_at": "2026-07-19T00:00:00Z",
             "is_trashed": false,
+            "is_download_unlocked": true,
             "allow_comments": true,
             "action_config": {
                 "surface": "song_actions",
@@ -125,10 +128,12 @@ mod tests {
         assert_eq!(action.visible, Some(true));
         assert_eq!(action.disabled, Some(false));
         assert_eq!(clip.is_trashed, Some(false));
+        assert_eq!(clip.is_download_unlocked, Some(true));
         assert_eq!(clip.metadata.infill, Some(false));
 
         let output = serde_json::to_value(clip).expect("serialize clip response");
         assert_eq!(output["allow_comments"], true);
+        assert_eq!(output["is_download_unlocked"], true);
         assert_eq!(
             output["action_config"]["actions"][0]["action_type"],
             "download_song"

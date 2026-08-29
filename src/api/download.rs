@@ -4,6 +4,7 @@ use clap::ValueEnum;
 use serde::Deserialize;
 use tokio::time::Instant;
 
+use super::types::{DownloadAuthorizationRequest, DownloadAuthorizationResponse};
 use super::{PollingOptions, SunoClient};
 use crate::core::{CliError, MutationAmbiguity, run_before_deadline, sleep_before_deadline};
 
@@ -13,6 +14,25 @@ pub enum DownloadFormat {
     M4a,
     Wav,
     Opus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PreparedDownloadFormat {
+    Mp3,
+    M4a,
+    Wav,
+    Mp4,
+}
+
+impl PreparedDownloadFormat {
+    pub(crate) fn extension(self) -> &'static str {
+        match self {
+            Self::Mp3 => "mp3",
+            Self::M4a => "m4a",
+            Self::Wav => "wav",
+            Self::Mp4 => "mp4",
+        }
+    }
 }
 
 impl DownloadFormat {
@@ -47,6 +67,78 @@ struct OpusFile {
 }
 
 impl SunoClient {
+    pub async fn authorize_download(
+        &self,
+        clip_id: &str,
+    ) -> Result<DownloadAuthorizationResponse, CliError> {
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let response = self
+            .post_without_redirect("/api/download/authorize")
+            .json(&DownloadAuthorizationRequest::clip(clip_id))
+            .send()
+            .await
+            .map_err(|error| {
+                ambiguous_download_authorization_details(
+                    &operation_id,
+                    clip_id,
+                    "request_send",
+                    "http_error",
+                    error.to_string(),
+                )
+            })?;
+        let status = response.status();
+        let response = match self.check_response(response).await {
+            Ok(response) => response,
+            Err(error) if status.is_server_error() || status.is_redirection() => {
+                return Err(ambiguous_download_authorization_from_cli_error(
+                    &operation_id,
+                    clip_id,
+                    "response_status",
+                    error,
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        let body = response.bytes().await.map_err(|error| {
+            ambiguous_download_authorization_details(
+                &operation_id,
+                clip_id,
+                "response_body",
+                "http_error",
+                error.to_string(),
+            )
+        })?;
+        let response_value: serde_json::Value = serde_json::from_slice(&body).map_err(|error| {
+            ambiguous_download_authorization_details(
+                &operation_id,
+                clip_id,
+                "response_body",
+                "json_error",
+                error.to_string(),
+            )
+        })?;
+        let authorization: DownloadAuthorizationResponse = serde_json::from_value(response_value)
+            .map_err(|error| {
+            ambiguous_download_authorization_details(
+                &operation_id,
+                clip_id,
+                "response_schema",
+                "schema_drift",
+                error.to_string(),
+            )
+        })?;
+        if authorization.ok.is_none() {
+            return Err(ambiguous_download_authorization_details(
+                &operation_id,
+                clip_id,
+                "response_schema",
+                "schema_drift",
+                "download authorization response omitted required field `ok`".into(),
+            ));
+        }
+        Ok(authorization)
+    }
+
     pub async fn download_url(
         &self,
         clip_id: &str,
@@ -54,6 +146,17 @@ impl SunoClient {
         polling: PollingOptions,
     ) -> Result<String, CliError> {
         self.download_url_with_conversion_policy(clip_id, format, polling, true)
+            .await
+    }
+
+    pub(crate) async fn prepared_download_url(
+        &self,
+        clip_id: &str,
+        format: PreparedDownloadFormat,
+        polling: PollingOptions,
+    ) -> Result<String, CliError> {
+        let deadline = polling.deadline()?;
+        self.poll_prepared_download_url(clip_id, format.extension(), deadline, polling.interval)
             .await
     }
 
@@ -67,8 +170,13 @@ impl SunoClient {
         let deadline = polling.deadline()?;
         match format {
             DownloadFormat::Mp3 | DownloadFormat::M4a => {
-                self.prepared_download_url(clip_id, format.extension(), deadline, polling.interval)
-                    .await
+                self.poll_prepared_download_url(
+                    clip_id,
+                    format.extension(),
+                    deadline,
+                    polling.interval,
+                )
+                .await
             }
             DownloadFormat::Wav => {
                 self.generated_or_existing_wav_url(
@@ -99,7 +207,7 @@ impl SunoClient {
         Ok(self.wav_file(clip_id).await?.wav_file_url)
     }
 
-    async fn prepared_download_url(
+    async fn poll_prepared_download_url(
         &self,
         clip_id: &str,
         format: &str,
@@ -118,13 +226,11 @@ impl SunoClient {
                 download_timeout(format, clip_id),
             )
             .await?;
-            if let Some(url) = prepared.download_url {
+            if let Some(url) = prepared.download_url.filter(|url| !url.trim().is_empty()) {
                 return Ok(url);
             }
             if prepared.status.as_deref() != Some("processing") {
-                return Err(CliError::Download(format!(
-                    "no {format} download URL available for clip {clip_id}"
-                )));
+                return Err(prepared_download_unavailable(format, clip_id));
             }
             if !sleep_before_deadline(deadline, poll_interval).await {
                 return Err(CliError::Download(format!(
@@ -400,4 +506,63 @@ fn download_timeout(format: &str, clip_id: &str) -> CliError {
     CliError::Download(format!(
         "timed out waiting for {format} download URL for clip {clip_id}"
     ))
+}
+
+fn prepared_download_unavailable(format: &str, clip_id: &str) -> CliError {
+    CliError::Diagnostic {
+        code: "prepared_download_unavailable",
+        message: format!("no prepared {format} download URL is available for clip {clip_id}"),
+        details: serde_json::json!({
+            "clip_id": clip_id,
+            "format": format,
+            "download_started": false,
+        }),
+    }
+}
+
+fn ambiguous_download_authorization_from_cli_error(
+    operation_id: &str,
+    clip_id: &str,
+    stage: &'static str,
+    error: CliError,
+) -> CliError {
+    let cause_code = error.error_code();
+    let cause_message = error.to_string();
+    ambiguous_download_authorization_details(
+        operation_id,
+        clip_id,
+        stage,
+        cause_code,
+        cause_message,
+    )
+}
+
+fn ambiguous_download_authorization_details(
+    operation_id: &str,
+    clip_id: &str,
+    stage: &'static str,
+    cause_code: &'static str,
+    cause_message: String,
+) -> CliError {
+    MutationAmbiguity::new(
+        format!(
+            "download authorization {operation_id} for clip {clip_id} lost a reliable response during {stage}; the clip may already be unlocked or a download credit may have been deducted"
+        ),
+        "download_authorize",
+        operation_id,
+        stage,
+        cause_code,
+        cause_message,
+        false,
+        "read back the clip unlock state and billing usage before deciding whether another authorization is safe",
+        vec![
+            format!("sunox clip info {clip_id} --json"),
+            "sunox credits --json".into(),
+        ],
+    )
+    .with_context(
+        "clip_id",
+        serde_json::Value::String(clip_id.to_string()),
+    )
+    .into_error()
 }

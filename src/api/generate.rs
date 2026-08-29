@@ -7,7 +7,6 @@ use crate::core::{CliError, MutationAmbiguity};
 
 const CREATE_CONTROL_SLIDERS_FEATURE: &str = "create_control_sliders";
 pub(crate) const TAG_UPSAMPLE_FEATURE: &str = "tag_upsample";
-const WEB_FALLBACK_MODEL: &str = "chirp-auk-turbo";
 
 impl SunoClient {
     /// Submit a music generation request (custom mode or inspiration mode).
@@ -67,7 +66,7 @@ impl SunoClient {
             Err(error) if is_transient_billing_transport(&error) => {
                 if req.duration.is_some() {
                     return Err(CliError::Config(
-                        "could not verify --duration against the current Suno billing model and its exact v5.5 limits; refusing to submit or apply the auto-model fallback"
+                        "could not verify --duration against the current Suno billing model and its exact v5.5 limits; refusing to submit without live account model validation"
                             .into(),
                     ));
                 }
@@ -90,8 +89,10 @@ impl SunoClient {
                     ));
                 }
                 if req.mv == "auto" {
-                    req.mv = WEB_FALLBACK_MODEL.into();
-                    return Ok(None);
+                    return Err(CliError::Config(
+                        "could not resolve the account default generation model because Suno billing info is unavailable; refusing to submit without live account model validation"
+                            .into(),
+                    ));
                 }
                 return Err(CliError::Config(format!(
                     "could not verify model selector `{}` against the current Suno account; refusing to submit without exact billing validation",

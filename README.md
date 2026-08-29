@@ -117,10 +117,15 @@ sunox download <clip_id_1> <clip_id_2> --output ./songs
 ```
 
 The default download uses Suno's prepared MP3 endpoint. Sunox writes available plain and timed
-lyrics into the file's ID3 tags. Use `--format mp3|m4a|wav|opus` to choose another prepared format;
-WAV and OPUS reuse an existing converted file before requesting a conversion. Add `--no-convert`
-to refuse that server-side conversion POST, or use `--video` for an available MP4. Suno may meter
-prepared downloads according to the account plan.
+lyrics into the file's ID3 tags. Before fetching any file, Sunox requires the source clip's
+`is_download_unlocked` field to be exactly `true`; otherwise it submits the current one-shot
+`POST /api/download/authorize` request for that source. MP3, M4A, WAV, and `--video` then prefer
+Suno's prepared `mp3`, `m4a`, `wav`, and `mp4` routes. OPUS remains a legacy compatibility path,
+and legacy WAV or direct-video fallbacks are considered only after the source is unlocked. Use
+`--format mp3|m4a|wav|opus` to select audio output and `--no-convert` to refuse a missing legacy
+conversion. Authorization can consume plan download allowance and is never blindly replayed after
+an ambiguous response or redirect. A batch whose clip names resolve to the same destination fails
+before authorization, including with `--force`.
 
 ## Common commands
 
@@ -236,8 +241,10 @@ credit-bearing `gen_stem` job; `clip get-stems` only reads existing result pages
 `--download` is requested. Pro exposes Auto Split and the 12 canonical Split from Mix targets.
 Premier-only arbitrary Advanced Split instruments are intentionally not offered. Existing-result
 downloads fail closed if any paged stem reference cannot be hydrated. MP3 stem export deliberately
-skips the separate aligned-lyrics POST; WAV/OPUS export can still request a conversion unless
-`--no-convert` or global `--read-only` is used, and prepared downloads may consume plan allowance.
+skips the separate aligned-lyrics POST. Every file in one stem bank reuses a single authorization
+of its parent source clip rather than authorizing each stem. WAV/OPUS export can still use a legacy
+conversion only after that parent is unlocked and unless `--no-convert` is used. Global
+`--read-only` permits export only when the parent is already unlocked.
 
 Voice creation first fetches a dynamic phrase with `voice phrase`. Record that exact phrase and
 prepare both it and the singing sample as WAV files, then use `voice create` with
@@ -464,9 +471,10 @@ Write operations are serialized per account by default. `--parallel` disables th
 one command; use it only when same-account concurrent writes are intentional.
 
 Pass global `--read-only` to reject account writes before the first write request. Read-only mode
-still allows account reads and prepared downloads; those downloads can be plan-metered. It also
-prevents timed-lyrics augmentation and missing WAV/OPUS conversion while continuing to return an
-already existing alignment or converted file when available.
+still allows account reads, but a download is allowed only when its source already reports
+`is_download_unlocked == true`; it never calls `/api/download/authorize`. It also prevents
+timed-lyrics augmentation and missing WAV/OPUS conversion while continuing to return an already
+existing alignment or converted file when available after the source-unlock gate.
 
 ## Limits and safety
 
@@ -481,7 +489,9 @@ require `-y` or `--yes`.
 accounts will be limited to 20 downloads per month (Premier: 60; Premier Studio exports are
 excluded). Sunox uses the official prepared-download
 workflow and does not attempt to bypass plan accounting. The CLI reports only limits returned by
-the live billing response; it does not hard-code or guess remaining download allowance.
+the live billing response: period limit, period usage, additional remaining downloads, and the
+available download-credit pack metadata when present. Runtime authorization never hard-codes the
+announced plan quotas or guesses remaining download allowance.
 
 ## Development
 

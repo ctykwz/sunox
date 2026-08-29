@@ -5,6 +5,7 @@ mod clip;
 mod clip_info;
 mod clip_mutation;
 mod custom_model;
+mod download;
 mod feed;
 mod generation;
 mod lyrics;
@@ -19,7 +20,10 @@ mod upload;
 mod visual;
 mod voice;
 
-pub use account::{AccessibleFeatures, BillingInfo, MaxLengths, Model, RemasterModelInfo};
+pub use account::{
+    AccessibleFeatures, BillingInfo, DownloadCreditPack, DownloadUsage, MaxLengths, Model,
+    RemasterModelInfo,
+};
 pub use clip::{Clip, ClipActionConfig};
 pub use clip_info::{
     ClipAttribution, ClipComments, ClipInfo, ClipInfoSupplementalError, RemixCountResponse,
@@ -30,6 +34,8 @@ pub use custom_model::{
     ArchiveCustomModelRequest, CreateCustomModelRequest, CustomModelCreateResponse,
     PendingCustomModelsResponse,
 };
+pub(crate) use download::DownloadAuthorizationRequest;
+pub use download::DownloadAuthorizationResponse;
 pub use feed::{FeedFilters, FeedResponse, FeedV3Request};
 pub use generation::{
     ControlSliders, GenerateRequest, GenerateResponse, GenerationResult, LastTagsGeneration,

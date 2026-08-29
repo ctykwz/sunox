@@ -28,6 +28,20 @@ pub fn browser_client() -> Result<Client, CliError> {
     .map_err(|e| CliError::Config(format!("HTTP client: {e}")))
 }
 
+/// Account mutations whose protocol forbids automatic replay use a client
+/// that surfaces redirects to the caller. In particular, reqwest's default
+/// 307/308 handling would otherwise repeat the original POST and body.
+pub fn browser_no_redirect_client() -> Result<Client, CliError> {
+    crate::net::proxy::apply_to_client_builder(
+        Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .user_agent(BROWSER_USER_AGENT)
+            .redirect(reqwest::redirect::Policy::none()),
+    )?
+    .build()
+    .map_err(|e| CliError::Config(format!("non-redirecting HTTP client: {e}")))
+}
+
 /// Keep a dedicated HTTP/1 pool as one bounded recovery attempt for explicitly
 /// idempotent reads. Both transports have shown intermittent resets, so this is
 /// not evidence that a route requires HTTP/1. Mutation transports never use it.

@@ -234,6 +234,32 @@ impl MockServer {
         }
     }
 
+    async fn resets_until_idle(max_requests: usize, idle_timeout: Duration) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let addr = listener.local_addr().expect("mock server address");
+        let (tx, rx) = oneshot::channel();
+
+        tokio::spawn(async move {
+            let mut captured = Vec::new();
+            while captured.len() < max_requests {
+                let Ok(Ok((mut stream, _))) = timeout(idle_timeout, listener.accept()).await else {
+                    break;
+                };
+                captured.push(read_request(&mut stream).await);
+                drop(stream);
+            }
+            let _ = tx.send(captured);
+        });
+
+        Self {
+            base_url: format!("http://{addr}"),
+            requests: rx,
+            idle_timeout,
+        }
+    }
+
     async fn truncated_json_then_json(response_body: &str) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -1156,6 +1182,7 @@ async fn clip_info_fetches_song_page_supplemental_contract() {
             image_url: None,
             created_at: "2026-07-03T00:00:00Z".into(),
             is_trashed: None,
+            is_download_unlocked: None,
             action_config: None,
             play_count: 0,
             upvote_count: 0,
@@ -1218,6 +1245,7 @@ async fn clip_info_keeps_base_clip_when_supplemental_read_fails() {
             image_url: None,
             created_at: "2026-07-03T00:00:00Z".into(),
             is_trashed: None,
+            is_download_unlocked: None,
             action_config: None,
             play_count: 0,
             upvote_count: 0,
@@ -1260,6 +1288,7 @@ async fn clip_info_aborts_on_rate_limited_supplemental_read() {
             image_url: None,
             created_at: "2026-07-03T00:00:00Z".into(),
             is_trashed: None,
+            is_download_unlocked: None,
             action_config: None,
             play_count: 0,
             upvote_count: 0,
@@ -1290,6 +1319,7 @@ async fn clip_info_aborts_on_auth_expired_supplemental_read() {
             image_url: None,
             created_at: "2026-07-03T00:00:00Z".into(),
             is_trashed: None,
+            is_download_unlocked: None,
             action_config: None,
             play_count: 0,
             upvote_count: 0,
@@ -2175,7 +2205,7 @@ async fn generate_does_not_fallback_across_billing_schema_drift() {
 }
 
 #[tokio::test]
-async fn auto_model_uses_the_web_constant_only_for_a_transport_outage() {
+async fn auto_model_fails_closed_before_generation_when_billing_transport_is_unavailable() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("reserve unused port");
@@ -2189,15 +2219,16 @@ async fn auto_model_uses_the_web_constant_only_for_a_transport_outage() {
         },
     )
     .expect("test client");
-    let mut generate = GenerateRequest::new("auto", "custom");
+    let generate = GenerateRequest::new("auto", "custom");
 
-    client
-        .prepare_generation_request(&mut generate)
+    let error = client
+        .generate(&generate)
         .await
-        .expect("connection outage may use the current Web constant");
+        .expect_err("billing transport failure must stop before generation");
 
-    assert_eq!(generate.mv, "chirp-auk-turbo");
-    assert_eq!(generate.metadata.user_tier, "");
+    assert!(
+        matches!(error, CliError::Config(message) if message.contains("billing info") && message.contains("refusing to submit"))
+    );
 }
 
 #[tokio::test]
@@ -3095,6 +3126,341 @@ async fn official_download_resolves_mp3_download_url() {
     let request = server.captured().await;
     assert_eq!(request.method, "GET");
     assert_eq!(request.path, "/api/download/clip/clip-a?format=mp3");
+}
+
+#[tokio::test]
+async fn prepared_download_supports_the_current_format_route_matrix() {
+    use super::download::PreparedDownloadFormat;
+
+    for (format, extension) in [
+        (PreparedDownloadFormat::Mp3, "mp3"),
+        (PreparedDownloadFormat::M4a, "m4a"),
+        (PreparedDownloadFormat::Wav, "wav"),
+        (PreparedDownloadFormat::Mp4, "mp4"),
+    ] {
+        let expected_url = format!("https://cdn.example/song.{extension}");
+        let response = serde_json::json!({
+            "status": "complete",
+            "download_url": expected_url
+        })
+        .to_string();
+        let server = MockServer::json(&response).await;
+
+        let url = server
+            .client()
+            .prepared_download_url(
+                "clip-a",
+                format,
+                super::PollingOptions {
+                    timeout: Duration::from_secs(1),
+                    interval: Duration::from_millis(1),
+                },
+            )
+            .await
+            .expect("prepared download URL");
+
+        assert_eq!(url, expected_url);
+        let request = server.captured().await;
+        assert_eq!(request.method, "GET");
+        assert_eq!(
+            request.path,
+            format!("/api/download/clip/clip-a?format={extension}")
+        );
+    }
+}
+
+#[tokio::test]
+async fn prepared_download_without_a_url_returns_a_typed_unavailable_error() {
+    let server = MockServer::json(r#"{"status":"complete","download_url":null}"#).await;
+
+    let error = server
+        .client()
+        .prepared_download_url(
+            "clip-a",
+            super::download::PreparedDownloadFormat::Wav,
+            super::PollingOptions {
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_millis(1),
+            },
+        )
+        .await
+        .expect_err("a terminal prepared response without a URL is unavailable");
+
+    assert_eq!(error.error_code(), "prepared_download_unavailable");
+    let details = error.details().expect("prepared unavailable details");
+    assert_eq!(details["clip_id"], "clip-a");
+    assert_eq!(details["format"], "wav");
+    assert_eq!(details["download_started"], false);
+    assert_eq!(server.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
+async fn prepared_download_rejects_a_blank_url_as_unavailable() {
+    let server = MockServer::json(r#"{"status":"complete","download_url":"  "}"#).await;
+
+    let error = server
+        .client()
+        .prepared_download_url(
+            "clip-a",
+            super::download::PreparedDownloadFormat::Mp4,
+            super::PollingOptions {
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_millis(1),
+            },
+        )
+        .await
+        .expect_err("a blank prepared URL is not a usable file location");
+
+    assert_eq!(error.error_code(), "prepared_download_unavailable");
+    assert_eq!(error.details().expect("details")["format"], "mp4");
+    assert_eq!(server.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
+async fn download_authorize_posts_the_exact_clip_contract_once() {
+    let server = MockServer::json(
+        r#"{"ok":true,"reason":"subscription","message":"Unlocked","credit_deducted":true,"future_field":"kept"}"#,
+    )
+    .await;
+    let client = server.client();
+
+    let authorization = client
+        .authorize_download("clip-a")
+        .await
+        .expect("download authorization");
+
+    assert_eq!(authorization.ok, Some(true));
+    assert_eq!(authorization.reason.as_deref(), Some("subscription"));
+    assert_eq!(authorization.message.as_deref(), Some("Unlocked"));
+    assert_eq!(authorization.credit_deducted, Some(true));
+    assert_eq!(authorization.extra["future_field"], "kept");
+
+    let request = server.captured().await;
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/api/download/authorize");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&request.body).expect("authorization body"),
+        serde_json::json!({"item_id": "clip-a", "item_type": "clip"})
+    );
+}
+
+#[tokio::test]
+async fn download_authorize_never_follows_a_redirect_with_a_second_post() {
+    let target_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind redirect target");
+    let target_addr = target_listener
+        .local_addr()
+        .expect("redirect target address");
+    let redirect_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind redirect source");
+    let redirect_addr = redirect_listener
+        .local_addr()
+        .expect("redirect source address");
+
+    let redirect_task = tokio::spawn(async move {
+        let (mut stream, _) = redirect_listener
+            .accept()
+            .await
+            .expect("accept redirect POST");
+        let request = read_request(&mut stream).await;
+        let response = format!(
+            "HTTP/1.1 307 Temporary Redirect\r\nlocation: http://{target_addr}/api/download/authorize\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("write redirect response");
+        request
+    });
+    let target_task = tokio::spawn(async move {
+        let Ok(Ok((stream, _))) =
+            timeout(Duration::from_millis(250), target_listener.accept()).await
+        else {
+            return None;
+        };
+        Some(capture_request(stream, r#"{"ok":true}"#).await)
+    });
+
+    let client = SunoClient::new_for_tests(
+        format!("http://{redirect_addr}"),
+        AuthState {
+            jwt: Some(test_jwt_with_subject("user-1")),
+            ..AuthState::default()
+        },
+    )
+    .expect("test client");
+    let result = client.authorize_download("clip-a").await;
+    let redirect_request = redirect_task.await.expect("redirect source task");
+    let redirected_request = target_task.await.expect("redirect target task");
+
+    assert_eq!(redirect_request.method, "POST");
+    assert_eq!(redirect_request.path, "/api/download/authorize");
+    let error = result.expect_err("a redirect cannot prove the authorization outcome");
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("redirect ambiguity details");
+    assert_eq!(details["stage"], "response_status");
+    assert!(
+        details["cause"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("307"))
+    );
+    assert!(
+        redirected_request.is_none(),
+        "307/308 handling must never replay download authorization"
+    );
+}
+
+#[tokio::test]
+async fn download_authorize_preserves_an_explicit_business_rejection() {
+    let server = MockServer::json(
+        r#"{"ok":false,"reason":"quota_exhausted","message":"No downloads remaining","credit_deducted":false}"#,
+    )
+    .await;
+
+    let response = server
+        .client()
+        .authorize_download("clip-a")
+        .await
+        .expect("an explicit business rejection is a reliable response");
+
+    assert_eq!(response.ok, Some(false));
+    assert_eq!(response.reason.as_deref(), Some("quota_exhausted"));
+    assert_eq!(response.message.as_deref(), Some("No downloads remaining"));
+    assert_eq!(response.credit_deducted, Some(false));
+    assert_eq!(server.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
+async fn download_authorize_server_error_is_ambiguous_and_never_replayed() {
+    let server = MockServer::response_sequence_with_idle_timeout(
+        vec![
+            (500, r#"{"detail":"authorization outcome unknown"}"#.into()),
+            (200, r#"{"ok":true}"#.into()),
+        ],
+        Duration::from_millis(50),
+    )
+    .await;
+
+    let error = server
+        .client()
+        .authorize_download("clip-a")
+        .await
+        .expect_err("5xx cannot prove authorization was rejected");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("authorization ambiguity details");
+    assert_eq!(details["operation"], "download_authorize");
+    assert_eq!(details["clip_id"], "clip-a");
+    assert_eq!(details["stage"], "response_status");
+    assert_eq!(details["recovery"]["resumable"], false);
+    assert_eq!(
+        details["recovery"]["inspection_commands"],
+        serde_json::json!(["sunox clip info clip-a --json", "sunox credits --json"])
+    );
+    assert_eq!(server.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
+async fn download_authorize_malformed_success_body_is_ambiguous() {
+    let server = MockServer::json("{").await;
+
+    let error = server
+        .client()
+        .authorize_download("clip-a")
+        .await
+        .expect_err("a malformed 2xx body cannot prove authorization outcome");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("authorization ambiguity details");
+    assert_eq!(details["operation"], "download_authorize");
+    assert_eq!(details["clip_id"], "clip-a");
+    assert_eq!(details["stage"], "response_body");
+    assert_eq!(server.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
+async fn download_authorize_missing_ok_is_ambiguous_schema_drift() {
+    let server = MockServer::json(r#"{"message":"outcome omitted"}"#).await;
+
+    let error = server
+        .client()
+        .authorize_download("clip-a")
+        .await
+        .expect_err("a 2xx response without ok cannot prove authorization outcome");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("authorization ambiguity details");
+    assert_eq!(details["stage"], "response_schema");
+    assert_eq!(details["cause"]["code"], "schema_drift");
+    assert_eq!(server.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
+async fn download_authorize_invalid_ok_type_is_ambiguous_schema_drift() {
+    let server = MockServer::json(r#"{"ok":"yes"}"#).await;
+
+    let error = server
+        .client()
+        .authorize_download("clip-a")
+        .await
+        .expect_err("a non-boolean ok field cannot prove authorization outcome");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("authorization ambiguity details");
+    assert_eq!(details["stage"], "response_schema");
+    assert_eq!(details["cause"]["code"], "schema_drift");
+    assert_eq!(server.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
+async fn download_authorize_explicit_client_rejections_are_not_replayed_or_ambiguous() {
+    let unauthorized = MockServer::response_sequence_with_idle_timeout(
+        vec![(401, String::new()), (200, r#"{"ok":true}"#.into())],
+        Duration::from_millis(50),
+    )
+    .await;
+    let error = unauthorized
+        .client()
+        .authorize_download("clip-a")
+        .await
+        .expect_err("an explicit 401 must be returned without replay");
+    assert!(matches!(error, CliError::AuthExpired));
+    assert_eq!(unauthorized.captured_all().await.len(), 1);
+
+    let quota_rejection = MockServer::json_status_sequence(&[(
+        403,
+        r#"{"detail":"No downloads remaining","reason":"quota_exhausted","message":"Upgrade or add downloads"}"#,
+    )])
+    .await;
+    let error = quota_rejection
+        .client()
+        .authorize_download("clip-a")
+        .await
+        .expect_err("an explicit quota rejection is not ambiguous");
+    assert_eq!(error.error_code(), "forbidden");
+    let details = error.details().expect("structured rejection details");
+    assert_eq!(details["reason"], "quota_exhausted");
+    assert_eq!(details["message"], "Upgrade or add downloads");
+    assert_eq!(quota_rejection.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
+async fn download_authorize_send_reset_is_ambiguous_and_not_replayed() {
+    let server = MockServer::resets_until_idle(2, Duration::from_millis(50)).await;
+
+    let error = server
+        .client()
+        .authorize_download("clip-a")
+        .await
+        .expect_err("a reset after submit leaves authorization outcome unknown");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("authorization ambiguity details");
+    assert_eq!(details["stage"], "request_send");
+    assert_eq!(details["cause"]["code"], "http_error");
+    assert_eq!(server.captured_all().await.len(), 1);
 }
 
 #[tokio::test]

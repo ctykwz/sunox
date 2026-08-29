@@ -17,6 +17,20 @@ pub fn billing(info: &BillingInfo) {
     ]);
     table.add_row(vec!["Active", &info.is_active.to_string()]);
     table.add_row(vec!["Period", &info.period]);
+    if let Some(usage) = &info.download_usage {
+        table.add_row(vec![
+            "Downloads",
+            &format!(
+                "{} / {} (+{} additional remaining)",
+                usage.current_period_downloads_used,
+                usage.current_period_downloads_limit,
+                usage.additional_download_remaining
+            ),
+        ]);
+    }
+    if let Some(packs) = &info.download_credit_packs {
+        table.add_row(vec!["Download Credit Packs", &packs.len().to_string()]);
+    }
     if let Some(ref renew) = info.renews_on {
         table.add_row(vec!["Renews On", renew]);
     }

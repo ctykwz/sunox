@@ -105,6 +105,7 @@ mod tests {
             image_url: None,
             created_at: "2026-06-30T00:00:00Z".into(),
             is_trashed: None,
+            is_download_unlocked: None,
             action_config: None,
             play_count: 0,
             upvote_count: 0,
