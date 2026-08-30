@@ -38,13 +38,13 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "clip download": "download completed media after the source clip is explicitly unlocked. is_download_unlocked must be exactly true; otherwise normal mode sends POST /api/download/authorize once and read-only mode fails closed. MP3/M4A/WAV and video prefer prepared mp3/m4a/wav/mp4 routes; OPUS and legacy WAV/direct-video paths run only after source unlock. Default prepared MP3 embeds lyrics. Output directories are created automatically; existing files require explicit --force to replace. Downloads have a two-hour total deadline and 2 GiB limit, may be plan-metered, and batch failures return partial_download details.",
             "post_submit_workflow": "When create or a generation-backed edit, including clip inspire, returns new or processing clip IDs, call `sunox clip wait <clip_id> --json` before download, quality filtering, or playlist decisions unless the caller explicitly wants submit-only behavior.",
             "audio_analysis": {
-                "simple": "For simple audio analysis, read existing audio_url and song-page context from `sunox clip info <clip_id> --json`; download only when a local file is needed. Non-auth supplemental read failures appear in supplemental_errors. Do not create new Suno resources just to inspect audio.",
+                "simple": "For simple audio analysis, read playback_url and song-page context from `sunox clip info <clip_id> --json`; playback_url preserves a usable top-level audio_url or resolves the current media_urls progressive M4A when Suno returns /api/forbidden. Download only when a local file is needed. Non-auth supplemental read failures appear in supplemental_errors. Do not create new Suno resources just to inspect audio.",
                 "deep": "Use heavier WAV or generation-backed stems only when the user explicitly asks for WAV, stems, lossless audio, or deep spectral analysis; do not silently downgrade a WAV/lossless request to MP3."
             },
             "download_formats": {
                 "current_cli": "current CLI download gates every file on the source clip's exact is_download_unlocked=true state. When needed, normal mode calls POST /api/download/authorize once per unique source; --read-only never authorizes. --format selects mp3|m4a|wav|opus and --video selects prepared mp4. MP3/M4A/WAV/mp4 are prepared-first; OPUS and legacy WAV/direct-video fallback require an already authorized source. --no-convert refuses the legacy conversion POST.",
                 "web_pro_choices": "Suno Web exposes Pro choices for prepared MP3, M4A, WAV, and Video behind one source unlock. `clip stems` starts the current paid Auto Split or Split from Mix generation; `clip get-stems --download` authorizes the parent source at most once and shares that unlock across all existing stems. OPUS is legacy CLI compatibility, not a current Web chooser option.",
-                "agent_default": "Use clip info/audio_url when no local file is needed. When a file is requested, use the prepared default MP3; use another format, conversion, stems, or video only when explicitly requested and supported. Download authorization can consume allowance and an ambiguous authorization must never be replayed blindly."
+                "agent_default": "Use clip info/playback_url when no local file is needed. Keep audio_url as the raw upstream field; /api/forbidden is not media. When a file is requested, use the prepared default MP3; use another format, conversion, stems, or video only when explicitly requested and supported. Download authorization can consume allowance and an ambiguous authorization must never be replayed blindly."
             }
         },
         "execution_policy": {
@@ -98,7 +98,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                 "prefer --json for machine-readable command output",
                 "when create or a command in async_clip_edits.returns_new_or_processing returns clip IDs, call clip wait before downstream work unless submit-only behavior was requested; crop and fade already wait for their result clip to complete",
                 "do not pass --parallel or disable serial_mutations unless the user explicitly opts into same-account concurrent writes",
-                "for simple audio analysis, use existing clip audio_url; download only when a local file is needed and reserve conversion or generation-backed stems for explicit deep-analysis or lossless requests",
+                "for simple audio analysis, use clip info playback_url; download only when a local file is needed and reserve conversion or generation-backed stems for explicit deep-analysis or lossless requests",
                 "do not publish, make public, or run destructive commands unless the user explicitly asked for that action; destructive commands require -y/--yes",
                 "use semantic exit codes to decide retry, auth, and config actions"
             ]
@@ -165,7 +165,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                     "GET /api/clips/remixes/count?clip_id=<clip_id>",
                     "GET /api/clips/get_similar/?id=<clip_id>"
                 ],
-                "json_shape": "main clip fields remain top-level; attribution, comments, remix_count={count,is_capped,...}, and similar_clips are added as semantic song-page context; if a non-auth, non-rate-limit supplemental read fails, the base clip is still returned with supplemental_errors; auth and rate-limit errors still abort normally"
+                "json_shape": "main clip fields remain top-level and raw audio_url is preserved; playback_url selects a usable audio_url or the current media_urls progressive M4A when audio_url is /api/forbidden; attribution, comments, remix_count={count,is_capped,...}, and similar_clips are added as semantic song-page context; if a non-auth, non-rate-limit supplemental read fails, the base clip is still returned with supplemental_errors; auth and rate-limit errors still abort normally"
             },
             "clip remaster": {
                 "route": "POST /api/generate/upsample",

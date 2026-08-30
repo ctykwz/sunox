@@ -1402,7 +1402,7 @@ async fn clip_info_fetches_song_page_supplemental_contract() {
             title: "Demo".into(),
             status: "complete".into(),
             model_name: "chirp-fenix".into(),
-            audio_url: None,
+            audio_url: Some("https://studio-api.prod.suno.com/api/forbidden".into()),
             video_url: None,
             image_url: None,
             created_at: "2026-07-03T00:00:00Z".into(),
@@ -1412,12 +1412,25 @@ async fn clip_info_fetches_song_page_supplemental_contract() {
             play_count: 0,
             upvote_count: 0,
             metadata: Default::default(),
-            extra: Default::default(),
+            extra: [(
+                "media_urls".into(),
+                serde_json::json!([{
+                    "url": "https://stream.example/clip-a.m4a",
+                    "content_type": "m4a-opus",
+                    "delivery": "progressive"
+                }]),
+            )]
+            .into_iter()
+            .collect(),
         })
         .await
         .expect("clip info");
 
     assert_eq!(info.clip.id, "clip-a");
+    assert_eq!(
+        info.playback_url.as_deref(),
+        Some("https://stream.example/clip-a.m4a")
+    );
     assert_eq!(info.attribution.source_clips.len(), 1);
     assert_eq!(
         info.attribution.source_clips[0].clip_id.as_deref(),
@@ -1483,6 +1496,10 @@ async fn clip_info_keeps_base_clip_when_supplemental_read_fails() {
     assert_eq!(info.clip.id, "clip-a");
     assert_eq!(
         info.clip.audio_url.as_deref(),
+        Some("https://cdn1.suno.ai/clip-a.mp3")
+    );
+    assert_eq!(
+        info.playback_url.as_deref(),
         Some("https://cdn1.suno.ai/clip-a.mp3")
     );
     assert!(info.attribution.source_clips.is_empty());

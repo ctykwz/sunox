@@ -9,6 +9,8 @@ use super::clip::Clip;
 pub struct ClipInfo {
     #[serde(flatten)]
     pub clip: Clip,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub playback_url: Option<String>,
     pub attribution: ClipAttribution,
     pub comments: ClipComments,
     pub remix_count: RemixCountResponse,

@@ -68,6 +68,7 @@ impl SunoClient {
 
     /// Compose the main feed clip with song-page enrichment reads.
     pub async fn clip_info(&self, clip: Clip) -> Result<ClipInfo, CliError> {
+        let playback_url = clip.playback_url().map(str::to_owned);
         let clip_id = clip.id.as_str();
         let mut supplemental_errors = Vec::new();
         let attribution = match self.clip_attribution(clip_id).await {
@@ -112,6 +113,7 @@ impl SunoClient {
         };
         Ok(ClipInfo {
             clip,
+            playback_url,
             attribution,
             comments,
             remix_count,

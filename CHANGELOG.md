@@ -11,6 +11,8 @@ backward-compatible features, upstream protocol adaptations, and fixes.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-30
+
 ### Added
 
 - Added the current clip-level download authorization contract, including strict
@@ -32,6 +34,9 @@ backward-compatible features, upstream protocol adaptations, and fixes.
   outcomes through clip/billing readback; reject duplicate batch output paths before authorization
   even with `--force`; and omit unknown billing fields from sanitized capability and
   mutation-recovery output while preserving them in raw credits JSON.
+- Preserve Suno's protected top-level `audio_url` while exposing a non-authorizing `playback_url`
+  from the current progressive M4A entry in `media_urls`; protected direct MP3 URLs remain behind
+  the explicit download-authorization workflow.
 
 ## [0.3.0] - 2026-08-24
 
