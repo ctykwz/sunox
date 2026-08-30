@@ -84,6 +84,78 @@ fn billing_info_response(plan_id: &str) -> String {
     .to_string()
 }
 
+#[tokio::test]
+async fn stale_command_mutation_preflight_is_revalidated_before_a_later_write() {
+    let billing = billing_info_response("tier-pro");
+    let server = MockServer::json_sequence(&[billing.as_str(), "{}"]).await;
+    let client = server.client();
+    *client
+        .mutation_auth_preflight_at
+        .lock()
+        .expect("mutation preflight mutex") =
+        Some(std::time::Instant::now() - Duration::from_secs(31));
+
+    client
+        .set_visibility("clip-stale-auth", false)
+        .await
+        .expect("write after refreshing stale mutation auth");
+
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].path, "/api/billing/info/");
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[1].path, "/api/gen/clip-stale-auth/set_visibility/");
+}
+
+#[tokio::test]
+async fn stale_preflight_covers_legacy_visual_and_voice_mutation_senders() {
+    let billing = billing_info_response("tier-pro");
+    let server = MockServer::json_sequence(&[
+        billing.as_str(),
+        r#"{"image_url":"https://cdn.example/generated.jpeg"}"#,
+        billing.as_str(),
+        r#"{"id":"verification-1","status":"pending"}"#,
+    ])
+    .await;
+    let client = server.client();
+    let stale = || Some(std::time::Instant::now() - Duration::from_secs(31));
+
+    *client
+        .mutation_auth_preflight_at
+        .lock()
+        .expect("mutation preflight mutex") = stale();
+    client
+        .generate_prompt_image("neon rain")
+        .await
+        .expect("visual write after stale auth");
+
+    *client
+        .mutation_auth_preflight_at
+        .lock()
+        .expect("mutation preflight mutex") = stale();
+    client
+        .create_voice_verification(
+            "workflow-1",
+            &CreateVoiceVerificationRequest {
+                voice_recording_id: "recording-main".into(),
+                verification_recording_id: "recording-verify".into(),
+                phrase_id: "phrase-1".into(),
+            },
+        )
+        .await
+        .expect("voice write after stale auth");
+
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[0].path, "/api/billing/info/");
+    assert_eq!(requests[1].path, "/api/gen/prompt_image/");
+    assert_eq!(requests[2].path, "/api/billing/info/");
+    assert_eq!(requests[3].path, "/api/voice-verification/");
+    assert!(requests[1].headers.contains("authorization: Bearer "));
+    assert!(requests[3].headers.contains("authorization: Bearer "));
+}
+
 fn billing_info_with_models(plan_id: &str, models: serde_json::Value) -> String {
     let mut value = serde_json::from_str::<serde_json::Value>(&billing_info_response(plan_id))
         .expect("billing fixture");

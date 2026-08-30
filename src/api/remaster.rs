@@ -37,9 +37,12 @@ impl SunoClient {
             variation_category,
         };
         let operation_id = uuid::Uuid::new_v4().to_string();
-        let resp = self
+        let request = self
             .post_without_redirect("/api/generate/upsample")
-            .json(&req)
+            .json(&req);
+        let resp = self
+            .prepare_mutation_request(request)
+            .await?
             .send()
             .await
             .map_err(|error| {

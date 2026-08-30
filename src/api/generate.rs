@@ -241,9 +241,12 @@ impl SunoClient {
         has_challenge_token: bool,
         transaction_uuid: &str,
     ) -> Result<GenerationResult, CliError> {
-        let resp = self
+        let request = self
             .post_without_redirect("/api/generate/v2-web/")
-            .json(body)
+            .json(body);
+        let resp = self
+            .prepare_mutation_request(request)
+            .await?
             .send()
             .await
             .map_err(|error| {

@@ -61,15 +61,24 @@ impl MutationSpec {
 }
 
 impl SunoClient {
+    pub(crate) async fn prepare_mutation_request(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::RequestBuilder, CliError> {
+        self.refresh_mutation_auth_if_stale().await?;
+        Ok(request.headers(self.headers()))
+    }
+
     /// Send a non-idempotent write exactly once. Callers must construct the
     /// request with the no-redirect client. Explicit 4xx responses remain
     /// ordinary API errors; transport loss, redirects, and 5xx responses are
     /// ambiguous because the server may already have committed the write.
     pub(crate) async fn send_mutation_once(
         &self,
-        request: reqwest::RequestBuilder,
+        mut request: reqwest::RequestBuilder,
         spec: &MutationSpec,
     ) -> Result<reqwest::Response, CliError> {
+        request = self.prepare_mutation_request(request).await?;
         let response = request
             .send()
             .await

@@ -159,9 +159,10 @@ impl SunoClient {
     {
         let operation_id = uuid::Uuid::new_v4().to_string();
         let response = {
+            let request = self.post_without_redirect(path).json(request);
             let resp = self
-                .post_without_redirect(path)
-                .json(request)
+                .prepare_mutation_request(request)
+                .await?
                 .send()
                 .await
                 .map_err(|error| {

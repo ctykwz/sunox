@@ -72,9 +72,12 @@ impl SunoClient {
         clip_id: &str,
     ) -> Result<DownloadAuthorizationResponse, CliError> {
         let operation_id = uuid::Uuid::new_v4().to_string();
-        let response = self
+        let request = self
             .post_without_redirect("/api/download/authorize")
-            .json(&DownloadAuthorizationRequest::clip(clip_id))
+            .json(&DownloadAuthorizationRequest::clip(clip_id));
+        let response = self
+            .prepare_mutation_request(request)
+            .await?
             .send()
             .await
             .map_err(|error| {
@@ -251,8 +254,10 @@ impl SunoClient {
         run_before_deadline(
             deadline,
             async {
+                let request = self.post_without_redirect(&path);
                 let resp = self
-                    .post_without_redirect(&path)
+                    .prepare_mutation_request(request)
+                    .await?
                     .send()
                     .await
                     .map_err(|error| {
@@ -322,8 +327,10 @@ impl SunoClient {
         run_before_deadline(
             deadline,
             async {
+                let request = self.post_without_redirect(&path);
                 let resp = self
-                    .post_without_redirect(&path)
+                    .prepare_mutation_request(request)
+                    .await?
                     .send()
                     .await
                     .map_err(|error| {

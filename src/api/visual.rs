@@ -116,9 +116,10 @@ impl SunoClient {
         media_type: &'static str,
     ) -> Result<CoverArtBatchSubmission, CliError> {
         let operation_id = uuid::Uuid::new_v4().to_string();
+        let mutation = self.post_without_redirect(path).json(request);
         let response = self
-            .post_without_redirect(path)
-            .json(request)
+            .prepare_mutation_request(mutation)
+            .await?
             .send()
             .await
             .map_err(|error| {
@@ -387,9 +388,12 @@ impl SunoClient {
             }
         }
         let operation_id = uuid::Uuid::new_v4().to_string();
-        let response = self
+        let request = self
             .post_without_redirect(&format!("/api/gen/{clip_id}/set_metadata/"))
-            .json(&body)
+            .json(&body);
+        let response = self
+            .prepare_mutation_request(request)
+            .await?
             .send()
             .await
             .map_err(|error| {
@@ -451,9 +455,12 @@ impl SunoClient {
         validate_prompt_image_request(prompt)?;
         let operation_id = uuid::Uuid::new_v4().to_string();
         let request = PromptImageRequest { prompt };
-        let response = self
+        let mutation = self
             .post_without_redirect("/api/gen/prompt_image/")
-            .json(&request)
+            .json(&request);
+        let response = self
+            .prepare_mutation_request(mutation)
+            .await?
             .send()
             .await
             .map_err(|error| {
@@ -502,8 +509,10 @@ impl SunoClient {
     pub async fn start_video_generation(&self, clip_id: &str) -> Result<String, CliError> {
         let operation_id = uuid::Uuid::new_v4().to_string();
         let path = format!("/api/video/generate/{clip_id}/");
+        let request = self.post_without_redirect(&path);
         let response = self
-            .post_without_redirect(&path)
+            .prepare_mutation_request(request)
+            .await?
             .send()
             .await
             .map_err(|error| {

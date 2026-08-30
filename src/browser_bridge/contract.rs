@@ -1,4 +1,4 @@
-//! Shared wire constants for browser bridge transports.
+//! Shared wire constants for Browser Bridge transports.
 
 pub(crate) const PROTOCOL_VERSION: u8 = 3;
 pub(crate) const BROWSER_BRIDGE_RUNTIME_BUILD: &str = "0.3.51";

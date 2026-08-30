@@ -62,9 +62,12 @@ impl SunoClient {
         let request = LyricsProjectTitleRequest {
             title: web_title(title),
         };
-        let response = self
+        let mutation = self
             .post_without_redirect("/api/lyrics-projects")
-            .json(&request)
+            .json(&request);
+        let response = self
+            .prepare_mutation_request(mutation)
+            .await?
             .send()
             .await
             .map_err(|error| {
@@ -120,9 +123,10 @@ impl SunoClient {
         let request = LyricsProjectTitleRequest {
             title: web_title(title),
         };
+        let mutation = self.patch_without_redirect(&path).json(&request);
         let response = self
-            .patch_without_redirect(&path)
-            .json(&request)
+            .prepare_mutation_request(mutation)
+            .await?
             .send()
             .await
             .map_err(|error| {
@@ -190,9 +194,10 @@ impl SunoClient {
         let operation_id = uuid::Uuid::new_v4().to_string();
         let path = format!("/api/lyrics-projects/{project_id}/flush");
         let request = FlushLyricsProjectRequest { lyrics };
+        let mutation = self.post_without_redirect(&path).json(&request);
         let response = self
-            .post_without_redirect(&path)
-            .json(&request)
+            .prepare_mutation_request(mutation)
+            .await?
             .send()
             .await
             .map_err(|error| {
@@ -245,8 +250,10 @@ impl SunoClient {
         self.lyrics_project(project_id).await?;
         let operation_id = uuid::Uuid::new_v4().to_string();
         let path = format!("/api/lyrics-projects/{project_id}");
+        let mutation = self.delete_without_redirect(&path);
         let response = self
-            .delete_without_redirect(&path)
+            .prepare_mutation_request(mutation)
+            .await?
             .send()
             .await
             .map_err(|error| {

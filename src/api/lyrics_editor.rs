@@ -65,9 +65,12 @@ impl SunoClient {
             title: options.title,
         };
         let submit = async {
-            let response = self
+            let mutation = self
                 .post_without_redirect("/api/generate/lyrics-infill/")
-                .json(&request)
+                .json(&request);
+            let response = self
+                .prepare_mutation_request(mutation)
+                .await?
                 .send()
                 .await
                 .map_err(|error| {
@@ -148,9 +151,12 @@ impl SunoClient {
             create_session_token: options.create_session_token,
             source: "create_ui",
         };
-        let response = self
+        let mutation = self
             .post_without_redirect("/api/generate/lyrics-mashup")
-            .json(&request)
+            .json(&request);
+        let response = self
+            .prepare_mutation_request(mutation)
+            .await?
             .send()
             .await
             .map_err(|error| {

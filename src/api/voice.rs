@@ -271,9 +271,10 @@ impl SunoClient {
         Req: Serialize + ?Sized,
         Resp: DeserializeOwned,
     {
+        let request = self.post_without_redirect(path).json(req);
         let response = self
-            .post_without_redirect(path)
-            .json(req)
+            .prepare_mutation_request(request)
+            .await?
             .send()
             .await
             .map_err(|error| {
@@ -328,9 +329,10 @@ impl SunoClient {
     where
         Req: Serialize + ?Sized,
     {
+        let request = self.post_without_redirect(path).json(req);
         let response = self
-            .post_without_redirect(path)
-            .json(req)
+            .prepare_mutation_request(request)
+            .await?
             .send()
             .await
             .map_err(|error| {

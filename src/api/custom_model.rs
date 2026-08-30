@@ -108,9 +108,12 @@ impl SunoClient {
 
         let operation_id = uuid::Uuid::new_v4().to_string();
         let request = CreateCustomModelRequest { clip_ids, name };
-        let response = self
+        let mutation = self
             .post_without_redirect("/api/custom-model/create/")
-            .json(&request)
+            .json(&request);
+        let response = self
+            .prepare_mutation_request(mutation)
+            .await?
             .send()
             .await
             .map_err(|error| {
@@ -222,9 +225,12 @@ impl SunoClient {
         }
 
         let operation_id = uuid::Uuid::new_v4().to_string();
-        let response = self
+        let request = self
             .post_without_redirect("/api/custom-model/archive/")
-            .json(&ArchiveCustomModelRequest { id: model_id })
+            .json(&ArchiveCustomModelRequest { id: model_id });
+        let response = self
+            .prepare_mutation_request(request)
+            .await?
             .send()
             .await
             .map_err(|error| {
