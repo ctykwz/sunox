@@ -33,7 +33,7 @@ const manifest = JSON.parse(await readFile(
   "utf8"
 ));
 const bridgeContractSource = await readFile(
-  new URL("../src/captcha/bridge_contract.rs", import.meta.url),
+  new URL("../src/browser_bridge/contract.rs", import.meta.url),
   "utf8"
 );
 const runtimeBuildMatch = bridgeContractSource.match(
