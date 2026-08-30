@@ -250,13 +250,29 @@ impl SunoClient {
         let operation_id = uuid::Uuid::new_v4().to_string();
         run_before_deadline(
             deadline,
-            self.with_auth_retry(|| async {
-                let resp = self.post(&path).send().await.map_err(|error| {
-                    ambiguous_conversion(&operation_id, clip_id, "wav", "request_send", error)
-                })?;
+            async {
+                let resp = self
+                    .post_without_redirect(&path)
+                    .send()
+                    .await
+                    .map_err(|error| {
+                        ambiguous_conversion(&operation_id, clip_id, "wav", "request_send", error)
+                    })?;
+                if resp.status().is_redirection() || resp.status().is_server_error() {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(ambiguous_conversion_details(
+                        &operation_id,
+                        clip_id,
+                        "wav",
+                        "response_status",
+                        "http_error",
+                        format!("HTTP {status}: {body}"),
+                    ));
+                }
                 self.check_response(resp).await?;
                 Ok(())
-            }),
+            },
             download_timeout("WAV file", clip_id),
         )
         .await
@@ -305,13 +321,29 @@ impl SunoClient {
         let operation_id = uuid::Uuid::new_v4().to_string();
         run_before_deadline(
             deadline,
-            self.with_auth_retry(|| async {
-                let resp = self.post(&path).send().await.map_err(|error| {
-                    ambiguous_conversion(&operation_id, clip_id, "opus", "request_send", error)
-                })?;
+            async {
+                let resp = self
+                    .post_without_redirect(&path)
+                    .send()
+                    .await
+                    .map_err(|error| {
+                        ambiguous_conversion(&operation_id, clip_id, "opus", "request_send", error)
+                    })?;
+                if resp.status().is_redirection() || resp.status().is_server_error() {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(ambiguous_conversion_details(
+                        &operation_id,
+                        clip_id,
+                        "opus",
+                        "response_status",
+                        "http_error",
+                        format!("HTTP {status}: {body}"),
+                    ));
+                }
                 self.check_response(resp).await?;
                 Ok(())
-            }),
+            },
             download_timeout("OPUS file", clip_id),
         )
         .await

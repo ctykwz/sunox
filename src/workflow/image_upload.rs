@@ -76,11 +76,22 @@ pub async fn apply_uploaded_cover_to_clip(
     client
         .set_metadata(clip_id, request)
         .await
-        .map_err(|error| CliError::PartialMutation {
-            message: format!(
-                "clip_set for {clip_id} stopped at metadata_update after 1 completed step"
-            ),
-            details: serde_json::json!({
+        .map_err(|error| {
+            if matches!(error, CliError::AmbiguousMutation { .. }) {
+                return enrich_image_ambiguity(
+                    error,
+                    clip_id,
+                    &["cover_uploaded"],
+                    "metadata_update",
+                    Some(cover),
+                );
+            }
+            let failed = mutation_failure("metadata_update", &error);
+            CliError::PartialMutation {
+                message: format!(
+                    "clip_set for {clip_id} stopped at metadata_update after 1 completed step"
+                ),
+                details: serde_json::json!({
                 "operation": "clip_set",
                 "clip_id": clip_id,
                 "cover": {
@@ -89,11 +100,7 @@ pub async fn apply_uploaded_cover_to_clip(
                     "uploaded_here": true
                 },
                 "completed_steps": ["cover_uploaded"],
-                "failed": {
-                    "step": "metadata_update",
-                    "code": error.error_code(),
-                    "message": error.to_string()
-                },
+                "failed": failed,
                 "recovery": {
                     "resumable": true,
                     "command": "sunox clip set",
@@ -104,7 +111,8 @@ pub async fn apply_uploaded_cover_to_clip(
                     "reuse_original_arguments": true,
                     "omit_original_arguments": ["image_file"]
                 }
-            }),
+                }),
+            }
         })
 }
 
@@ -114,6 +122,9 @@ fn image_upload_stage_error(
     failed_step: &str,
     error: CliError,
 ) -> CliError {
+    if matches!(error, CliError::AmbiguousMutation { .. }) {
+        return enrich_image_ambiguity(error, upload_id, completed_steps, failed_step, None);
+    }
     let recovery = match failed_step {
         "file_upload" => serde_json::json!({
             "resumable": false,
@@ -129,6 +140,7 @@ fn image_upload_stage_error(
         }),
         _ => serde_json::json!({ "resumable": false }),
     };
+    let failed = mutation_failure(failed_step, &error);
     CliError::PartialMutation {
         message: format!(
             "image upload {upload_id} stopped at {failed_step} after {} completed step(s)",
@@ -138,14 +150,49 @@ fn image_upload_stage_error(
             "operation": "image_upload",
             "upload_id": upload_id,
             "completed_steps": completed_steps,
-            "failed": {
-                "step": failed_step,
-                "code": error.error_code(),
-                "message": error.to_string()
-            },
+            "failed": failed,
             "recovery": recovery
         }),
     }
+}
+
+fn enrich_image_ambiguity(
+    mut error: CliError,
+    resource_id: &str,
+    completed_steps: &[&str],
+    failed_step: &str,
+    cover: Option<&ImageUploadResult>,
+) -> CliError {
+    if let CliError::AmbiguousMutation { details, .. } = &mut error
+        && let Some(fields) = details.as_object_mut()
+    {
+        fields.insert("resource_id".into(), serde_json::json!(resource_id));
+        fields.insert("completed_steps".into(), serde_json::json!(completed_steps));
+        fields.insert("failed_step".into(), serde_json::json!(failed_step));
+        if let Some(cover) = cover {
+            fields.insert(
+                "cover".into(),
+                serde_json::json!({
+                    "upload_id": cover.upload_id,
+                    "image_url": cover.image_url,
+                    "uploaded_here": true
+                }),
+            );
+        }
+    }
+    error
+}
+
+fn mutation_failure(step: &str, error: &CliError) -> serde_json::Value {
+    let mut failed = serde_json::json!({
+        "step": step,
+        "code": error.error_code(),
+        "message": error.to_string()
+    });
+    if let Some(details) = error.details() {
+        failed["details"] = details.clone();
+    }
+    failed
 }
 
 pub fn image_extension(path: &Path) -> Result<String, CliError> {

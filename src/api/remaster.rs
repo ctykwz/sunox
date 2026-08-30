@@ -37,60 +37,69 @@ impl SunoClient {
             variation_category,
         };
         let operation_id = uuid::Uuid::new_v4().to_string();
-        self.with_auth_retry(|| async {
-            let resp = self
-                .post("/api/generate/upsample")
-                .json(&req)
-                .send()
-                .await
-                .map_err(|error| {
-                    ambiguous_remaster(
-                        &operation_id,
-                        clip_id,
-                        remaster_model_key,
-                        variation_category,
-                        "request_send",
-                        "http_error",
-                        error.to_string(),
-                    )
-                })?;
-            let resp = self.check_response(resp).await?;
-            let raw: serde_json::Value = resp.json().await.map_err(|error| {
+        let resp = self
+            .post_without_redirect("/api/generate/upsample")
+            .json(&req)
+            .send()
+            .await
+            .map_err(|error| {
                 ambiguous_remaster(
                     &operation_id,
                     clip_id,
                     remaster_model_key,
                     variation_category,
-                    "response_body",
+                    "request_send",
                     "http_error",
                     error.to_string(),
                 )
             })?;
-            let result: GenerateResponse =
-                serde_json::from_value(raw.clone()).map_err(|error| {
-                    ambiguous_remaster(
-                        &operation_id,
-                        clip_id,
-                        remaster_model_key,
-                        variation_category,
-                        "response_schema",
-                        "json_error",
-                        error.to_string(),
-                    )
-                })?;
-            result.into_result(raw).map_err(|error| {
-                ambiguous_remaster(
-                    &operation_id,
-                    clip_id,
-                    remaster_model_key,
-                    variation_category,
-                    "response_schema",
-                    error.error_code(),
-                    error.to_string(),
-                )
-            })
+        if resp.status().is_redirection() || resp.status().is_server_error() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ambiguous_remaster(
+                &operation_id,
+                clip_id,
+                remaster_model_key,
+                variation_category,
+                "response_status",
+                "http_error",
+                format!("HTTP {status}: {body}"),
+            ));
+        }
+        let resp = self.check_response(resp).await?;
+        let raw: serde_json::Value = resp.json().await.map_err(|error| {
+            ambiguous_remaster(
+                &operation_id,
+                clip_id,
+                remaster_model_key,
+                variation_category,
+                "response_body",
+                "http_error",
+                error.to_string(),
+            )
+        })?;
+        let result: GenerateResponse = serde_json::from_value(raw.clone()).map_err(|error| {
+            ambiguous_remaster(
+                &operation_id,
+                clip_id,
+                remaster_model_key,
+                variation_category,
+                "response_schema",
+                "json_error",
+                error.to_string(),
+            )
+        })?;
+        result.into_result(raw).map_err(|error| {
+            ambiguous_remaster(
+                &operation_id,
+                clip_id,
+                remaster_model_key,
+                variation_category,
+                "response_schema",
+                error.error_code(),
+                error.to_string(),
+            )
         })
-        .await
     }
 }
 

@@ -271,16 +271,21 @@ impl SunoClient {
         Req: Serialize + ?Sized,
         Resp: DeserializeOwned,
     {
-        let response = self.post(path).json(req).send().await.map_err(|error| {
-            ambiguous_voice_write(
-                workflow_id,
-                &format!("{stage}_request_send"),
-                "http_error",
-                error.to_string(),
-                context,
-            )
-        })?;
-        if response.status().is_server_error() {
+        let response = self
+            .post_without_redirect(path)
+            .json(req)
+            .send()
+            .await
+            .map_err(|error| {
+                ambiguous_voice_write(
+                    workflow_id,
+                    &format!("{stage}_request_send"),
+                    "http_error",
+                    error.to_string(),
+                    context,
+                )
+            })?;
+        if response.status().is_redirection() || response.status().is_server_error() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(ambiguous_voice_write(
@@ -323,16 +328,21 @@ impl SunoClient {
     where
         Req: Serialize + ?Sized,
     {
-        let response = self.post(path).json(req).send().await.map_err(|error| {
-            ambiguous_voice_write(
-                workflow_id,
-                &format!("{stage}_request_send"),
-                "http_error",
-                error.to_string(),
-                context,
-            )
-        })?;
-        if response.status().is_server_error() {
+        let response = self
+            .post_without_redirect(path)
+            .json(req)
+            .send()
+            .await
+            .map_err(|error| {
+                ambiguous_voice_write(
+                    workflow_id,
+                    &format!("{stage}_request_send"),
+                    "http_error",
+                    error.to_string(),
+                    context,
+                )
+            })?;
+        if response.status().is_redirection() || response.status().is_server_error() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(ambiguous_voice_write(

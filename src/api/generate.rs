@@ -13,8 +13,8 @@ impl SunoClient {
     /// Posts only to the current `/api/generate/v2-web/` route. The older
     /// `/api/generate/v2/` route returned `Token validation failed` after Suno
     /// migrated creates to `v2-web` server-side in the April 2026 capture.
-    /// Wrapped in `with_auth_retry` so a single stale-JWT failure recovers
-    /// transparently via Clerk refresh.
+    /// Authentication is refreshed before the mutation client is returned;
+    /// the submit itself is never replayed after an auth rejection.
     #[cfg(test)]
     pub async fn generate(&self, req: &GenerateRequest) -> Result<Vec<Clip>, CliError> {
         let mut req = req.clone();
@@ -241,50 +241,56 @@ impl SunoClient {
         has_challenge_token: bool,
         transaction_uuid: &str,
     ) -> Result<GenerationResult, CliError> {
-        self.with_auth_retry(|| async {
-            let resp = self
-                .post("/api/generate/v2-web/")
-                .json(body)
-                .send()
-                .await
-                .map_err(|error| {
-                    ambiguous_generation_submit(
-                        transaction_uuid,
-                        "request_send",
-                        "http_error",
-                        error.to_string(),
-                    )
-                })?;
-            let resp = self
-                .check_generation_response(resp, has_challenge_token)
-                .await?;
-            let raw: serde_json::Value = resp.json().await.map_err(|error| {
+        let resp = self
+            .post_without_redirect("/api/generate/v2-web/")
+            .json(body)
+            .send()
+            .await
+            .map_err(|error| {
                 ambiguous_generation_submit(
                     transaction_uuid,
-                    "response_body",
+                    "request_send",
                     "http_error",
                     error.to_string(),
                 )
             })?;
-            let result: GenerateResponse =
-                serde_json::from_value(raw.clone()).map_err(|error| {
-                    ambiguous_generation_submit(
-                        transaction_uuid,
-                        "response_schema",
-                        "json_error",
-                        error.to_string(),
-                    )
-                })?;
-            result.into_result(raw).map_err(|error| {
-                ambiguous_generation_submit(
-                    transaction_uuid,
-                    "response_schema",
-                    error.error_code(),
-                    error.to_string(),
-                )
-            })
+        if resp.status().is_redirection() || resp.status().is_server_error() {
+            let status = resp.status();
+            let response_body = resp.text().await.unwrap_or_default();
+            return Err(ambiguous_generation_submit(
+                transaction_uuid,
+                "response_status",
+                "http_error",
+                format!("HTTP {status}: {response_body}"),
+            ));
+        }
+        let resp = self
+            .check_generation_response(resp, has_challenge_token)
+            .await?;
+        let raw: serde_json::Value = resp.json().await.map_err(|error| {
+            ambiguous_generation_submit(
+                transaction_uuid,
+                "response_body",
+                "http_error",
+                error.to_string(),
+            )
+        })?;
+        let result: GenerateResponse = serde_json::from_value(raw.clone()).map_err(|error| {
+            ambiguous_generation_submit(
+                transaction_uuid,
+                "response_schema",
+                "json_error",
+                error.to_string(),
+            )
+        })?;
+        result.into_result(raw).map_err(|error| {
+            ambiguous_generation_submit(
+                transaction_uuid,
+                "response_schema",
+                error.error_code(),
+                error.to_string(),
+            )
         })
-        .await
     }
 
     /// Fetch clips by IDs using the same split as the current Web client:

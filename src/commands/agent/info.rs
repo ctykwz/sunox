@@ -107,6 +107,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "parallel_writes": "do not pass --parallel or disable serial_mutations unless the user explicitly asks to allow same-account concurrent writes",
             "read_only": "pass global --read-only for audits and inspections that must not write. It blocks account writes before submission, disables aligned-lyrics augmentation, and permits a download only for an already unlocked source whose is_download_unlocked field is exactly true; it never calls /api/download/authorize",
             "ambiguous_mutation": "generation, download authorization, Remaster, conversion, Voice, Custom Model, lyrics-project, visual, or another submitted-write ambiguity includes an operation ID and recovery details. Download authorization may consume allowance and must never be replayed blindly; inspect exact read-only state and retry only when recovery.resumable=true",
+            "single_write_transport": "Suno business writes refresh authentication before submission, send at most once, never follow redirects, and map transport loss, 3xx, 5xx, or an unreadable accepted response to ambiguous_mutation; only read/validation requests use auth retry",
             "paid_or_credit_work": "create, inspire, cover, extend, stems, remaster, speed, reverse, crop, fade, upload, Voice creation, Custom Model training, AI image/video generation, conversion, and prepared download/export workflows can be stateful, credit-sensitive, or plan-metered; only run the amount, operation, and format the user requested",
             "download_quality": "current CLI uses prepared MP3 by default, supports prepared M4A/WAV and video MP4, and retains OPUS only as unlocked legacy compatibility; agents should request a file/format only when needed",
             "public_visibility": "do not publish clips, playlists, or personas or make them public unless the user explicitly asks",
@@ -495,7 +496,8 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
         "model_selectors": "display name, external key, or account model ID; ambiguity and unusable models fail closed",
         "download_policy": "strict is_download_unlocked=true skips POST /api/download/authorize; otherwise authorize one unique source once. MP3/M4A/WAV/mp4 are prepared-first, OPUS and other legacy fallbacks require source unlock, and Stems reuse the parent source authorization",
         "download_billing": "read current_period_downloads_limit, current_period_downloads_used, additional_download_remaining, and download_credit_packs from live billing; never hard-code quota by plan name",
-        "mutation_uncertainty": "ambiguous_mutation means the write may have succeeded; download authorization is never replayed blindly, so inspect operation_id and exact readback before any retry"
+        "mutation_transport": "Suno business writes use a no-redirect client and are never replayed after 401; transport loss, 3xx, 5xx, and unreadable accepted bodies are ambiguous",
+        "mutation_uncertainty": "ambiguous_mutation means the write may have succeeded; inspect operation_id and exact readback before any retry, and retry only when recovery.resumable=true"
     });
     println!("{}", serde_json::to_string_pretty(&info)?);
     Ok(())

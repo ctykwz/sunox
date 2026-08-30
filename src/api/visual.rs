@@ -117,7 +117,7 @@ impl SunoClient {
     ) -> Result<CoverArtBatchSubmission, CliError> {
         let operation_id = uuid::Uuid::new_v4().to_string();
         let response = self
-            .post(path)
+            .post_without_redirect(path)
             .json(request)
             .send()
             .await
@@ -130,7 +130,7 @@ impl SunoClient {
                     error.to_string(),
                 )
             })?;
-        if response.status().is_server_error() {
+        if response.status().is_redirection() || response.status().is_server_error() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(ambiguous_cover_art_submit(
@@ -388,7 +388,7 @@ impl SunoClient {
         }
         let operation_id = uuid::Uuid::new_v4().to_string();
         let response = self
-            .post(&format!("/api/gen/{clip_id}/set_metadata/"))
+            .post_without_redirect(&format!("/api/gen/{clip_id}/set_metadata/"))
             .json(&body)
             .send()
             .await
@@ -402,7 +402,7 @@ impl SunoClient {
                     error.to_string(),
                 )
             })?;
-        if response.status().is_server_error() {
+        if response.status().is_redirection() || response.status().is_server_error() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(ambiguous_cover_art_apply(
@@ -452,7 +452,7 @@ impl SunoClient {
         let operation_id = uuid::Uuid::new_v4().to_string();
         let request = PromptImageRequest { prompt };
         let response = self
-            .post("/api/gen/prompt_image/")
+            .post_without_redirect("/api/gen/prompt_image/")
             .json(&request)
             .send()
             .await
@@ -465,6 +465,17 @@ impl SunoClient {
                     error.to_string(),
                 )
             })?;
+        if response.status().is_redirection() || response.status().is_server_error() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(ambiguous_prompt_image(
+                &operation_id,
+                prompt,
+                "response_status",
+                "http_error",
+                format!("HTTP {status}: {body}"),
+            ));
+        }
         let response = self.check_response(response).await?;
         let raw: Value = response.json().await.map_err(|error| {
             ambiguous_prompt_image(
@@ -491,9 +502,23 @@ impl SunoClient {
     pub async fn start_video_generation(&self, clip_id: &str) -> Result<String, CliError> {
         let operation_id = uuid::Uuid::new_v4().to_string();
         let path = format!("/api/video/generate/{clip_id}/");
-        let response = self.post(&path).send().await.map_err(|error| {
-            ambiguous_video_submit(&operation_id, clip_id, "request_send", error.to_string())
-        })?;
+        let response = self
+            .post_without_redirect(&path)
+            .send()
+            .await
+            .map_err(|error| {
+                ambiguous_video_submit(&operation_id, clip_id, "request_send", error.to_string())
+            })?;
+        if response.status().is_redirection() || response.status().is_server_error() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(ambiguous_video_submit(
+                &operation_id,
+                clip_id,
+                "response_status",
+                format!("HTTP {status}: {body}"),
+            ));
+        }
         self.check_response(response).await?;
         Ok(operation_id)
     }

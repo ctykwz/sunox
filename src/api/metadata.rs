@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
+use super::mutation::MutationSpec;
 use super::types::{
     AlignedWord, ClipReaction, SetClipReactionRequest, SetMetadataRequest, SetVisibilityRequest,
 };
@@ -34,8 +35,7 @@ impl SunoClient {
         clip_id: &str,
         req: &SetMetadataRequest,
     ) -> Result<(), CliError> {
-        self.with_auth_retry(|| self.set_metadata_once(clip_id, req))
-            .await
+        self.set_metadata_once(clip_id, req).await
     }
 
     /// Submit metadata exactly once. Multi-step mutation workflows use this
@@ -46,17 +46,19 @@ impl SunoClient {
         clip_id: &str,
         req: &SetMetadataRequest,
     ) -> Result<(), CliError> {
-        let resp = self
-            .post(&format!("/api/gen/{clip_id}/set_metadata/"))
-            .json(req)
-            .send()
+        let spec = clip_mutation_spec("clip_set_metadata", clip_id);
+        let text = self
+            .mutation_text_once(
+                self.post_without_redirect(&format!("/api/gen/{clip_id}/set_metadata/"))
+                    .json(req),
+                &spec,
+            )
             .await?;
-        let resp = self.check_response(resp).await?;
-        let text = resp.text().await?;
         if text.trim().is_empty() {
             return Ok(());
         }
-        let body: serde_json::Value = serde_json::from_str(&text)?;
+        let body: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|error| spec.ambiguous("response_body", "schema_drift", error.to_string()))?;
         if let Some(error_type) = body.get("error_type").and_then(|value| value.as_str()) {
             let detail = body
                 .get("moderation_error_message")
@@ -76,19 +78,18 @@ impl SunoClient {
 
     /// Set clip visibility (public/private).
     pub async fn set_visibility(&self, clip_id: &str, is_public: bool) -> Result<(), CliError> {
-        self.with_auth_retry(|| async {
-            let resp = self
-                .post(&format!("/api/gen/{clip_id}/set_visibility/"))
+        let spec = clip_mutation_spec("clip_set_visibility", clip_id)
+            .with_context("is_public", serde_json::json!(is_public));
+        self.send_mutation_once(
+            self.post_without_redirect(&format!("/api/gen/{clip_id}/set_visibility/"))
                 .json(&SetVisibilityRequest {
                     is_public,
                     submit_to_contest: false,
-                })
-                .send()
-                .await?;
-            self.check_response(resp).await?;
-            Ok(())
-        })
-        .await
+                }),
+            &spec,
+        )
+        .await?;
+        Ok(())
     }
 
     /// Set or clear a clip like/dislike reaction.
@@ -97,16 +98,14 @@ impl SunoClient {
         clip_id: &str,
         reaction: Option<ClipReaction>,
     ) -> Result<(), CliError> {
-        self.with_auth_retry(|| async {
-            let resp = self
-                .post(&format!("/api/gen/{clip_id}/update_reaction_type/"))
-                .json(&SetClipReactionRequest::new(reaction))
-                .send()
-                .await?;
-            self.check_response(resp).await?;
-            Ok(())
-        })
-        .await
+        let spec = clip_mutation_spec("clip_set_reaction", clip_id);
+        self.send_mutation_once(
+            self.post_without_redirect(&format!("/api/gen/{clip_id}/update_reaction_type/"))
+                .json(&SetClipReactionRequest::new(reaction)),
+            &spec,
+        )
+        .await?;
+        Ok(())
     }
 
     /// Get word-level timestamped lyrics through the current v3 start/poll
@@ -157,21 +156,26 @@ impl SunoClient {
             lyrics,
             enable_augmentation,
         };
-        let mut body = run_before_deadline(
+        let spec = clip_mutation_spec("aligned_lyrics_start", clip_id);
+        let mut body: serde_json::Value = run_before_deadline(
             deadline,
-            self.with_auth_retry(|| async {
-                let resp = self.post(&path).json(&req).send().await?;
-                let resp = self.check_response(resp).await?;
-                Ok(resp.json::<serde_json::Value>().await?)
-            }),
+            self.mutation_json_once(self.post_without_redirect(&path).json(&req), &spec),
             aligned_lyrics_timeout_error(clip_id, polling),
         )
-        .await?;
+        .await
+        .map_err(|error| match error {
+            CliError::GenerationFailed(_) => {
+                spec.ambiguous("submit_wait", error.error_code(), error.to_string())
+            }
+            explicit_rejection => explicit_rejection,
+        })?;
         let mut is_start_response = true;
 
         loop {
             if let Some(alignment) = body.get("alignment").filter(|value| value.is_array()) {
-                return decode_v3_alignment(alignment.clone());
+                return decode_v3_alignment(alignment.clone()).map_err(|error| {
+                    spec.ambiguous("response_schema", error.error_code(), error.to_string())
+                });
             }
             if body.get("state").and_then(|value| value.as_str()) == Some("error") {
                 return Err(CliError::Api {
@@ -191,13 +195,15 @@ impl SunoClient {
                     && body.get("alignment").is_none()
                     && body.get("state").and_then(|value| value.as_str()).is_none();
             if !should_retry {
-                return Err(CliError::Api {
-                    code: "schema_drift",
-                    message: format!("v3 aligned lyrics response had no alignment: {body}"),
-                });
+                return Err(spec.ambiguous(
+                    "status_schema",
+                    "schema_drift",
+                    format!("v3 aligned lyrics response had no alignment: {body}"),
+                ));
             }
             if !sleep_before_deadline(deadline, polling.interval).await {
-                return Err(aligned_lyrics_timeout_error(clip_id, polling));
+                let error = aligned_lyrics_timeout_error(clip_id, polling);
+                return Err(spec.ambiguous("status_wait", error.error_code(), error.to_string()));
             }
 
             body = run_before_deadline(
@@ -209,7 +215,10 @@ impl SunoClient {
                 }),
                 aligned_lyrics_timeout_error(clip_id, polling),
             )
-            .await?;
+            .await
+            .map_err(|error| {
+                spec.ambiguous("status_read", error.error_code(), error.to_string())
+            })?;
             is_start_response = false;
         }
     }
@@ -246,6 +255,15 @@ impl SunoClient {
             }
         }
     }
+}
+
+fn clip_mutation_spec(operation: &'static str, clip_id: &str) -> MutationSpec {
+    MutationSpec::new(
+        operation,
+        format!("clip {clip_id}"),
+        vec![format!("sunox clip info {clip_id} --json")],
+    )
+    .with_context("clip_id", serde_json::Value::String(clip_id.to_string()))
 }
 
 fn allows_v2_compatibility_fallback(error: &CliError) -> bool {

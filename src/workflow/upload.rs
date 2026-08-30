@@ -387,15 +387,34 @@ fn upload_stage_error(
     failed_step: &str,
     error: CliError,
 ) -> CliError {
+    if let CliError::AmbiguousMutation {
+        mut details,
+        message,
+    } = error
+    {
+        if let Some(fields) = details.as_object_mut() {
+            fields.insert("upload_id".into(), serde_json::json!(upload_id));
+            fields.insert("completed_steps".into(), serde_json::json!(completed_steps));
+            fields.insert("failed_step".into(), serde_json::json!(failed_step));
+            if let Some(clip_id) = clip_id {
+                fields.insert("clip_id".into(), serde_json::json!(clip_id));
+            }
+        }
+        return CliError::AmbiguousMutation { message, details };
+    }
+    let mut failed = serde_json::json!({
+        "step": failed_step,
+        "code": error.error_code(),
+        "message": error.to_string()
+    });
+    if let Some(error_details) = error.details() {
+        failed["details"] = error_details.clone();
+    }
     let mut details = serde_json::json!({
         "operation": "audio_upload",
         "upload_id": upload_id,
         "completed_steps": completed_steps,
-        "failed": {
-            "step": failed_step,
-            "code": error.error_code(),
-            "message": error.to_string()
-        }
+        "failed": failed
     });
     if let Some(clip_id) = clip_id {
         details["clip_id"] = serde_json::Value::String(clip_id.to_string());

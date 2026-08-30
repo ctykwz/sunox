@@ -109,7 +109,7 @@ impl SunoClient {
         let operation_id = uuid::Uuid::new_v4().to_string();
         let request = CreateCustomModelRequest { clip_ids, name };
         let response = self
-            .post("/api/custom-model/create/")
+            .post_without_redirect("/api/custom-model/create/")
             .json(&request)
             .send()
             .await
@@ -123,7 +123,7 @@ impl SunoClient {
                     error.to_string(),
                 )
             })?;
-        if response.status().is_server_error() {
+        if response.status().is_redirection() || response.status().is_server_error() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(ambiguous_custom_model_create(
@@ -223,7 +223,7 @@ impl SunoClient {
 
         let operation_id = uuid::Uuid::new_v4().to_string();
         let response = self
-            .post("/api/custom-model/archive/")
+            .post_without_redirect("/api/custom-model/archive/")
             .json(&ArchiveCustomModelRequest { id: model_id })
             .send()
             .await
@@ -235,7 +235,7 @@ impl SunoClient {
                     error.to_string(),
                 )
             })?;
-        if response.status().is_server_error() {
+        if response.status().is_redirection() || response.status().is_server_error() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(ambiguous_custom_model_archive(

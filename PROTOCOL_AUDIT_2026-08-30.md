@@ -435,14 +435,24 @@ POST /api/gen/{gen_id}/unlock-preview
 相反，OPUS route 与 persona 的部分 paginated/visibility route 只是在当前 `/create` closure
 中未出现，不能据此证明服务端删除；应保留兼容并针对对应页面或 live GET 单独确认。
 
-### 与本次协议变化分开的现有安全债
+### 与本次协议变化分开的安全加固（已处理）
 
-只读仓库复核还发现，部分早期非幂等写仍通过通用 `with_auth_retry` 在显式 401 后刷新 JWT
-并重放，而新版 Voice、Custom Model、Lyrics Projects、Cover Art 已采用“不自动重放写”的
-更严格模式。另有 clip/persona/playlist 的部分 trash、visibility、reaction、reorder 等写在
-2xx 后没有逐字段业务 readback。它们不是 8 月 30 日 bundle 证明的 route 失效，但属于下一版
-应统一的 P1/P2 安全项：写前刷新认证，写请求最多一次；丢响应/5xx 返回可恢复的 ambiguity；
-可读取的资源在成功后做 exact ID/state/field readback。
+仓库复核曾发现，部分早期非幂等写通过通用 `with_auth_retry` 在显式 401 后刷新 JWT 并重放。
+本轮已将实际写请求从该通用重试路径移除：每条 CLI mutation command 在 client 创建后、首个
+写请求前通过只读 billing 请求验证或刷新认证；写请求使用
+no-redirect transport 且最多发送一次；传输丢失、3xx、5xx 和已接受响应体不可读统一返回
+`ambiguous_mutation`，明确 4xx 仍保留原业务错误。批量/多阶段流程会在外层错误中保留嵌套的
+operation ID、cause 与 recovery，避免部分成功报告丢失恢复信息。
+
+这是 command-level readiness，不是在长时间 upload/processing 工作流的每个后续写步骤前都
+重新请求 billing。若 JWT 在同一命令执行中途失效，后续写会明确返回 401 且不会重放；影响是
+需要重新执行并按已返回的 checkpoint/inspection 先确认状态，不会造成隐式重复写。
+
+对于 2xx 后的业务证明，CLI 继续使用已确认可读字段：Persona/Playlist/Clip 创建或编辑响应会
+校验已返回的 ID/state，Playlist metadata、Lyrics Projects、上传 metadata、Cover Art、Voice、
+Custom Model 等已有工作流保留 exact readback。Clip/Playlist reaction、部分 reorder/save 等当前
+响应或详情 schema 没有稳定、完整的目标字段，因此不会伪造“已回读成功”；其 2xx 仅代表服务端
+接受，遇到不可靠响应则必须按 ambiguity 的 inspection 命令只读确认后再决定是否重试。
 
 ## 6. 迁移验收清单
 
@@ -463,6 +473,16 @@ POST /api/gen/{gen_id}/unlock-preview
 - [x] authorize transport 不跟随 redirect，避免 307/308 隐式重放 POST；返回的 3xx 按
       ambiguity 处理并进入 clip/billing readback；
 - [x] 批量目标路径冲突在 authorize 前整体失败，`--force` 不绕过该检查；
+
+### P1/P2 通用写安全
+
+- [x] 实际非幂等写不进入 `with_auth_retry`；保留重试的 POST 仅为 feed/challenge 等读取或校验；
+- [x] 所有 Suno 业务写使用 no-redirect transport，307/308 不会隐式重放；
+- [x] 写请求 transport/3xx/5xx/响应体丢失统一输出带 operation ID 的 ambiguity；
+- [x] 明确 4xx（包括 401、403、429、审核/额度拒绝）保持非 ambiguity 且不重放；
+- [x] 批量和多阶段错误保留嵌套 ambiguity details，能看到 cause、inspection 与 resumable=false；
+- [x] 已确认可读的响应/资源执行 exact ID/state/field 校验；无稳定字段的 reaction/reorder/save
+      不虚构 readback 结论。
 - [x] `capabilities` 和歧义恢复证据只投影已确认 billing 字段；未知字段仅由原始
       `credits --json` 保留；
 - [x] 多格式、多 clip、部分失败、已解锁、无额度、read-only 均有测试；

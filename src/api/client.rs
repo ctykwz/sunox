@@ -105,16 +105,22 @@ impl SunoClient {
             .headers(self.headers())
     }
 
-    pub(crate) fn patch(&self, path: &str) -> reqwest::RequestBuilder {
-        self.client.patch(self.url(path)).headers(self.headers())
+    pub(crate) fn patch_without_redirect(&self, path: &str) -> reqwest::RequestBuilder {
+        self.no_redirect_client
+            .patch(self.url(path))
+            .headers(self.headers())
     }
 
-    pub(crate) fn put(&self, path: &str) -> reqwest::RequestBuilder {
-        self.client.put(self.url(path)).headers(self.headers())
+    pub(crate) fn put_without_redirect(&self, path: &str) -> reqwest::RequestBuilder {
+        self.no_redirect_client
+            .put(self.url(path))
+            .headers(self.headers())
     }
 
-    pub(crate) fn delete(&self, path: &str) -> reqwest::RequestBuilder {
-        self.client.delete(self.url(path)).headers(self.headers())
+    pub(crate) fn delete_without_redirect(&self, path: &str) -> reqwest::RequestBuilder {
+        self.no_redirect_client
+            .delete(self.url(path))
+            .headers(self.headers())
     }
 
     /// Retry explicitly idempotent reads after transient resets observed with

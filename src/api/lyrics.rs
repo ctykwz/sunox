@@ -1,6 +1,7 @@
 use serde_json::json;
 
 use super::SunoClient;
+use super::mutation::MutationSpec;
 use super::types::{CowriteLyricsModel, CowriteLyricsResponse};
 use crate::core::CliError;
 
@@ -32,9 +33,9 @@ impl SunoClient {
                 model.id
             )));
         }
-        self.with_auth_retry(|| async {
-            let resp = self
-                .post("/api/generate/cowrite-lyrics/")
+        let spec = MutationSpec::new("cowrite_lyrics_generate", "new lyrics result", Vec::new());
+        self.mutation_json_once(
+            self.post_without_redirect("/api/generate/cowrite-lyrics/")
                 .json(&json!({
                     "selected": "",
                     "context_before": "",
@@ -52,12 +53,9 @@ impl SunoClient {
                     },
                     "create_session_token": null,
                     "lyrics_project_id": null
-                }))
-                .send()
-                .await?;
-            let resp = self.check_response(resp).await?;
-            Ok(resp.json().await?)
-        })
+                })),
+            &spec,
+        )
         .await
     }
 }

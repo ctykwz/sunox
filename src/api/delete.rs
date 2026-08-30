@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use serde::Serialize;
 
 use super::SunoClient;
+use super::mutation::MutationSpec;
 use super::types::{ClipTrashRequest, FeedFilters};
 use crate::core::CliError;
 
@@ -32,15 +33,19 @@ impl SunoClient {
                     return Err(error);
                 }
                 let failed_end = purged.len() + chunk.len();
+                let mut failed = serde_json::json!({
+                    "clip_ids": chunk,
+                    "code": error.error_code(),
+                    "message": error.to_string()
+                });
+                if let Some(error_details) = error.details() {
+                    failed["details"] = error_details.clone();
+                }
                 return Err(CliError::PartialMutation {
                     message: "permanent clip deletion stopped before all clips were deleted".into(),
                     details: serde_json::json!({
                         "purged_clip_ids": purged,
-                        "failed": {
-                            "clip_ids": chunk,
-                            "code": error.error_code(),
-                            "message": error.to_string()
-                        },
+                        "failed": failed,
                         "not_attempted_clip_ids": &ids[failed_end..],
                     }),
                 });
@@ -51,16 +56,14 @@ impl SunoClient {
     }
 
     async fn purge_clip_batch(&self, ids: &[String]) -> Result<(), CliError> {
-        self.with_auth_retry(|| async {
-            let resp = self
-                .post("/api/clips/delete/")
-                .json(&PurgeClipsRequest { ids })
-                .send()
-                .await?;
-            self.check_response(resp).await?;
-            Ok(())
-        })
-        .await
+        let spec = clip_batch_mutation_spec("clip_purge", ids);
+        self.send_mutation_once(
+            self.post_without_redirect("/api/clips/delete/")
+                .json(&PurgeClipsRequest { ids }),
+            &spec,
+        )
+        .await?;
+        Ok(())
     }
 
     pub async fn empty_clip_trash(&self) -> Result<Vec<String>, CliError> {
@@ -104,18 +107,49 @@ impl SunoClient {
     }
 
     async fn set_clip_trash(&self, ids: &[String], trash: bool) -> Result<(), CliError> {
-        self.with_auth_retry(|| async {
-            let resp = self
-                .post("/api/gen/trash")
+        let operation = if trash { "clip_trash" } else { "clip_restore" };
+        let spec = clip_batch_mutation_spec(operation, ids)
+            .with_context("trash", serde_json::json!(trash));
+        self.send_mutation_once(
+            self.post_without_redirect("/api/gen/trash")
                 .json(&ClipTrashRequest {
                     trash,
                     clip_ids: ids.to_vec(),
-                })
-                .send()
-                .await?;
-            self.check_response(resp).await?;
-            Ok(())
-        })
-        .await
+                }),
+            &spec,
+        )
+        .await?;
+        for id in ids {
+            let clip = self
+                .get_clip(id)
+                .await
+                .map_err(|error| spec.ambiguous("readback", error.error_code(), error.to_string()))?
+                .ok_or_else(|| {
+                    spec.ambiguous(
+                        "readback_identity",
+                        "state_mismatch",
+                        format!("clip trash readback omitted `{id}`"),
+                    )
+                })?;
+            if clip.is_trashed != Some(trash) {
+                return Err(spec.ambiguous(
+                    "readback_state",
+                    "state_mismatch",
+                    format!("clip `{id}` trash readback returned {:?}", clip.is_trashed),
+                ));
+            }
+        }
+        Ok(())
     }
+}
+
+fn clip_batch_mutation_spec(operation: &'static str, ids: &[String]) -> MutationSpec {
+    MutationSpec::new(
+        operation,
+        format!("{} clip(s)", ids.len()),
+        ids.iter()
+            .map(|id| format!("sunox clip info {id} --json"))
+            .collect(),
+    )
+    .with_context("clip_ids", serde_json::json!(ids))
 }

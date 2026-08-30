@@ -15,8 +15,14 @@ pub fn playlists(playlists: &[PlaylistInfo]) {
         table.add_row(vec![
             short_id,
             &playlist.name,
-            &playlist.is_public.to_string(),
-            &playlist.is_trashed.to_string(),
+            playlist
+                .is_public
+                .map(|value| if value { "true" } else { "false" })
+                .unwrap_or("-"),
+            playlist
+                .is_trashed
+                .map(|value| if value { "true" } else { "false" })
+                .unwrap_or("-"),
             &playlist.clip_count().to_string(),
         ]);
     }
@@ -34,8 +40,20 @@ pub fn playlist_detail(playlist: &PlaylistInfo) {
         "Description",
         playlist.description.as_deref().unwrap_or("-"),
     ]);
-    table.add_row(vec!["Public", &playlist.is_public.to_string()]);
-    table.add_row(vec!["Trashed", &playlist.is_trashed.to_string()]);
+    table.add_row(vec![
+        "Public",
+        playlist
+            .is_public
+            .map(|value| if value { "true" } else { "false" })
+            .unwrap_or("-"),
+    ]);
+    table.add_row(vec![
+        "Trashed",
+        playlist
+            .is_trashed
+            .map(|value| if value { "true" } else { "false" })
+            .unwrap_or("-"),
+    ]);
     table.add_row(vec!["Clips", &playlist.clip_count().to_string()]);
     if let Some(ref image_url) = playlist.image_url {
         table.add_row(vec!["Image URL", image_url]);

@@ -44,6 +44,7 @@ impl AppContext {
         self.ensure_mutations_allowed()?;
         let client = self.client().await?;
         let guard = self.acquire_mutation_lock_for(&client.auth_state_snapshot())?;
+        client.prepare_mutation_auth().await?;
         Ok((client, guard))
     }
 

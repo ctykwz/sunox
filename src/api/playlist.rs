@@ -1,6 +1,7 @@
 use serde_json::Value;
 
 use super::SunoClient;
+use super::mutation::MutationSpec;
 use super::types::{
     CreatePlaylistRequest, PlaylistInfo, PlaylistListResponse, PlaylistReaction,
     PlaylistReorderRequest, PlaylistTrackMutationFailure, PlaylistTrackMutationReport,
@@ -32,25 +33,47 @@ impl SunoClient {
                     self.get(&format!("/api/playlist/v2/{playlist_id}")),
                 )
                 .await?;
-            decode_playlist(raw)
+            let playlist = decode_playlist(raw)?;
+            if playlist.id != playlist_id {
+                return Err(CliError::Api {
+                    code: "schema_drift",
+                    message: format!(
+                        "playlist detail returned id `{}` while resolving `{playlist_id}`",
+                        playlist.id
+                    ),
+                });
+            }
+            Ok(playlist)
         })
         .await
     }
 
     /// Create a playlist through Suno Web's name-only create route.
     pub async fn create_playlist(&self, name: &str) -> Result<PlaylistInfo, CliError> {
-        self.with_auth_retry(|| async {
-            let resp = self
-                .post("/api/playlist/create/")
-                .json(&CreatePlaylistRequest {
-                    name: name.to_string(),
-                })
-                .send()
-                .await?;
-            let resp = self.check_response(resp).await?;
-            decode_playlist(resp.json().await?)
-        })
-        .await
+        let spec = playlist_mutation_spec("playlist_create", None);
+        let body = self
+            .mutation_json_once(
+                self.post_without_redirect("/api/playlist/create/")
+                    .json(&CreatePlaylistRequest {
+                        name: name.to_string(),
+                    }),
+                &spec,
+            )
+            .await?;
+        let playlist = decode_playlist(body).map_err(|error| {
+            spec.ambiguous("response_schema", error.error_code(), error.to_string())
+        })?;
+        if playlist.id.trim().is_empty() || playlist.name != name {
+            return Err(spec.ambiguous(
+                "response_schema",
+                "schema_drift",
+                format!(
+                    "playlist create returned id `{}` and name `{}`",
+                    playlist.id, playlist.name
+                ),
+            ));
+        }
+        Ok(playlist)
     }
 
     /// Update playlist metadata through the current v2 route. The legacy
@@ -65,17 +88,14 @@ impl SunoClient {
     ) -> Result<(), CliError> {
         if image_url.is_none() {
             let req = SetPlaylistMetadataV2Request::new(name, description);
-            return self
-                .with_auth_retry(|| async {
-                    let resp = self
-                        .patch(&format!("/api/playlist/v2/{playlist_id}"))
-                        .json(&req)
-                        .send()
-                        .await?;
-                    self.check_response(resp).await?;
-                    Ok(())
-                })
-                .await;
+            let spec = playlist_mutation_spec("playlist_set_metadata", Some(playlist_id));
+            self.send_mutation_once(
+                self.patch_without_redirect(&format!("/api/playlist/v2/{playlist_id}"))
+                    .json(&req),
+                &spec,
+            )
+            .await?;
+            return Ok(());
         }
 
         self.set_playlist_metadata_legacy(playlist_id, name, description, image_url)
@@ -96,21 +116,21 @@ impl SunoClient {
             image_url: image_url.map(str::to_string),
         };
 
-        self.with_auth_retry(|| async {
-            let resp = self
-                .post("/api/playlist/set_metadata")
-                .json(&req)
-                .send()
-                .await?;
-            let resp = self.check_response(resp).await?;
-            let text = resp.text().await.unwrap_or_default();
-            if !text.trim().is_empty() {
-                let body: Value = serde_json::from_str(&text)?;
-                reject_playlist_moderation_error(&body)?;
-            }
-            Ok(())
-        })
-        .await
+        let spec = playlist_mutation_spec("playlist_set_metadata_legacy", Some(playlist_id));
+        let text = self
+            .mutation_text_once(
+                self.post_without_redirect("/api/playlist/set_metadata")
+                    .json(&req),
+                &spec,
+            )
+            .await?;
+        if !text.trim().is_empty() {
+            let body: Value = serde_json::from_str(&text).map_err(|error| {
+                spec.ambiguous("response_body", "schema_drift", error.to_string())
+            })?;
+            reject_playlist_moderation_error(&body)?;
+        }
+        Ok(())
     }
 
     /// Set playlist cover to an image previously uploaded through Suno's image
@@ -122,16 +142,15 @@ impl SunoClient {
         upload_id: &str,
     ) -> Result<(), CliError> {
         let req = SetPlaylistCoverRequest::from_upload_id(upload_id);
-        self.with_auth_retry(|| async {
-            let resp = self
-                .patch(&format!("/api/playlist/v2/{playlist_id}"))
-                .json(&req)
-                .send()
-                .await?;
-            self.check_response(resp).await?;
-            Ok(())
-        })
-        .await
+        let spec = playlist_mutation_spec("playlist_set_cover", Some(playlist_id))
+            .with_context("upload_id", Value::String(upload_id.to_string()));
+        self.send_mutation_once(
+            self.patch_without_redirect(&format!("/api/playlist/v2/{playlist_id}"))
+                .json(&req),
+            &spec,
+        )
+        .await?;
+        Ok(())
     }
 
     /// Set or clear playlist like/dislike reaction.
@@ -141,18 +160,16 @@ impl SunoClient {
         playlist_id: &str,
         reaction: Option<PlaylistReaction>,
     ) -> Result<(), CliError> {
-        self.with_auth_retry(|| async {
-            let resp = self
-                .post(&format!(
-                    "/api/playlist_reaction/{playlist_id}/update_reaction_type/"
-                ))
-                .json(&SetPlaylistReactionRequest::new(reaction))
-                .send()
-                .await?;
-            self.check_response(resp).await?;
-            Ok(())
-        })
-        .await
+        let spec = playlist_mutation_spec("playlist_set_reaction", Some(playlist_id));
+        self.send_mutation_once(
+            self.post_without_redirect(&format!(
+                "/api/playlist_reaction/{playlist_id}/update_reaction_type/"
+            ))
+            .json(&SetPlaylistReactionRequest::new(reaction)),
+            &spec,
+        )
+        .await?;
+        Ok(())
     }
 
     /// Add clips to a playlist.
@@ -211,44 +228,53 @@ impl SunoClient {
         playlist_id: &str,
         is_public: bool,
     ) -> Result<(), CliError> {
-        self.with_auth_retry(|| async {
-            let resp = self
-                .patch(&format!("/api/playlist/v2/{playlist_id}"))
-                .json(&SetPlaylistVisibilityRequest::new(is_public))
-                .send()
-                .await?;
-            self.check_response(resp).await?;
-            Ok(())
-        })
-        .await
+        let spec = playlist_mutation_spec("playlist_set_visibility", Some(playlist_id))
+            .with_context("is_public", serde_json::json!(is_public));
+        self.send_mutation_once(
+            self.patch_without_redirect(&format!("/api/playlist/v2/{playlist_id}"))
+                .json(&SetPlaylistVisibilityRequest::new(is_public)),
+            &spec,
+        )
+        .await?;
+        let readback = self
+            .get_playlist(playlist_id)
+            .await
+            .map_err(|error| spec.ambiguous("readback", error.error_code(), error.to_string()))?;
+        if readback.is_public != Some(is_public) {
+            return Err(spec.ambiguous(
+                "readback_state",
+                "state_mismatch",
+                format!(
+                    "playlist visibility readback returned is_public={:?}",
+                    readback.is_public
+                ),
+            ));
+        }
+        Ok(())
     }
 
     /// Save a playlist to the user's library.
     /// POST /api/playlist/v2/{playlist_id}/save
     pub async fn save_playlist(&self, playlist_id: &str) -> Result<(), CliError> {
-        self.with_auth_retry(|| async {
-            let resp = self
-                .post(&format!("/api/playlist/v2/{playlist_id}/save"))
-                .send()
-                .await?;
-            self.check_response(resp).await?;
-            Ok(())
-        })
-        .await
+        let spec = playlist_mutation_spec("playlist_save", Some(playlist_id));
+        self.send_mutation_once(
+            self.post_without_redirect(&format!("/api/playlist/v2/{playlist_id}/save")),
+            &spec,
+        )
+        .await?;
+        Ok(())
     }
 
     /// Remove a saved playlist from the user's library.
     /// DELETE /api/playlist/v2/{playlist_id}/save
     pub async fn unsave_playlist(&self, playlist_id: &str) -> Result<(), CliError> {
-        self.with_auth_retry(|| async {
-            let resp = self
-                .delete(&format!("/api/playlist/v2/{playlist_id}/save"))
-                .send()
-                .await?;
-            self.check_response(resp).await?;
-            Ok(())
-        })
-        .await
+        let spec = playlist_mutation_spec("playlist_unsave", Some(playlist_id));
+        self.send_mutation_once(
+            self.delete_without_redirect(&format!("/api/playlist/v2/{playlist_id}/save")),
+            &spec,
+        )
+        .await?;
+        Ok(())
     }
 
     /// Move a playlist clip to a zero-based index.
@@ -259,18 +285,18 @@ impl SunoClient {
         clip_id: &str,
         index: u32,
     ) -> Result<(), CliError> {
-        self.with_auth_retry(|| async {
-            let resp = self
-                .post(&format!(
-                    "/api/playlist/v2/{playlist_id}/tracks/reorder-by-index"
-                ))
-                .json(&PlaylistReorderRequest::single(clip_id, index))
-                .send()
-                .await?;
-            self.check_response(resp).await?;
-            Ok(())
-        })
-        .await
+        let spec = playlist_mutation_spec("playlist_reorder", Some(playlist_id))
+            .with_context("clip_id", Value::String(clip_id.to_string()))
+            .with_context("index", serde_json::json!(index));
+        self.send_mutation_once(
+            self.post_without_redirect(&format!(
+                "/api/playlist/v2/{playlist_id}/tracks/reorder-by-index"
+            ))
+            .json(&PlaylistReorderRequest::single(clip_id, index)),
+            &spec,
+        )
+        .await?;
+        Ok(())
     }
 
     async fn update_playlist_tracks(
@@ -279,18 +305,22 @@ impl SunoClient {
         action: &str,
         clip_ids: &[String],
     ) -> Result<(), CliError> {
-        self.with_auth_retry(|| async {
-            let resp = self
-                .post(&format!("/api/playlist/v2/{playlist_id}/tracks/{action}"))
+        let operation = match action {
+            "add" => "playlist_add_tracks",
+            "remove" => "playlist_remove_tracks",
+            _ => "playlist_update_tracks",
+        };
+        let spec = playlist_mutation_spec(operation, Some(playlist_id))
+            .with_context("clip_ids", serde_json::json!(clip_ids));
+        self.send_mutation_once(
+            self.post_without_redirect(&format!("/api/playlist/v2/{playlist_id}/tracks/{action}"))
                 .json(&PlaylistTracksRequest {
                     clip_ids: clip_ids.to_vec(),
-                })
-                .send()
-                .await?;
-            self.check_response(resp).await?;
-            Ok(())
-        })
-        .await
+                }),
+            &spec,
+        )
+        .await?;
+        Ok(())
     }
 
     /// Trash a playlist. The route supports undo, but the CLI exposes delete.
@@ -310,17 +340,50 @@ impl SunoClient {
         playlist_id: &str,
         undo: bool,
     ) -> Result<(), CliError> {
-        self.with_auth_retry(|| async {
-            let resp = self
-                .post(&format!("/api/playlist/v2/{playlist_id}/trash"))
-                .json(&TrashPlaylistRequest { undo })
-                .send()
-                .await?;
-            self.check_response(resp).await?;
-            Ok(())
-        })
-        .await
+        let operation = if undo {
+            "playlist_restore"
+        } else {
+            "playlist_trash"
+        };
+        let spec = playlist_mutation_spec(operation, Some(playlist_id))
+            .with_context("undo", serde_json::json!(undo));
+        self.send_mutation_once(
+            self.post_without_redirect(&format!("/api/playlist/v2/{playlist_id}/trash"))
+                .json(&TrashPlaylistRequest { undo }),
+            &spec,
+        )
+        .await?;
+        let expected_trashed = !undo;
+        let readback = self
+            .get_playlist(playlist_id)
+            .await
+            .map_err(|error| spec.ambiguous("readback", error.error_code(), error.to_string()))?;
+        if readback.is_trashed != Some(expected_trashed) {
+            return Err(spec.ambiguous(
+                "readback_state",
+                "state_mismatch",
+                format!(
+                    "playlist trash readback returned is_trashed={:?}",
+                    readback.is_trashed
+                ),
+            ));
+        }
+        Ok(())
     }
+}
+
+fn playlist_mutation_spec(operation: &'static str, playlist_id: Option<&str>) -> MutationSpec {
+    let resource = playlist_id
+        .map(|id| format!("playlist {id}"))
+        .unwrap_or_else(|| "new playlist".to_string());
+    let commands = playlist_id
+        .map(|id| vec![format!("sunox playlist info {id} --json")])
+        .unwrap_or_else(|| vec!["sunox playlist list --json".into()]);
+    let mut spec = MutationSpec::new(operation, resource, commands);
+    if let Some(playlist_id) = playlist_id {
+        spec = spec.with_context("playlist_id", Value::String(playlist_id.to_string()));
+    }
+    spec
 }
 
 fn reject_playlist_moderation_error(body: &Value) -> Result<(), CliError> {

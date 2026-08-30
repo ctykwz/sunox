@@ -551,7 +551,12 @@ async fn idempotent_read_rejects_mutation_methods_before_network_io() {
 
 #[tokio::test]
 async fn delete_clips_posts_current_web_trash_contract() {
-    let server = MockServer::json("{}").await;
+    let server = MockServer::json_sequence(&[
+        "{}",
+        r#"{"id":"clip-a","title":"A","status":"complete","model_name":"chirp-v4-5","created_at":"2026-06-30T00:00:00Z","is_trashed":true}"#,
+        r#"{"id":"clip-b","title":"B","status":"complete","model_name":"chirp-v4-5","created_at":"2026-06-30T00:00:00Z","is_trashed":true}"#,
+    ])
+    .await;
     let client = server.client();
 
     client
@@ -559,7 +564,9 @@ async fn delete_clips_posts_current_web_trash_contract() {
         .await
         .expect("delete clips");
 
-    let request = server.captured().await;
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 3);
+    let request = &requests[0];
     assert_eq!(request.method, "POST");
     assert_eq!(request.path, "/api/gen/trash");
     assert_eq!(
@@ -568,6 +575,128 @@ async fn delete_clips_posts_current_web_trash_contract() {
             "trash": true,
             "clip_ids": ["clip-a", "clip-b"]
         })
+    );
+    assert_eq!(requests[1].method, "GET");
+    assert_eq!(requests[1].path, "/api/clip/clip-a");
+    assert_eq!(requests[2].method, "GET");
+    assert_eq!(requests[2].path, "/api/clip/clip-b");
+}
+
+#[tokio::test]
+async fn clip_trash_server_error_is_ambiguous_and_not_replayed() {
+    let server = MockServer::response_sequence_with_idle_timeout(
+        vec![(500, r#"{"detail":"unknown accepted state"}"#.into())],
+        Duration::from_millis(50),
+    )
+    .await;
+    let client = server.client();
+
+    let error = client
+        .delete_clips(&["clip-a".to_string()])
+        .await
+        .expect_err("5xx cannot prove the trash write was rejected");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    assert_eq!(error.details().expect("details")["operation"], "clip_trash");
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "POST");
+}
+
+#[tokio::test]
+async fn clip_trash_transport_loss_is_ambiguous_and_not_replayed() {
+    let server = MockServer::resets_until_idle(2, Duration::from_millis(50)).await;
+    let client = server.client();
+
+    let error = client
+        .delete_clips(&["clip-a".to_string()])
+        .await
+        .expect_err("a lost response cannot prove the trash write was rejected");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 1, "mutation transport must never retry");
+}
+
+#[tokio::test]
+async fn clip_trash_explicit_auth_rejection_is_not_replayed_or_ambiguous() {
+    let server = MockServer::response_sequence_with_idle_timeout(
+        vec![(401, String::new())],
+        Duration::from_millis(50),
+    )
+    .await;
+    let client = server.client();
+
+    let error = client
+        .delete_clips(&["clip-a".to_string()])
+        .await
+        .expect_err("an explicit 401 is a reliable rejection");
+
+    assert!(matches!(error, CliError::AuthExpired));
+    assert_eq!(server.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
+async fn clip_trash_never_follows_a_redirect_with_a_second_post() {
+    let target_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind redirect target");
+    let target_addr = target_listener
+        .local_addr()
+        .expect("redirect target address");
+    let redirect_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind redirect source");
+    let redirect_addr = redirect_listener
+        .local_addr()
+        .expect("redirect source address");
+
+    let redirect_task = tokio::spawn(async move {
+        let (mut stream, _) = redirect_listener
+            .accept()
+            .await
+            .expect("accept redirect POST");
+        let request = read_request(&mut stream).await;
+        let response = format!(
+            "HTTP/1.1 307 Temporary Redirect\r\nlocation: http://{target_addr}/api/gen/trash\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("write redirect response");
+        request
+    });
+    let target_task = tokio::spawn(async move {
+        let Ok(Ok((stream, _))) =
+            timeout(Duration::from_millis(250), target_listener.accept()).await
+        else {
+            return None;
+        };
+        Some(capture_request(stream, "{}").await)
+    });
+
+    let client = SunoClient::new_for_tests(
+        format!("http://{redirect_addr}"),
+        AuthState {
+            jwt: Some(test_jwt_with_subject("user-1")),
+            ..AuthState::default()
+        },
+    )
+    .expect("test client");
+    let result = client.delete_clips(&["clip-a".to_string()]).await;
+    let redirect_request = redirect_task.await.expect("redirect source task");
+    let redirected_request = target_task.await.expect("redirect target task");
+
+    assert_eq!(redirect_request.method, "POST");
+    let error = result.expect_err("redirected mutation result is ambiguous");
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    assert_eq!(
+        error.details().expect("details")["stage"],
+        "response_status"
+    );
+    assert!(
+        redirected_request.is_none(),
+        "mutation must not follow redirect"
     );
 }
 
@@ -857,9 +986,9 @@ async fn empty_clip_trash_reports_completed_and_unattempted_batches() {
             .len(),
         20
     );
-    assert_eq!(details["failed"]["code"], "api_error");
+    assert_eq!(details["failed"]["code"], "ambiguous_mutation");
     assert!(
-        details["failed"]["message"]
+        details["failed"]["details"]["cause"]["message"]
             .as_str()
             .expect("failure message")
             .contains("delete failed")
@@ -960,8 +1089,28 @@ async fn challenge_recheck_refresh_skips_without_clerk_material() {
 }
 
 #[tokio::test]
+async fn mutation_auth_preflight_proves_the_jwt_with_a_read_only_billing_request() {
+    let billing = billing_info_response("pro");
+    let server = MockServer::json(&billing).await;
+    let client = server.client();
+
+    client
+        .prepare_mutation_auth()
+        .await
+        .expect("mutation auth preflight");
+
+    let request = server.captured().await;
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.path, "/api/billing/info/");
+}
+
+#[tokio::test]
 async fn restore_clips_posts_current_web_trash_contract() {
-    let server = MockServer::json("{}").await;
+    let server = MockServer::json_sequence(&[
+        "{}",
+        r#"{"id":"clip-a","title":"A","status":"complete","model_name":"chirp-v4-5","created_at":"2026-06-30T00:00:00Z","is_trashed":false}"#,
+    ])
+    .await;
     let client = server.client();
 
     client
@@ -969,7 +1118,9 @@ async fn restore_clips_posts_current_web_trash_contract() {
         .await
         .expect("restore clips");
 
-    let request = server.captured().await;
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+    let request = &requests[0];
     assert_eq!(request.method, "POST");
     assert_eq!(request.path, "/api/gen/trash");
     assert_eq!(
@@ -979,6 +1130,8 @@ async fn restore_clips_posts_current_web_trash_contract() {
             "clip_ids": ["clip-a"]
         })
     );
+    assert_eq!(requests[1].method, "GET");
+    assert_eq!(requests[1].path, "/api/clip/clip-a");
 }
 
 #[tokio::test]
@@ -1468,6 +1621,38 @@ async fn set_clip_metadata_surfaces_http_200_api_errors() {
 
     assert_eq!(error.error_code(), "metadata_update_rejected");
     assert!(error.to_string().contains("Cover rejected"));
+}
+
+#[tokio::test]
+async fn set_clip_metadata_treats_malformed_accepted_body_as_ambiguous() {
+    let server = MockServer::json("not-json").await;
+    let client = server.client();
+
+    let error = client
+        .set_metadata("clip-a", &SetMetadataRequest::default())
+        .await
+        .expect_err("an unreadable accepted response cannot prove the metadata outcome");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    assert_eq!(
+        error.details().expect("ambiguity details")["stage"],
+        "response_body"
+    );
+    assert_eq!(server.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
+async fn clip_visibility_preserves_an_explicit_client_rejection() {
+    let server = MockServer::json_status_sequence(&[(401, r#"{"detail":"expired"}"#)]).await;
+    let client = server.client();
+
+    let error = client
+        .set_visibility("clip-a", false)
+        .await
+        .expect_err("an explicit 401 proves the write was rejected");
+
+    assert_ne!(error.error_code(), "ambiguous_mutation");
+    assert_eq!(server.captured_all().await.len(), 1);
 }
 
 #[tokio::test]
@@ -4259,13 +4444,7 @@ async fn aligned_lyrics_does_not_hide_v3_schema_drift_behind_v2() {
         .await
         .expect_err("v3 schema drift must remain visible");
 
-    assert!(matches!(
-        error,
-        CliError::Api {
-            code: "schema_drift",
-            ..
-        }
-    ));
+    assert_eq!(error.error_code(), "ambiguous_mutation");
     let requests = server.captured_all().await;
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].path, "/api/gen/clip-a/aligned_lyrics/v3");
@@ -4368,7 +4547,7 @@ async fn playlist_detail_reads_v2_cover_metadata_contract() {
         Some("image_upload-1")
     );
     assert_eq!(playlist.cover_is_user_set, Some(true));
-    assert!(playlist.is_public);
+    assert_eq!(playlist.is_public, Some(true));
     assert_eq!(playlist.song_count, Some(3));
     assert_eq!(
         playlist.metadata.as_ref().unwrap()["owner"]["handle"],
@@ -4399,6 +4578,24 @@ async fn create_playlist_posts_name_only_contract() {
         serde_json::from_str::<serde_json::Value>(&requests[0].body).expect("create json"),
         serde_json::json!({ "name": "Road Trip" })
     );
+}
+
+#[tokio::test]
+async fn create_playlist_treats_accepted_schema_loss_as_ambiguous() {
+    let server = MockServer::json(r#"{"status":"created"}"#).await;
+    let client = server.client();
+
+    let error = client
+        .create_playlist("Road Trip")
+        .await
+        .expect_err("an accepted response without playlist identity is ambiguous");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    assert_eq!(
+        error.details().expect("ambiguity details")["stage"],
+        "response_schema"
+    );
+    assert_eq!(server.captured_all().await.len(), 1);
 }
 
 #[tokio::test]
@@ -4650,8 +4847,18 @@ async fn remove_clips_from_playlist_reports_partial_failure() {
     assert_eq!(report.succeeded_clip_ids, vec!["clip-a"]);
     assert_eq!(report.failed.len(), 1);
     assert_eq!(report.failed[0].clip_id, "clip-b");
-    assert_eq!(report.failed[0].error_code, "api_error");
-    assert!(report.failed[0].message.contains("HTTP 500"));
+    assert_eq!(report.failed[0].error_code, "ambiguous_mutation");
+    let failure_details = report.failed[0]
+        .details
+        .as_ref()
+        .expect("ambiguity details");
+    assert_eq!(failure_details["stage"], "response_status");
+    assert!(
+        failure_details["cause"]["message"]
+            .as_str()
+            .expect("cause message")
+            .contains("HTTP 500")
+    );
     assert_eq!(report.not_attempted_clip_ids, vec!["clip-c"]);
 
     let requests = server.captured_all().await;
@@ -4679,13 +4886,11 @@ async fn remove_clips_from_playlist_propagates_first_failure() {
         .await
         .expect_err("first failure should not become partial mutation");
 
-    match error {
-        CliError::SunoApi { code, message, .. } => {
-            assert_eq!(code, "api_error");
-            assert!(message.contains("HTTP 500"));
-        }
-        other => panic!("unexpected error: {other:?}"),
-    }
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    assert_eq!(
+        error.details().expect("details")["stage"],
+        "response_status"
+    );
 
     let requests = server.captured_all().await;
     assert_eq!(requests.len(), 1);
@@ -4731,7 +4936,11 @@ async fn reorder_playlist_clip_posts_positions_contract() {
 
 #[tokio::test]
 async fn set_playlist_visibility_patches_v2_metadata_contract() {
-    let server = MockServer::json("{}").await;
+    let server = MockServer::json_sequence(&[
+        "{}",
+        r#"{"id":"playlist-1","name":"One","is_public":false}"#,
+    ])
+    .await;
     let client = server.client();
 
     client
@@ -4739,18 +4948,44 @@ async fn set_playlist_visibility_patches_v2_metadata_contract() {
         .await
         .expect("set visibility");
 
-    let request = server.captured().await;
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+    let request = &requests[0];
     assert_eq!(request.method, "PATCH");
     assert_eq!(request.path, "/api/playlist/v2/playlist-1");
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&request.body).expect("request json"),
         serde_json::json!({ "metadata": { "is_public": false } })
     );
+    assert_eq!(requests[1].method, "GET");
+    assert_eq!(requests[1].path, "/api/playlist/v2/playlist-1");
+}
+
+#[tokio::test]
+async fn playlist_visibility_readback_requires_the_state_field() {
+    let server = MockServer::json_sequence(&["{}", r#"{"id":"playlist-1","name":"One"}"#]).await;
+    let client = server.client();
+
+    let error = client
+        .set_playlist_visibility("playlist-1", false)
+        .await
+        .expect_err("a missing visibility field cannot confirm private state");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    assert_eq!(
+        error.details().expect("ambiguity details")["stage"],
+        "readback_state"
+    );
+    assert_eq!(server.captured_all().await.len(), 2);
 }
 
 #[tokio::test]
 async fn trash_playlist_posts_undo_false_contract() {
-    let server = MockServer::json("{}").await;
+    let server = MockServer::json_sequence(&[
+        "{}",
+        r#"{"id":"playlist-1","name":"One","is_trashed":true}"#,
+    ])
+    .await;
     let client = server.client();
 
     client
@@ -4758,18 +4993,26 @@ async fn trash_playlist_posts_undo_false_contract() {
         .await
         .expect("trash playlist");
 
-    let request = server.captured().await;
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+    let request = &requests[0];
     assert_eq!(request.method, "POST");
     assert_eq!(request.path, "/api/playlist/v2/playlist-1/trash");
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&request.body).expect("request json"),
         serde_json::json!({ "undo": false })
     );
+    assert_eq!(requests[1].method, "GET");
+    assert_eq!(requests[1].path, "/api/playlist/v2/playlist-1");
 }
 
 #[tokio::test]
 async fn restore_playlist_posts_undo_true_contract() {
-    let server = MockServer::json("{}").await;
+    let server = MockServer::json_sequence(&[
+        "{}",
+        r#"{"id":"playlist-1","name":"One","is_trashed":false}"#,
+    ])
+    .await;
     let client = server.client();
 
     client
@@ -4777,13 +5020,35 @@ async fn restore_playlist_posts_undo_true_contract() {
         .await
         .expect("restore playlist");
 
-    let request = server.captured().await;
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+    let request = &requests[0];
     assert_eq!(request.method, "POST");
     assert_eq!(request.path, "/api/playlist/v2/playlist-1/trash");
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&request.body).expect("request json"),
         serde_json::json!({ "undo": true })
     );
+    assert_eq!(requests[1].method, "GET");
+    assert_eq!(requests[1].path, "/api/playlist/v2/playlist-1");
+}
+
+#[tokio::test]
+async fn playlist_restore_readback_requires_the_trash_state_field() {
+    let server = MockServer::json_sequence(&["{}", r#"{"id":"playlist-1","name":"One"}"#]).await;
+    let client = server.client();
+
+    let error = client
+        .restore_playlist("playlist-1")
+        .await
+        .expect_err("a missing trash field cannot confirm restored state");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    assert_eq!(
+        error.details().expect("ambiguity details")["stage"],
+        "readback_state"
+    );
+    assert_eq!(server.captured_all().await.len(), 2);
 }
 
 #[tokio::test]
@@ -4855,6 +5120,42 @@ async fn create_persona_posts_current_web_contract() {
             "is_public": false
         })
     );
+}
+
+#[tokio::test]
+async fn create_persona_treats_accepted_schema_loss_as_ambiguous() {
+    let server = MockServer::json(r#"{"status":"created"}"#).await;
+    let client = server.client();
+
+    let error = client
+        .create_persona(&CreatePersonaRequest {
+            root_clip_id: Some("clip-a".into()),
+            name: Some("Lead Voice".into()),
+            description: None,
+            image_s3_id: None,
+            is_public: Some(false),
+            is_suno_persona: None,
+            persona_type: None,
+            vox_audio_id: None,
+            vocal_start_s: None,
+            vocal_end_s: None,
+            user_input_styles: None,
+            source: None,
+            singer_skill_level: None,
+            clips: None,
+            is_voice_recording: None,
+            voice_recording_id: None,
+            verification_id: None,
+        })
+        .await
+        .expect_err("an accepted response without persona identity is ambiguous");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    assert_eq!(
+        error.details().expect("ambiguity details")["stage"],
+        "response_schema"
+    );
+    assert_eq!(server.captured_all().await.len(), 1);
 }
 
 #[tokio::test]
@@ -5414,19 +5715,18 @@ async fn persona_per_id_mutation_reports_partial_progress() {
         .expect_err("later failure must expose partial progress");
 
     assert_eq!(error.error_code(), "partial_mutation");
+    let details = error.details().expect("partial details");
+    assert_eq!(details["operation"], "trash_personas");
     assert_eq!(
-        error.details().expect("partial details"),
-        &serde_json::json!({
-            "operation": "trash_personas",
-            "requested_persona_ids": ["persona-a", "persona-b", "persona-c"],
-            "succeeded_persona_ids": ["persona-a"],
-            "failed": {
-                "persona_id": "persona-b",
-                "code": "api_error",
-                "message": "API error: HTTP 500 Internal Server Error: persona mutation failed"
-            },
-            "not_attempted_persona_ids": ["persona-c"]
-        })
+        details["succeeded_persona_ids"],
+        serde_json::json!(["persona-a"])
+    );
+    assert_eq!(details["failed"]["persona_id"], "persona-b");
+    assert_eq!(details["failed"]["code"], "ambiguous_mutation");
+    assert_eq!(details["failed"]["details"]["stage"], "response_status");
+    assert_eq!(
+        details["not_attempted_persona_ids"],
+        serde_json::json!(["persona-c"])
     );
     let requests = server.captured_all().await;
     assert_eq!(requests.len(), 2);
@@ -5442,7 +5742,29 @@ async fn persona_per_id_mutation_rejects_non_json_success_body() {
         .await
         .expect_err("unknown success schema must not be ignored");
 
-    assert_eq!(error.error_code(), "json_error");
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    assert_eq!(error.details().expect("details")["stage"], "response_body");
+}
+
+#[tokio::test]
+async fn persona_per_id_mutation_requires_the_requested_id_in_success_body() {
+    let server = MockServer::json(
+        r#"{"updated_persona_ids":["persona-other"],"voice_persona_count":4,"max_voice_personas":1000}"#,
+    )
+    .await;
+    let client = server.client();
+
+    let error = client
+        .trash_personas(&["persona-a".into()])
+        .await
+        .expect_err("a response for another persona cannot confirm this write");
+
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    assert_eq!(
+        error.details().expect("ambiguity details")["stage"],
+        "response_state"
+    );
+    assert_eq!(server.captured_all().await.len(), 1);
 }
 
 #[tokio::test]
@@ -5671,24 +5993,17 @@ async fn image_upload_workflow_preserves_upload_identity_when_finish_fails() {
         .await
         .expect_err("finish failure must expose the created image upload");
 
-    assert_eq!(error.error_code(), "partial_mutation");
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    let details = error.details().expect("image upload checkpoint");
+    assert_eq!(details["operation"], "image_upload_finish");
+    assert_eq!(details["resource_id"], "image-upload-1");
     assert_eq!(
-        error.details().expect("image upload checkpoint"),
-        &serde_json::json!({
-            "operation": "image_upload",
-            "upload_id": "image-upload-1",
-            "completed_steps": ["upload_created", "file_uploaded"],
-            "failed": {
-                "step": "upload_finish",
-                "code": "api_error",
-                "message": "API error: HTTP 500 Internal Server Error: finish failed"
-            },
-            "recovery": {
-                "resumable": false,
-                "reason": "retry safety for image upload finish is not live-verified"
-            }
-        })
+        details["completed_steps"],
+        serde_json::json!(["upload_created", "file_uploaded"])
     );
+    assert_eq!(details["failed_step"], "upload_finish");
+    assert_eq!(details["stage"], "response_status");
+    assert_eq!(details["recovery"]["resumable"], false);
     assert_eq!(s3.captured().await.path, "/s3-upload");
     assert_eq!(api.captured_all().await.len(), 2);
 }
@@ -5905,7 +6220,7 @@ async fn generation_submit_reports_an_ambiguous_send_failure() {
 }
 
 #[tokio::test]
-async fn generation_submit_keeps_an_explicit_server_error_non_ambiguous() {
+async fn generation_submit_treats_server_error_as_ambiguous() {
     let server = MockServer::json_status_sequence(&[(
         500,
         r#"{"detail":"generation rejected","retryable":false}"#,
@@ -5919,16 +6234,14 @@ async fn generation_submit_keeps_an_explicit_server_error_non_ambiguous() {
     let error = client
         .submit_prepared_generation_after_challenge(&request)
         .await
-        .expect_err("explicit failure must be preserved");
+        .expect_err("5xx cannot prove generation was rejected before commit");
 
-    assert!(matches!(
-        error,
-        CliError::SunoApi {
-            status: 500,
-            retryable: Some(false),
-            ..
-        }
-    ));
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    assert_eq!(
+        error.details().expect("details")["stage"],
+        "response_status"
+    );
+    assert_eq!(server.captured_all().await.len(), 1);
 }
 
 #[tokio::test]
@@ -6248,7 +6561,7 @@ async fn conversion_poll_timeout_is_ambiguous_after_submit() {
 }
 
 #[tokio::test]
-async fn conversion_keeps_an_explicit_server_error_non_ambiguous() {
+async fn conversion_treats_server_error_as_ambiguous() {
     let server = MockServer::json_status_sequence(&[
         (200, r#"{"wav_file_url":null}"#),
         (500, r#"{"detail":"conversion rejected"}"#),
@@ -6266,9 +6579,14 @@ async fn conversion_keeps_an_explicit_server_error_non_ambiguous() {
             },
         )
         .await
-        .expect_err("explicit conversion failure must be preserved");
+        .expect_err("5xx cannot prove conversion was rejected before commit");
 
-    assert!(matches!(error, CliError::SunoApi { status: 500, .. }));
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    assert_eq!(
+        error.details().expect("details")["stage"],
+        "response_status"
+    );
+    assert_eq!(server.captured_all().await.len(), 2);
 }
 
 #[tokio::test]
@@ -6393,7 +6711,7 @@ async fn remaster_submit_rejects_a_blank_clip_id_as_ambiguous_schema_drift() {
 }
 
 #[tokio::test]
-async fn remaster_submit_keeps_an_explicit_server_error_non_ambiguous() {
+async fn remaster_submit_treats_server_error_as_ambiguous() {
     let source = r#"{"id":"clip-a","title":"Source","status":"complete","model_name":"chirp-carp","created_at":"2026-08-24T00:00:00Z","is_trashed":false,"metadata":{"duration":180.0},"action_config":{"actions":[{"action_type":"remaster","visible":true,"disabled":false}]}}"#;
     let server = MockServer::json_status_sequence(&[
         (200, source),
@@ -6405,16 +6723,14 @@ async fn remaster_submit_keeps_an_explicit_server_error_non_ambiguous() {
     let error = client
         .remaster("clip-a", "chirp-flounder", None)
         .await
-        .expect_err("explicit failure must be preserved");
+        .expect_err("5xx cannot prove Remaster was rejected before commit");
 
-    assert!(matches!(
-        error,
-        CliError::SunoApi {
-            status: 500,
-            retryable: Some(false),
-            ..
-        }
-    ));
+    assert_eq!(error.error_code(), "ambiguous_mutation");
+    assert_eq!(
+        error.details().expect("details")["stage"],
+        "response_status"
+    );
+    assert_eq!(server.captured_all().await.len(), 2);
 }
 
 fn complete_clip_fixture(id: &str, action: Option<&str>, image_url: Option<&str>) -> String {
