@@ -120,8 +120,13 @@ pub fn clip_detail(info: &ClipInfo) {
             .unwrap_or_else(|| "-".to_string()),
     ]);
 
-    if let Some(ref url) = clip.audio_url {
-        table.add_row(vec!["Audio URL", url]);
+    if let Some(ref url) = info.playback_url {
+        table.add_row(vec!["Playback URL", url]);
+    }
+    if clip.audio_url.as_ref() != info.playback_url.as_ref()
+        && let Some(ref url) = clip.audio_url
+    {
+        table.add_row(vec!["Upstream Audio URL", url]);
     }
     if let Some(ref url) = clip.video_url {
         table.add_row(vec!["Video URL", url]);
@@ -174,6 +179,7 @@ mod tests {
             image_url: None,
             created_at: "2026-07-03T00:00:00Z".into(),
             is_trashed: None,
+            is_download_unlocked: None,
             action_config: None,
             play_count: 0,
             upvote_count: 0,
@@ -184,6 +190,7 @@ mod tests {
 
         let info = ClipInfo {
             clip,
+            playback_url: None,
             attribution: ClipAttribution::default(),
             comments: ClipComments::default(),
             remix_count: Default::default(),

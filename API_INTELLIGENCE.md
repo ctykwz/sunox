@@ -1,4 +1,4 @@
-# Suno API Intelligence — Reverse-Engineered through August 24, 2026
+# Suno API Intelligence — Reverse-Engineered through August 30, 2026
 
 Implementation notes in this file were refreshed for the Rust CLI structure on
 June 30, 2026. Non-Studio page-load traffic was recaptured from the user's
@@ -39,6 +39,15 @@ exhausted the bounded retries before the same route succeeded again. The retry
 boundary includes the complete JSON body read, and a runtime method guard
 rejects non-GET requests before any network I/O; it does not claim deterministic
 upstream availability.
+
+The logged-in `/create` dependency closure was rescanned on August 30. Current
+downloads now have a clip-level gate: only `is_download_unlocked === true` skips
+`POST /api/download/authorize`; a successful authorization then permits one or
+more prepared `mp3|m4a|wav|mp4` requests for that source. Authorization can be
+metered, is not replay-safe, and must not be retried after an ambiguous transport
+result. Billing now advertises period download usage, additional remaining
+downloads, and optional download-credit packs. The CLI decodes these live fields
+and does not use the public Pro/Premier quota numbers as runtime constants.
 
 ## Capture Scope (June 30, 2026)
 
@@ -943,11 +952,39 @@ sunox clip crop <clip_id> --start <seconds> --end <seconds> --remove-section
 sunox clip fade <clip_id> --in <seconds> --out <seconds>
 ```
 
-Official download routes observed in the current bundle:
+The July routes below have been superseded as the primary path by the August 30
+clip-unlock contract. A source is downloadable without a write only when its
+decoded `is_download_unlocked` value is exactly `true`. Missing, `null`, and
+`false` all require the following request before any file fetch:
+
+```http
+POST /api/download/authorize
+Content-Type: application/json
+
+{"item_id":"<clip_id>","item_type":"clip"}
+```
+
+The current Web reads `ok`, `reason`, `message`, and `credit_deducted` from the
+response. `ok != true` stops the download. The POST is potentially metered and
+has no confirmed idempotency key, so Sunox sends it at most once and never
+blindly replays an ambiguous result. Its transport also disables automatic
+redirect following so a 307/308 cannot repeat the POST and body. A read-only
+invocation fails closed unless the source was already explicitly unlocked. A
+returned redirect is itself an ambiguous mutation result and triggers exact
+clip/billing readback before any retry decision.
+
+Prepared routes observed in the August 30 bundle:
 
 ```http
 GET /api/download/clip/{clip_id}?format=mp3
 GET /api/download/clip/{clip_id}?format=m4a
+GET /api/download/clip/{clip_id}?format=wav
+GET /api/download/clip/{clip_id}?format=mp4
+```
+
+Older compatibility routes still present in the bundle are:
+
+```http
 
 POST /api/gen/{clip_id}/convert_wav/
 GET /api/gen/{clip_id}/wav_file/
@@ -956,18 +993,41 @@ GET /api/gen/{clip_id}/opus_file/
 POST /api/gen/{clip_id}/convert_opus
 ```
 
-MP3 and M4A return a prepared download response with `download_url` and can be
-`processing`; WAV uses convert-then-poll for `wav_file_url`; OPUS reads an
-existing `opus_file_url` first and starts conversion only when absent. The CLI
-uses the official prepared MP3 route by default, while
-`--format mp3|m4a|wav|opus` selects among these routes. `--no-convert` (and
-global `--read-only`) refuses a missing WAV/OPUS conversion. Preparation and
+MP3, M4A, WAV, and video use prepared-format routes first. Legacy WAV
+convert-then-poll and direct `clip.video_url` fallback are permitted only after
+the same source-unlock gate; OPUS is retained solely as legacy compatibility
+because the current Web download chooser no longer exposes it. The CLI keeps
+`--format mp3|m4a|wav|opus`; `--no-convert` refuses a missing legacy conversion.
+Global `--read-only` additionally refuses authorization for a locked or
+unknown source. Preparation and
 edit-action polling use the configured `poll_timeout_secs` and
 `poll_interval_secs`; CDN file transfer has a bounded connection timeout but
 no total body deadline, while a 60-second no-progress timeout prevents a
 connected but stalled response from hanging the CLI. WAV conversion is
 serialized as account-scoped mutations. OPUS checks for an existing file while
 holding that lock and only requests conversion when the URL is absent.
+
+Existing stem results share their parent song's accounting boundary. Sunox
+authorizes the parent source once and reuses that unlock for all hydrated stem
+clips and formats; it never authorizes individual stem IDs. Billing exposes:
+
+```json
+{
+  "download_usage": {
+    "current_period_downloads_limit": 20,
+    "current_period_downloads_used": 0,
+    "additional_download_remaining": 0
+  },
+  "download_credit_packs": []
+}
+```
+
+Those numbers are illustrative captured fields, not runtime policy. Sunox
+preserves the live values and unknown fields; it does not infer quota from the
+plan name and does not implement credit-pack purchase in this migration. Raw
+`credits --json` preserves unknown response fields for protocol inspection;
+sanitized `capabilities` and mutation-recovery output projects only confirmed
+download fields.
 
 ### Stored stem-result pages and separate Studio multitrack export
 Captured from `13suno-labs-nostudio-20260630.har` and the downloaded

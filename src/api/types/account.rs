@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::Value;
+use serde_json::{Number, Value};
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct BillingInfo {
@@ -20,6 +20,33 @@ pub struct BillingInfo {
     pub renews_on: Option<String>,
     #[serde(default)]
     pub remaster_model_types: Vec<RemasterModelInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_usage: Option<DownloadUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_credit_packs: Option<Vec<DownloadCreditPack>>,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct DownloadUsage {
+    pub current_period_downloads_limit: u64,
+    pub current_period_downloads_used: u64,
+    pub additional_download_remaining: u64,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct DownloadCreditPack {
+    pub id: String,
+    pub amount: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_amount: Option<Number>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_currency_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_usd: Option<Number>,
     #[serde(default, flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -315,6 +342,20 @@ mod tests {
             "period": "monthly",
             "renews_on": null,
             "accessible_features": {"personas": true},
+            "download_usage": {
+                "current_period_downloads_limit": 20,
+                "current_period_downloads_used": 3,
+                "additional_download_remaining": 7,
+                "period_key": "2026-08"
+            },
+            "download_credit_packs": [{
+                "id": "pack-100",
+                "amount": 100,
+                "price_amount": 999,
+                "price_currency_code": "USD",
+                "price_usd": 9.99,
+                "campaign": "launch"
+            }],
             "subscription_platform": "stripe"
         }))
         .expect("deserialize current billing response");
@@ -334,6 +375,28 @@ mod tests {
                 .expect("legacy feature object")
                 .contains("remaster")
         );
+        let usage = billing.download_usage.as_ref().expect("download usage");
+        assert_eq!(usage.current_period_downloads_limit, 20);
+        assert_eq!(usage.current_period_downloads_used, 3);
+        assert_eq!(usage.additional_download_remaining, 7);
+        let pack = &billing
+            .download_credit_packs
+            .as_ref()
+            .expect("download credit packs")[0];
+        assert_eq!(pack.id, "pack-100");
+        assert_eq!(pack.amount, 100);
+        assert_eq!(
+            pack.price_amount.as_ref().expect("price amount").as_u64(),
+            Some(999)
+        );
+        assert_eq!(pack.price_currency_code.as_deref(), Some("USD"));
+        assert_eq!(
+            pack.price_usd
+                .as_ref()
+                .expect("legacy USD price")
+                .to_string(),
+            "9.99"
+        );
 
         let output = serde_json::to_value(billing).expect("serialize billing response");
         assert_eq!(output["accessible_features"]["personas"], true);
@@ -348,6 +411,10 @@ mod tests {
         assert_eq!(output["models"][0]["badges"][0], "custom");
         assert_eq!(output["models"][0]["major_version"], 5);
         assert_eq!(output["models"][0]["max_lengths"]["duration"], 480);
+        assert_eq!(output["download_usage"]["period_key"], "2026-08");
+        assert_eq!(output["download_credit_packs"][0]["campaign"], "launch");
+        assert_eq!(output["download_credit_packs"][0]["price_amount"], 999);
+        assert_eq!(output["download_credit_packs"][0]["price_usd"], 9.99);
         assert!(output.get("extra").is_none());
     }
 

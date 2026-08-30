@@ -7,8 +7,9 @@ use crate::core::CliError;
 use crate::output::{self, OutputFormat};
 
 /// Read or export stem clips that Suno has already produced for a source.
-/// This lookup never starts a paid extraction. WAV/OPUS conversion requested
-/// by the nested download flow remains subject to its own mutation guard.
+/// This lookup never starts a paid extraction. A requested export can authorize
+/// the parent source once, and legacy WAV/OPUS conversion remains subject to
+/// its own mutation guard.
 pub async fn get(args: GetStemsArgs, ctx: &AppContext) -> Result<(), CliError> {
     let client = ctx.client().await?;
     let pages = client.stem_result_pages(&args.clip_id).await?;
@@ -33,7 +34,7 @@ pub async fn get(args: GetStemsArgs, ctx: &AppContext) -> Result<(), CliError> {
         ensure_complete_hydration(&results)?;
         if !ctx.quiet {
             eprintln!(
-                "Downloading existing stems (Suno may meter prepared downloads; stem MP3s skip aligned-lyrics generation, while missing WAV/OPUS files may start conversion unless --no-convert or --read-only is set)..."
+                "Downloading existing stems (the parent source is authorized at most once; stem MP3s skip aligned-lyrics generation, prepared WAV is preferred, and missing legacy WAV/OPUS files may start conversion unless --no-convert or --read-only is set)..."
             );
         }
         let mut seen = HashSet::new();
@@ -49,7 +50,7 @@ pub async fn get(args: GetStemsArgs, ctx: &AppContext) -> Result<(), CliError> {
                 args.clip_id
             )));
         }
-        return super::media::download(
+        return super::media::download_with_shared_source(
             DownloadArgs {
                 ids,
                 output: args.output,
@@ -59,6 +60,7 @@ pub async fn get(args: GetStemsArgs, ctx: &AppContext) -> Result<(), CliError> {
                 no_convert: args.no_convert,
                 skip_timed_lyrics: true,
             },
+            args.clip_id,
             ctx,
         )
         .await;

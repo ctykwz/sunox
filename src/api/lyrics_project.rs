@@ -62,9 +62,12 @@ impl SunoClient {
         let request = LyricsProjectTitleRequest {
             title: web_title(title),
         };
+        let mutation = self
+            .post_without_redirect("/api/lyrics-projects")
+            .json(&request);
         let response = self
-            .post("/api/lyrics-projects")
-            .json(&request)
+            .prepare_mutation_request(mutation)
+            .await?
             .send()
             .await
             .map_err(|error| {
@@ -120,9 +123,10 @@ impl SunoClient {
         let request = LyricsProjectTitleRequest {
             title: web_title(title),
         };
+        let mutation = self.patch_without_redirect(&path).json(&request);
         let response = self
-            .patch(&path)
-            .json(&request)
+            .prepare_mutation_request(mutation)
+            .await?
             .send()
             .await
             .map_err(|error| {
@@ -190,9 +194,10 @@ impl SunoClient {
         let operation_id = uuid::Uuid::new_v4().to_string();
         let path = format!("/api/lyrics-projects/{project_id}/flush");
         let request = FlushLyricsProjectRequest { lyrics };
+        let mutation = self.post_without_redirect(&path).json(&request);
         let response = self
-            .post(&path)
-            .json(&request)
+            .prepare_mutation_request(mutation)
+            .await?
             .send()
             .await
             .map_err(|error| {
@@ -245,16 +250,22 @@ impl SunoClient {
         self.lyrics_project(project_id).await?;
         let operation_id = uuid::Uuid::new_v4().to_string();
         let path = format!("/api/lyrics-projects/{project_id}");
-        let response = self.delete(&path).send().await.map_err(|error| {
-            ambiguous_project_mutation(
-                "lyrics_project_delete",
-                &operation_id,
-                Some(project_id),
-                "request_send",
-                "http_error",
-                error.to_string(),
-            )
-        })?;
+        let mutation = self.delete_without_redirect(&path);
+        let response = self
+            .prepare_mutation_request(mutation)
+            .await?
+            .send()
+            .await
+            .map_err(|error| {
+                ambiguous_project_mutation(
+                    "lyrics_project_delete",
+                    &operation_id,
+                    Some(project_id),
+                    "request_send",
+                    "http_error",
+                    error.to_string(),
+                )
+            })?;
         let response = reject_ambiguous_project_server_error(
             response,
             "lyrics_project_delete",
@@ -355,7 +366,7 @@ async fn reject_ambiguous_project_server_error(
     operation_id: &str,
     project_id: Option<&str>,
 ) -> Result<reqwest::Response, CliError> {
-    if response.status().is_server_error() {
+    if response.status().is_redirection() || response.status().is_server_error() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         return Err(ambiguous_project_mutation(

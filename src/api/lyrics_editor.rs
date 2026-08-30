@@ -65,9 +65,12 @@ impl SunoClient {
             title: options.title,
         };
         let submit = async {
+            let mutation = self
+                .post_without_redirect("/api/generate/lyrics-infill/")
+                .json(&request);
             let response = self
-                .post("/api/generate/lyrics-infill/")
-                .json(&request)
+                .prepare_mutation_request(mutation)
+                .await?
                 .send()
                 .await
                 .map_err(|error| {
@@ -80,7 +83,7 @@ impl SunoClient {
                         None,
                     )
                 })?;
-            if response.status().is_server_error() {
+            if response.status().is_redirection() || response.status().is_server_error() {
                 let status = response.status();
                 let body = response.text().await.unwrap_or_default();
                 return Err(ambiguous_rewrite(
@@ -148,9 +151,12 @@ impl SunoClient {
             create_session_token: options.create_session_token,
             source: "create_ui",
         };
+        let mutation = self
+            .post_without_redirect("/api/generate/lyrics-mashup")
+            .json(&request);
         let response = self
-            .post("/api/generate/lyrics-mashup")
-            .json(&request)
+            .prepare_mutation_request(mutation)
+            .await?
             .send()
             .await
             .map_err(|error| {
@@ -163,7 +169,7 @@ impl SunoClient {
                     None,
                 )
             })?;
-        if response.status().is_server_error() {
+        if response.status().is_redirection() || response.status().is_server_error() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(ambiguous_mashup_submit(

@@ -1321,6 +1321,69 @@ fn agent_info_exposes_the_current_free_model() {
 }
 
 #[test]
+fn agent_info_reports_auto_model_billing_fail_closed() {
+    let output = Command::cargo_bin("sunox")
+        .expect("binary")
+        .args(["agent-info", "--json"])
+        .output()
+        .expect("agent info output");
+    assert!(output.status.success());
+    let info: serde_json::Value = serde_json::from_slice(&output.stdout).expect("agent info json");
+
+    let web_context = info["command_notes"]["create"]["web_context"]
+        .as_str()
+        .expect("create web context");
+    let default_model = info["default_model"]
+        .as_str()
+        .expect("default model guidance");
+
+    assert!(web_context.contains("fails closed"));
+    assert!(web_context.contains("billing"));
+    assert!(default_model.contains("requires a successful billing read"));
+    assert!(!web_context.contains("chirp-auk-turbo"));
+    assert!(!default_model.contains("chirp-auk-turbo"));
+}
+
+#[test]
+fn agent_info_reports_current_download_authorization_contract() {
+    let output = Command::cargo_bin("sunox")
+        .expect("binary")
+        .args(["agent-info", "--json"])
+        .output()
+        .expect("agent info output");
+    assert!(output.status.success());
+    let info: serde_json::Value = serde_json::from_slice(&output.stdout).expect("agent info json");
+
+    let download = &info["command_notes"]["clip download"];
+    let authorization = download["authorization"]
+        .as_str()
+        .expect("download authorization guidance");
+    let route = download["route"].as_str().expect("download route guidance");
+    let billing = download["billing"]
+        .as_str()
+        .expect("download billing guidance");
+    let stems = info["command_notes"]["clip get-stems"]["download"]
+        .as_str()
+        .expect("stem download guidance");
+    let read_only = info["agent_safety"]["read_only"]
+        .as_str()
+        .expect("read-only guidance");
+
+    assert!(authorization.contains("is_download_unlocked=true"));
+    assert!(authorization.contains("POST /api/download/authorize"));
+    assert!(authorization.contains("never blindly replayed"));
+    assert!(route.contains("format=mp3|m4a|wav|mp4"));
+    assert!(route.contains("OPUS"));
+    assert!(billing.contains("current_period_downloads_limit"));
+    assert!(billing.contains("download_credit_packs"));
+    assert!(billing.contains("never hard-codes quota"));
+    assert!(stems.contains("parent source clip"));
+    assert!(stems.contains("at most once"));
+    assert!(read_only.contains("already unlocked source"));
+    assert!(read_only.contains("never calls /api/download/authorize"));
+}
+
+#[test]
 fn agent_info_reports_the_sunox_environment_prefix() {
     let mut cmd = Command::cargo_bin("sunox").expect("binary");
 
@@ -1590,7 +1653,7 @@ fn agent_info_reports_submit_wait_download_workflow() {
         .stdout(predicate::str::contains("stream the file to S3"))
         .stdout(predicate::str::contains("partial or ambiguous mutation"))
         .stdout(predicate::str::contains(
-            "clip get-stems` reads or downloads existing stem banks",
+            "clip get-stems --download` authorizes the parent source",
         ))
         .stdout(predicate::str::contains("sunox download <clip_id>"))
         .stdout(predicate::str::contains(

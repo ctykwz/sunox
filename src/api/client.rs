@@ -1,4 +1,5 @@
 use std::sync::Mutex;
+use std::time::Instant;
 
 use reqwest::Client;
 use serde::de::DeserializeOwned;
@@ -11,6 +12,7 @@ pub(crate) const BASE_URL: &str = "https://studio-api-prod.suno.com";
 
 pub struct SunoClient {
     pub(crate) client: Client,
+    no_redirect_client: Client,
     http1_read_client: Client,
     pub(crate) clerk_client: Client,
     base_url: String,
@@ -21,6 +23,7 @@ pub struct SunoClient {
     /// held briefly to read/clone auth fields; never across awaits.
     pub(crate) auth: Mutex<AuthState>,
     pub(crate) device_override: Mutex<Option<String>>,
+    pub(crate) mutation_auth_preflight_at: Mutex<Option<Instant>>,
 }
 
 impl SunoClient {
@@ -33,11 +36,13 @@ impl SunoClient {
 
         Ok(Self {
             client,
+            no_redirect_client: http::browser_no_redirect_client()?,
             http1_read_client: http::browser_http1_client()?,
             clerk_client,
-            base_url: BASE_URL.to_string(),
+            base_url: api_base_url(),
             auth: Mutex::new(auth),
             device_override: Mutex::new(None),
+            mutation_auth_preflight_at: Mutex::new(None),
         })
     }
 
@@ -47,11 +52,13 @@ impl SunoClient {
     pub(crate) fn new_for_auth_validation(auth: AuthState) -> Result<Self, CliError> {
         Ok(Self {
             client: http::browser_client()?,
+            no_redirect_client: http::browser_no_redirect_client()?,
             http1_read_client: http::browser_http1_client()?,
             clerk_client: http::clerk_client()?,
             base_url: BASE_URL.to_string(),
             auth: Mutex::new(auth),
             device_override: Mutex::new(None),
+            mutation_auth_preflight_at: Mutex::new(None),
         })
     }
 
@@ -59,11 +66,13 @@ impl SunoClient {
     pub(crate) fn new_for_tests(base_url: String, auth: AuthState) -> Result<Self, CliError> {
         Ok(Self {
             client: http::browser_client()?,
+            no_redirect_client: http::browser_no_redirect_client()?,
             http1_read_client: http::browser_http1_client()?,
             clerk_client: http::clerk_client()?,
             base_url: base_url.trim_end_matches('/').to_string(),
             auth: Mutex::new(auth),
             device_override: Mutex::new(None),
+            mutation_auth_preflight_at: Mutex::new(None),
         })
     }
 
@@ -95,16 +104,28 @@ impl SunoClient {
         self.client.post(self.url(path)).headers(self.headers())
     }
 
-    pub(crate) fn patch(&self, path: &str) -> reqwest::RequestBuilder {
-        self.client.patch(self.url(path)).headers(self.headers())
+    pub(crate) fn post_without_redirect(&self, path: &str) -> reqwest::RequestBuilder {
+        self.no_redirect_client
+            .post(self.url(path))
+            .headers(self.headers())
     }
 
-    pub(crate) fn put(&self, path: &str) -> reqwest::RequestBuilder {
-        self.client.put(self.url(path)).headers(self.headers())
+    pub(crate) fn patch_without_redirect(&self, path: &str) -> reqwest::RequestBuilder {
+        self.no_redirect_client
+            .patch(self.url(path))
+            .headers(self.headers())
     }
 
-    pub(crate) fn delete(&self, path: &str) -> reqwest::RequestBuilder {
-        self.client.delete(self.url(path)).headers(self.headers())
+    pub(crate) fn put_without_redirect(&self, path: &str) -> reqwest::RequestBuilder {
+        self.no_redirect_client
+            .put(self.url(path))
+            .headers(self.headers())
+    }
+
+    pub(crate) fn delete_without_redirect(&self, path: &str) -> reqwest::RequestBuilder {
+        self.no_redirect_client
+            .delete(self.url(path))
+            .headers(self.headers())
     }
 
     /// Retry explicitly idempotent reads after transient resets observed with
@@ -179,6 +200,46 @@ impl SunoClient {
     }
 }
 
+fn api_base_url() -> String {
+    #[cfg(debug_assertions)]
+    {
+        debug_test_base_url(std::env::var("SUNOX_TEST_API_BASE_URL").ok().as_deref())
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        BASE_URL.to_string()
+    }
+}
+
+#[cfg(debug_assertions)]
+fn debug_test_base_url(candidate: Option<&str>) -> String {
+    let Some(candidate) = candidate.filter(|value| !value.trim().is_empty()) else {
+        return BASE_URL.to_string();
+    };
+    let Ok(url) = reqwest::Url::parse(candidate) else {
+        return BASE_URL.to_string();
+    };
+    let loopback = url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    if url.scheme() != "http"
+        || !loopback
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != "/"
+    {
+        return BASE_URL.to_string();
+    }
+    candidate.trim_end_matches('/').to_string()
+}
+
 fn is_response_body_transport_error(error: &reqwest::Error) -> bool {
     if error.is_body() {
         return true;
@@ -207,5 +268,27 @@ impl JsonReadError {
         match self {
             Self::Retryable(error) | Self::Fatal(error) => error,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BASE_URL, debug_test_base_url};
+
+    #[test]
+    fn debug_api_override_accepts_only_loopback_http_origins() {
+        assert_eq!(
+            debug_test_base_url(Some("http://127.0.0.1:43123")),
+            "http://127.0.0.1:43123"
+        );
+        assert_eq!(
+            debug_test_base_url(Some("http://[::1]:43123/")),
+            "http://[::1]:43123"
+        );
+        assert_eq!(
+            debug_test_base_url(Some("https://studio-api-prod.suno.com")),
+            BASE_URL
+        );
+        assert_eq!(debug_test_base_url(Some("not a url")), BASE_URL);
     }
 }

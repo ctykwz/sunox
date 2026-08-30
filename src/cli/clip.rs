@@ -438,7 +438,7 @@ pub struct GetStemsArgs {
     #[arg(long)]
     pub page: Option<u32>,
 
-    /// Download returned stems; Suno may meter downloads and convert missing WAV/OPUS files
+    /// Download stems after authorizing the parent at most once; Suno may meter the export
     ///
     /// Stem MP3 downloads never request aligned-lyrics generation.
     #[arg(long)]
@@ -456,7 +456,7 @@ pub struct GetStemsArgs {
     #[arg(long, requires = "download")]
     pub force: bool,
 
-    /// Refuse missing server-side WAV/OPUS conversion
+    /// Refuse missing legacy server-side WAV/OPUS conversion
     #[arg(long, requires = "download")]
     pub no_convert: bool,
 }

@@ -1,4 +1,5 @@
 use super::SunoClient;
+use super::mutation::MutationSpec;
 use super::types::{PromptUpsampleRequest, PromptUpsampleResponse};
 use crate::core::CliError;
 
@@ -27,11 +28,21 @@ impl SunoClient {
         &self,
         req: PromptUpsampleRequest<'_>,
     ) -> Result<PromptUpsampleResponse, CliError> {
-        self.with_auth_retry(|| async {
-            let resp = self.post("/api/prompts/upsample").json(&req).send().await?;
-            let resp = self.check_response(resp).await?;
-            Ok(resp.json().await?)
-        })
-        .await
+        let spec = MutationSpec::new("prompt_upsample", "style tags", Vec::new());
+        let response: PromptUpsampleResponse = self
+            .mutation_json_once(
+                self.post_without_redirect("/api/prompts/upsample")
+                    .json(&req),
+                &spec,
+            )
+            .await?;
+        if response.request_id.trim().is_empty() || response.upsampled.trim().is_empty() {
+            return Err(spec.ambiguous(
+                "response_schema",
+                "schema_drift",
+                "prompt upsample returned a blank request id or result".into(),
+            ));
+        }
+        Ok(response)
     }
 }

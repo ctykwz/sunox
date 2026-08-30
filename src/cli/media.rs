@@ -38,7 +38,7 @@ pub struct UploadStatusArgs {
 
 #[derive(clap::Args)]
 pub struct DownloadArgs {
-    /// Clip ID(s) to download
+    /// Clip ID(s) to download; locked sources are authorized once unless --read-only is set
     pub ids: Vec<String>,
 
     /// Output directory
@@ -49,15 +49,15 @@ pub struct DownloadArgs {
     #[arg(long)]
     pub force: bool,
 
-    /// Download video instead of audio
+    /// Download prepared MP4 video instead of audio
     #[arg(long)]
     pub video: bool,
 
-    /// Audio format to download through Suno's web download endpoints
+    /// Audio format; MP3/M4A/WAV are prepared-first and OPUS is legacy compatibility
     #[arg(long, value_enum)]
     pub format: Option<DownloadFormat>,
 
-    /// Refuse to start server-side WAV/OPUS conversion when no converted file exists
+    /// Refuse legacy server-side WAV/OPUS conversion when no converted file exists
     #[arg(long, conflicts_with = "video")]
     pub no_convert: bool,
 

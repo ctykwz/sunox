@@ -446,7 +446,7 @@ fn ensure_install_directory_writable() -> Result<(), CliError> {
 fn output_update_result(current: &str, latest: &str, up_to_date: bool, ctx: &AppContext) {
     let status = if up_to_date { "up_to_date" } else { "updated" };
     let bridge_configured = !up_to_date
-        && match crate::commands::browser_extension::bridge_is_configured() {
+        && match crate::browser_bridge::bridge_is_configured() {
             Ok(configured) => configured,
             Err(error) => {
                 eprintln!(

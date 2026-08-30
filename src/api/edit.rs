@@ -158,34 +158,45 @@ impl SunoClient {
         Response: DeserializeOwned,
     {
         let operation_id = uuid::Uuid::new_v4().to_string();
-        let response = self
-            .with_auth_retry(|| async {
-                let resp = self
-                    .post(path)
-                    .json(request)
-                    .send()
-                    .await
-                    .map_err(|error| {
-                        ambiguous_edit_submit(
-                            operation,
-                            &operation_id,
-                            source_clip_id,
-                            "request_send",
-                            error,
-                        )
-                    })?;
-                let resp = self.check_response(resp).await?;
-                resp.json().await.map_err(|error| {
+        let response = {
+            let request = self.post_without_redirect(path).json(request);
+            let resp = self
+                .prepare_mutation_request(request)
+                .await?
+                .send()
+                .await
+                .map_err(|error| {
                     ambiguous_edit_submit(
                         operation,
                         &operation_id,
                         source_clip_id,
-                        "response_body",
+                        "request_send",
                         error,
                     )
-                })
+                })?;
+            if resp.status().is_redirection() || resp.status().is_server_error() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(ambiguous_edit_submit_details(
+                    operation,
+                    &operation_id,
+                    source_clip_id,
+                    "response_status",
+                    "http_error",
+                    format!("HTTP {status}: {body}"),
+                ));
+            }
+            let resp = self.check_response(resp).await?;
+            resp.json().await.map_err(|error| {
+                ambiguous_edit_submit(
+                    operation,
+                    &operation_id,
+                    source_clip_id,
+                    "response_body",
+                    error,
+                )
             })
-            .await?;
+        }?;
         Ok(SubmittedEdit {
             response,
             operation_id,

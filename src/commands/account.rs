@@ -1,4 +1,6 @@
-use crate::api::types::{AccessibleFeatures, BillingInfo, MaxLengths};
+use crate::api::types::{
+    AccessibleFeatures, BillingInfo, DownloadCreditPack, DownloadUsage, MaxLengths,
+};
 use crate::app::AppContext;
 use crate::cli::RemasterModel;
 use crate::core::CliError;
@@ -136,14 +138,47 @@ fn capability_report(info: &BillingInfo) -> Value {
         "remaster_models": remaster_models,
         "features": features,
         "limits": safe_account_limits(info),
+        "downloads": {
+            "usage": safe_download_usage_value(info.download_usage.as_ref()),
+            "credit_packs": safe_download_credit_packs_value(info.download_credit_packs.as_deref()),
+        },
         "protocol_safety": {
-            "read_only_mode": "Pass --read-only to reject account-write commands before their first write request.",
+            "read_only_mode": "Pass --read-only to reject account-write commands before their first write request. Downloads then require is_download_unlocked=true and never send authorization.",
             "model_selection": "Generation selectors are resolved against current billing data by display name, external key, or account model id; unusable and ambiguous matches fail closed.",
             "remaster": "The plan feature, selected remaster model, source clip state, and source action_config are checked before submission.",
-            "downloads": "Downloads use Suno's prepared-format endpoints. A download may be plan-metered even though it is a GET.",
-            "audio_conversion": "WAV/OPUS first read an existing file; conversion is a POST and can be forbidden with --no-convert.",
-            "ambiguous_writes": "A lost or unusable response after generation, Remaster, conversion, Voice creation, Custom Model training/archive, a lyrics-project write, visual generation, or another submitted edit is reported with recovery evidence; it must not be blindly retried.",
+            "downloads": "Only is_download_unlocked=true skips the one-shot authorization POST. MP3/M4A/WAV/mp4 are prepared-first; Stems authorize their parent once. Authorization and download may be plan-metered.",
+            "audio_conversion": "Prepared WAV is attempted first. Legacy WAV/OPUS conversion is a separate POST after source unlock and can be forbidden with --no-convert.",
+            "ambiguous_writes": "A lost or unusable response after download authorization, generation, Remaster, conversion, Voice creation, Custom Model training/archive, a lyrics-project write, visual generation, or another submitted edit is reported with recovery evidence; it must not be blindly retried.",
         }
+    })
+}
+
+pub(super) fn safe_download_usage_value(usage: Option<&DownloadUsage>) -> Value {
+    usage.map_or(Value::Null, |usage| {
+        json!({
+            "current_period_downloads_limit": usage.current_period_downloads_limit,
+            "current_period_downloads_used": usage.current_period_downloads_used,
+            "additional_download_remaining": usage.additional_download_remaining,
+        })
+    })
+}
+
+fn safe_download_credit_packs_value(packs: Option<&[DownloadCreditPack]>) -> Value {
+    packs.map_or(Value::Null, |packs| {
+        Value::Array(
+            packs
+                .iter()
+                .map(|pack| {
+                    json!({
+                        "id": pack.id,
+                        "amount": pack.amount,
+                        "price_amount": pack.price_amount.as_ref(),
+                        "price_currency_code": pack.price_currency_code.as_deref(),
+                        "price_usd": pack.price_usd.as_ref(),
+                    })
+                })
+                .collect(),
+        )
     })
 }
 
@@ -251,7 +286,7 @@ fn feature_coverage(name: &str) -> FeatureCoverage {
         "convert_audio" => (
             "supported",
             &["download --format wav", "download --format opus"],
-            "GET-first; --no-convert prevents starting a missing conversion.",
+            "Prepared WAV is preferred; legacy WAV/OPUS conversion requires an unlocked source, and --no-convert prevents starting it.",
         ),
         "edit_mode" => (
             "partial",
@@ -334,6 +369,26 @@ fn safe_account_limits(info: &BillingInfo) -> BTreeMap<String, Value> {
         "monthly_credit_limit".to_owned(),
         Value::from(info.monthly_limit),
     )]);
+    if let Some(usage) = &info.download_usage {
+        limits.insert(
+            "downloads.current_period_limit".to_owned(),
+            Value::from(usage.current_period_downloads_limit),
+        );
+        limits.insert(
+            "downloads.current_period_used".to_owned(),
+            Value::from(usage.current_period_downloads_used),
+        );
+        limits.insert(
+            "downloads.additional_remaining".to_owned(),
+            Value::from(usage.additional_download_remaining),
+        );
+    }
+    if let Some(packs) = &info.download_credit_packs {
+        limits.insert(
+            "downloads.credit_pack_count".to_owned(),
+            Value::from(packs.len() as u64),
+        );
+    }
     collect_safe_limits("billing", &info.extra, &mut limits);
     collect_safe_limits("plan", &info.plan.extra, &mut limits);
     limits
@@ -544,6 +599,19 @@ mod tests {
             }],
             "period": "monthly",
             "renews_on": null,
+            "download_usage": {
+                "current_period_downloads_limit": 20,
+                "current_period_downloads_used": 4,
+                "additional_download_remaining": 2,
+                "session_token": "must-not-leak-download-usage"
+            },
+            "download_credit_packs": [{
+                "id": "pack-100",
+                "amount": 100,
+                "price_amount": 999,
+                "price_currency_code": "USD",
+                "customer_token": "must-not-leak-download-pack"
+            }],
             "remaster_model_types": [{
                 "name": "v5.5",
                 "external_key": "chirp-flounder",
@@ -597,8 +665,21 @@ mod tests {
         assert!(
             report["protocol_safety"]["ambiguous_writes"]
                 .as_str()
-                .is_some_and(|message| message.contains("conversion") && message.contains("edit"))
+                .is_some_and(|message| message.contains("download authorization")
+                    && message.contains("conversion")
+                    && message.contains("edit"))
         );
+        assert!(
+            report["protocol_safety"]["downloads"]
+                .as_str()
+                .is_some_and(|message| message.contains("is_download_unlocked=true")
+                    && message.contains("parent once"))
+        );
+        assert_eq!(
+            report["downloads"]["usage"]["current_period_downloads_limit"],
+            20
+        );
+        assert_eq!(report["downloads"]["credit_packs"][0]["id"], "pack-100");
         assert!(report.to_string().contains("audio_upload_limits"));
         assert!(!report.to_string().contains("must-not-leak"));
         assert_eq!(
@@ -674,6 +755,10 @@ mod tests {
     #[test]
     fn safe_limits_keep_only_recursive_numeric_and_boolean_metrics() {
         let limits = safe_account_limits(&billing_fixture());
+        assert_eq!(limits["downloads.current_period_limit"], 20);
+        assert_eq!(limits["downloads.current_period_used"], 4);
+        assert_eq!(limits["downloads.additional_remaining"], 2);
+        assert_eq!(limits["downloads.credit_pack_count"], 1);
         assert!(limits.contains_key("billing.audio_upload_limits"));
         assert!(limits.contains_key("plan.voice_limits"));
         assert!(!limits.keys().any(|key| key.contains("token")));

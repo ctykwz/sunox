@@ -6,9 +6,9 @@ use tokio::net::{TcpStream, lookup_host};
 use tokio::time::timeout;
 
 use crate::app::AppContext;
-use crate::captcha::bridge_contract::{BROWSER_BRIDGE_RUNTIME_BUILD, PROTOCOL_VERSION};
+use crate::browser_bridge::contract::{BROWSER_BRIDGE_RUNTIME_BUILD, PROTOCOL_VERSION};
+use crate::browser_bridge::{BridgePairingStatus, PendingActivation};
 use crate::captcha::{BridgeProbe, BridgeProbeStatus};
-use crate::commands::browser_extension::{BridgePairingStatus, PendingActivation};
 use crate::core::CliError;
 use crate::output::{self, OutputFormat};
 
@@ -71,7 +71,7 @@ struct BrowserBridgeReport {
 }
 
 pub async fn browser_bridge(ctx: &AppContext) -> Result<(), CliError> {
-    let pairing_status_before_probe = crate::commands::browser_extension::bridge_pairing_status();
+    let pairing_status_before_probe = crate::browser_bridge::bridge_pairing_status();
     let probe = if matches!(
         pairing_status_before_probe,
         BridgePairingStatus::PairingMissing
@@ -90,14 +90,14 @@ pub async fn browser_bridge(ctx: &AppContext) -> Result<(), CliError> {
     // Pairing can be repaired or removed while a ten-second probe is in
     // flight. Report the final filesystem state rather than the preflight
     // snapshot used only to decide whether probing was safe.
-    let mut pairing_status = crate::commands::browser_extension::bridge_pairing_status();
+    let mut pairing_status = crate::browser_bridge::bridge_pairing_status();
     // A responsive probe authenticates the exact runtime build and pairing
     // secret, which clears this marker before we read it.
     let pending_activation = if pairing_status == BridgePairingStatus::Present {
-        match crate::commands::browser_extension::pending_activation() {
+        match crate::browser_bridge::pending_activation() {
             Ok(pending) => pending,
             Err(_) => {
-                let refreshed = crate::commands::browser_extension::bridge_pairing_status();
+                let refreshed = crate::browser_bridge::bridge_pairing_status();
                 pairing_status = if refreshed == BridgePairingStatus::Present {
                     BridgePairingStatus::UnsafeOrInaccessible
                 } else {
@@ -428,8 +428,8 @@ mod tests {
         NetworkTarget, ProbeStage, browser_bridge_failure, browser_bridge_report, network_usable,
         stage_summary, timed_stage,
     };
+    use crate::browser_bridge::{BridgePairingStatus, PendingActivation};
     use crate::captcha::{BridgeProbe, BridgeProbeStatus};
-    use crate::commands::browser_extension::{BridgePairingStatus, PendingActivation};
 
     #[test]
     fn stage_summary_includes_http_status() {

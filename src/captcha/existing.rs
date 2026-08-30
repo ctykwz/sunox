@@ -14,12 +14,12 @@ use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
 use crate::api::challenge::ChallengeProvider;
-use crate::captcha::bridge_contract::{
+use crate::browser_bridge;
+use crate::browser_bridge::contract::{
     BROWSER_BRIDGE_RUNTIME_BUILD, LOOPBACK_PORT_COUNT as PORT_COUNT,
     LOOPBACK_PORT_START as PORT_START, PROTOCOL_VERSION,
 };
 use crate::captcha::{BridgeProbe, BridgeProbeStatus};
-use crate::commands::browser_extension;
 use crate::core::CliError;
 
 const ACTIVE_TAB_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
@@ -297,7 +297,7 @@ impl HttpResponse {
 }
 
 pub(super) async fn try_solve(provider: ChallengeProvider) -> Result<Option<String>, CliError> {
-    let Some(secret) = browser_extension::bridge_secret()? else {
+    let Some(secret) = browser_bridge::bridge_secret()? else {
         return Ok(None);
     };
 
@@ -399,9 +399,9 @@ async fn finish_or_close_timed_out_result(
 
 pub(crate) async fn probe() -> Result<BridgeProbe, CliError> {
     let started = Instant::now();
-    let Some(secret) = browser_extension::bridge_secret()? else {
+    let Some(secret) = browser_bridge::bridge_secret()? else {
         return Ok(BridgeProbe {
-            status: missing_secret_probe_status(browser_extension::bridge_is_configured()?),
+            status: missing_secret_probe_status(browser_bridge::bridge_is_configured()?),
             port: None,
             occupied_ports: Vec::new(),
             bridge_occupied_ports: Vec::new(),
@@ -501,11 +501,11 @@ async fn probe_with_secret_in_range(
 }
 
 pub(super) fn is_configured() -> Result<bool, CliError> {
-    browser_extension::bridge_is_configured()
+    browser_bridge::bridge_is_configured()
 }
 
 fn acknowledge_loaded_runtime(authenticated_secret: &str) {
-    if let Err(error) = browser_extension::acknowledge_runtime_build(
+    if let Err(error) = browser_bridge::acknowledge_runtime_build(
         BROWSER_BRIDGE_RUNTIME_BUILD,
         authenticated_secret,
     ) {
@@ -1237,9 +1237,9 @@ mod tests {
         wait_for_probe_ack_signal, write_response,
     };
     use crate::api::challenge::ChallengeProvider;
+    use crate::browser_bridge::contract::BROWSER_BRIDGE_RUNTIME_BUILD;
     use crate::captcha::{
         BridgeProbeStatus, SUNO_CHALLENGE_SDK_READY_TIMEOUT_MS, SUNO_HCAPTCHA_SILENT_TIMEOUT_MS,
-        bridge_contract::BROWSER_BRIDGE_RUNTIME_BUILD,
     };
 
     static PROBE_PORT_TEST_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());

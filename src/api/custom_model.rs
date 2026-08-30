@@ -108,9 +108,12 @@ impl SunoClient {
 
         let operation_id = uuid::Uuid::new_v4().to_string();
         let request = CreateCustomModelRequest { clip_ids, name };
+        let mutation = self
+            .post_without_redirect("/api/custom-model/create/")
+            .json(&request);
         let response = self
-            .post("/api/custom-model/create/")
-            .json(&request)
+            .prepare_mutation_request(mutation)
+            .await?
             .send()
             .await
             .map_err(|error| {
@@ -123,7 +126,7 @@ impl SunoClient {
                     error.to_string(),
                 )
             })?;
-        if response.status().is_server_error() {
+        if response.status().is_redirection() || response.status().is_server_error() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(ambiguous_custom_model_create(
@@ -222,9 +225,12 @@ impl SunoClient {
         }
 
         let operation_id = uuid::Uuid::new_v4().to_string();
+        let request = self
+            .post_without_redirect("/api/custom-model/archive/")
+            .json(&ArchiveCustomModelRequest { id: model_id });
         let response = self
-            .post("/api/custom-model/archive/")
-            .json(&ArchiveCustomModelRequest { id: model_id })
+            .prepare_mutation_request(request)
+            .await?
             .send()
             .await
             .map_err(|error| {
@@ -235,7 +241,7 @@ impl SunoClient {
                     error.to_string(),
                 )
             })?;
-        if response.status().is_server_error() {
+        if response.status().is_redirection() || response.status().is_server_error() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(ambiguous_custom_model_archive(

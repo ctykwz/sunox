@@ -210,6 +210,14 @@ fn clip_mutation_error(
         return error;
     }
 
+    let mut failed = json!({
+        "clip_id": failed_clip_id,
+        "code": error.error_code(),
+        "message": error.to_string()
+    });
+    if let Some(error_details) = error.details() {
+        failed["details"] = error_details.clone();
+    }
     CliError::PartialMutation {
         message: format!(
             "{operation} completed for {} clip(s), failed for {failed_clip_id}, and left {} clip(s) not attempted",
@@ -219,11 +227,7 @@ fn clip_mutation_error(
         details: json!({
             "operation": operation,
             "succeeded_clip_ids": succeeded_clip_ids,
-            "failed": {
-                "clip_id": failed_clip_id,
-                "code": error.error_code(),
-                "message": error.to_string()
-            },
+            "failed": failed,
             "not_attempted_clip_ids": not_attempted_clip_ids
         }),
     }

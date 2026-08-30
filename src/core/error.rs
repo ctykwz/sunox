@@ -245,7 +245,25 @@ impl CliError {
                 "Do not blindly retry: Suno may have accepted the write. Inspect error.details and run its read-only inspection commands first"
             }
             Self::PartialDownload { .. } => {
-                "Inspect error.details for succeeded paths, the failed clip, and not_attempted IDs before retrying"
+                "Inspect error.details for succeeded paths, authorized_sources, the failed clip, and not_attempted IDs before retrying"
+            }
+            Self::Diagnostic {
+                code: "download_authorization_required",
+                ..
+            } => {
+                "Inspect the source clip and live download usage; remove --read-only only when consuming download allowance is intentional"
+            }
+            Self::Diagnostic {
+                code: "download_authorization_denied",
+                ..
+            } => {
+                "Inspect error.details.reason and `sunox credits --json`; do not retry until the reported account or allowance condition changes"
+            }
+            Self::Diagnostic {
+                code: "prepared_download_unavailable",
+                ..
+            } => {
+                "Verify the clip is complete and unlocked; retry only after Suno reports the requested prepared format as available"
             }
             Self::Diagnostic { .. } => {
                 "Inspect error.details for the failed diagnostic stages and correct the reported environment problem"
@@ -414,5 +432,22 @@ mod tests {
         assert!(error.suggestion().contains("--no-captcha"));
         assert!(error.suggestion().contains("--token"));
         assert!(!error.suggestion().contains("doctor"));
+    }
+
+    #[test]
+    fn download_diagnostics_have_protocol_specific_recovery_guidance() {
+        for (code, expected) in [
+            ("download_authorization_required", "--read-only"),
+            ("download_authorization_denied", "credits"),
+            ("prepared_download_unavailable", "prepared format"),
+        ] {
+            let error = CliError::Diagnostic {
+                code,
+                message: "fixture".into(),
+                details: serde_json::json!({}),
+            };
+            assert!(error.suggestion().contains(expected));
+            assert!(!error.suggestion().contains("environment problem"));
+        }
     }
 }

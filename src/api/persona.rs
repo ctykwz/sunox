@@ -1,6 +1,7 @@
 use serde_json::Value;
 
 use super::SunoClient;
+use super::mutation::MutationSpec;
 use super::types::{
     CreatePersonaRequest, EditPersonaRequest, PersonaClipsResponse, PersonaInfo,
     PersonaListResponse, PersonaListScope, TogglePersonaLoveResponse, TrashPersonasResponse,
@@ -78,27 +79,51 @@ impl SunoClient {
         &self,
         req: &CreatePersonaRequest,
     ) -> Result<PersonaInfo, CliError> {
-        self.with_auth_retry(|| async {
-            let resp = self.post("/api/persona/create/").json(req).send().await?;
-            let resp = self.check_response(resp).await?;
-            decode_persona(resp.json().await?)
-        })
-        .await
+        let spec = persona_mutation_spec("persona_create", None);
+        let body = self
+            .mutation_json_once(
+                self.post_without_redirect("/api/persona/create/").json(req),
+                &spec,
+            )
+            .await?;
+        let persona = decode_persona(body).map_err(|error| {
+            spec.ambiguous("response_schema", error.error_code(), error.to_string())
+        })?;
+        if persona.id.trim().is_empty() {
+            return Err(spec.ambiguous(
+                "response_schema",
+                "schema_drift",
+                "persona create returned a blank id".into(),
+            ));
+        }
+        Ok(persona)
     }
 
     /// Update voice persona metadata and vocal source fields.
     /// PUT /api/persona/edit-persona/{persona_id}/
     pub async fn edit_persona(&self, req: &EditPersonaRequest) -> Result<PersonaInfo, CliError> {
-        self.with_auth_retry(|| async {
-            let resp = self
-                .put(&format!("/api/persona/edit-persona/{}/", req.persona_id))
-                .json(req)
-                .send()
-                .await?;
-            let resp = self.check_response(resp).await?;
-            decode_persona(resp.json().await?)
-        })
-        .await
+        let spec = persona_mutation_spec("persona_edit", Some(&req.persona_id));
+        let body = self
+            .mutation_json_once(
+                self.put_without_redirect(&format!(
+                    "/api/persona/edit-persona/{}/",
+                    req.persona_id
+                ))
+                .json(req),
+                &spec,
+            )
+            .await?;
+        let persona = decode_persona(body).map_err(|error| {
+            spec.ambiguous("response_schema", error.error_code(), error.to_string())
+        })?;
+        if persona.id != req.persona_id {
+            return Err(spec.ambiguous(
+                "response_schema",
+                "schema_drift",
+                format!("persona edit returned id `{}`", persona.id),
+            ));
+        }
+        Ok(persona)
     }
 
     /// Toggle loved/favorite state for a persona.
@@ -107,14 +132,11 @@ impl SunoClient {
         &self,
         persona_id: &str,
     ) -> Result<TogglePersonaLoveResponse, CliError> {
-        self.with_auth_retry(|| async {
-            let resp = self
-                .post(&format!("/api/persona/{persona_id}/toggle_love/"))
-                .send()
-                .await?;
-            let resp = self.check_response(resp).await?;
-            Ok(resp.json().await?)
-        })
+        let spec = persona_mutation_spec("persona_toggle_love", Some(persona_id));
+        self.mutation_json_once(
+            self.post_without_redirect(&format!("/api/persona/{persona_id}/toggle_love/")),
+            &spec,
+        )
         .await
     }
 
@@ -130,7 +152,17 @@ impl SunoClient {
                 extra: Default::default(),
             });
         }
-        self.toggle_persona_love(persona_id).await
+        let response = self.toggle_persona_love(persona_id).await?;
+        if response.loved != loved {
+            let spec = persona_mutation_spec("persona_set_love", Some(persona_id))
+                .with_context("loved", serde_json::json!(loved));
+            return Err(spec.ambiguous(
+                "response_state",
+                "state_mismatch",
+                format!("persona love response returned loved={}", response.loved),
+            ));
+        }
+        Ok(response)
     }
 
     /// Set persona public/private visibility.
@@ -140,16 +172,29 @@ impl SunoClient {
         persona_id: &str,
         is_public: bool,
     ) -> Result<PersonaInfo, CliError> {
-        self.with_auth_retry(|| async {
-            let resp = self
-                .put(&format!("/api/persona/set_visibility/{persona_id}/"))
-                .query(&[("is_public", is_public.to_string())])
-                .send()
-                .await?;
-            let resp = self.check_response(resp).await?;
-            decode_persona(resp.json().await?)
-        })
-        .await
+        let spec = persona_mutation_spec("persona_set_visibility", Some(persona_id))
+            .with_context("is_public", serde_json::json!(is_public));
+        let body = self
+            .mutation_json_once(
+                self.put_without_redirect(&format!("/api/persona/set_visibility/{persona_id}/"))
+                    .query(&[("is_public", is_public.to_string())]),
+                &spec,
+            )
+            .await?;
+        let persona = decode_persona(body).map_err(|error| {
+            spec.ambiguous("response_schema", error.error_code(), error.to_string())
+        })?;
+        if persona.id != persona_id || persona.is_public != Some(is_public) {
+            return Err(spec.ambiguous(
+                "response_schema",
+                "schema_drift",
+                format!(
+                    "persona visibility response returned id `{}` and is_public {:?}",
+                    persona.id, persona.is_public
+                ),
+            ));
+        }
+        Ok(persona)
     }
 
     /// Move personas to trash.
@@ -201,25 +246,50 @@ impl SunoClient {
         };
 
         for (index, persona_id) in persona_ids.iter().enumerate() {
+            let spec = persona_mutation_spec(operation, Some(persona_id))
+                .with_context("undo", serde_json::json!(undo))
+                .with_context("hide", serde_json::json!(hide));
             let response = match self
-                .with_auth_retry(|| async {
-                    let resp = self
-                        .put(&format!("/api/persona/trash-persona/{persona_id}/"))
-                        .query(&[("undo", undo), ("hide", hide)])
-                        .send()
-                        .await?;
-                    let resp = self.check_response(resp).await?;
-                    let body = resp.text().await?;
-                    if body.trim().is_empty() {
-                        return Ok(None);
-                    }
-                    Ok(Some(serde_json::from_str::<TrashPersonasResponse>(&body)?))
-                })
+                .mutation_text_once(
+                    self.put_without_redirect(&format!("/api/persona/trash-persona/{persona_id}/"))
+                        .query(&[("undo", undo), ("hide", hide)]),
+                    &spec,
+                )
                 .await
-            {
+                .and_then(|body| {
+                    if body.trim().is_empty() {
+                        return Err(spec.ambiguous(
+                            "response_body",
+                            "schema_drift",
+                            "persona trash mutation returned an empty accepted response".into(),
+                        ));
+                    }
+                    let response =
+                        serde_json::from_str::<TrashPersonasResponse>(&body).map_err(|error| {
+                            spec.ambiguous("response_body", "schema_drift", error.to_string())
+                        })?;
+                    if !response.updated_persona_ids.contains(persona_id) {
+                        return Err(spec.ambiguous(
+                            "response_state",
+                            "state_mismatch",
+                            format!(
+                                "persona trash response did not confirm requested id `{persona_id}`"
+                            ),
+                        ));
+                    }
+                    Ok(response)
+                }) {
                 Ok(response) => response,
                 Err(error) if result.updated_persona_ids.is_empty() => return Err(error),
                 Err(error) => {
+                    let mut failed = serde_json::json!({
+                        "persona_id": persona_id,
+                        "code": error.error_code(),
+                        "message": error.to_string()
+                    });
+                    if let Some(error_details) = error.details() {
+                        failed["details"] = error_details.clone();
+                    }
                     return Err(CliError::PartialMutation {
                         message: format!(
                             "{operation} completed for {} persona(s), failed for {persona_id}, and left {} persona(s) not attempted",
@@ -230,11 +300,7 @@ impl SunoClient {
                             "operation": operation,
                             "requested_persona_ids": persona_ids,
                             "succeeded_persona_ids": result.updated_persona_ids,
-                            "failed": {
-                                "persona_id": persona_id,
-                                "code": error.error_code(),
-                                "message": error.to_string()
-                            },
+                            "failed": failed,
                             "not_attempted_persona_ids": &persona_ids[index + 1..]
                         }),
                     });
@@ -242,15 +308,30 @@ impl SunoClient {
             };
 
             result.updated_persona_ids.push(persona_id.clone());
-            if let Some(response) = response {
-                result.voice_persona_count = response.voice_persona_count;
-                result.max_voice_personas = response.max_voice_personas;
-                result.extra.extend(response.extra);
-            }
+            result.voice_persona_count = response.voice_persona_count;
+            result.max_voice_personas = response.max_voice_personas;
+            result.extra.extend(response.extra);
         }
 
         Ok(result)
     }
+}
+
+fn persona_mutation_spec(operation: &'static str, persona_id: Option<&str>) -> MutationSpec {
+    let resource = persona_id
+        .map(|id| format!("persona {id}"))
+        .unwrap_or_else(|| "new persona".to_string());
+    let commands = persona_id
+        .map(|id| vec![format!("sunox persona info {id} --json")])
+        .unwrap_or_else(|| vec!["sunox persona list --json".into()]);
+    let mut spec = MutationSpec::new(operation, resource, commands);
+    if let Some(persona_id) = persona_id {
+        spec = spec.with_context(
+            "persona_id",
+            serde_json::Value::String(persona_id.to_string()),
+        );
+    }
+    spec
 }
 
 fn decode_persona(body: Value) -> Result<PersonaInfo, CliError> {

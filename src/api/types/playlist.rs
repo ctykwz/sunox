@@ -27,8 +27,8 @@ pub struct PlaylistInfo {
     pub cover_url: Option<String>,
     pub cover_image_s3_id: Option<String>,
     pub cover_is_user_set: Option<bool>,
-    pub is_public: bool,
-    pub is_trashed: bool,
+    pub is_public: Option<bool>,
+    pub is_trashed: Option<bool>,
     pub song_count: Option<u64>,
     pub num_total_results: Option<u64>,
     pub clip_ids: Vec<String>,
@@ -122,13 +122,11 @@ impl<'de> Deserialize<'de> for PlaylistInfo {
                 .or_else(|| bool_field(metadata.as_ref(), "cover_is_user_set")),
             is_public: raw
                 .is_public
-                .or_else(|| bool_field(metadata.as_ref(), "is_public"))
-                .unwrap_or(false),
+                .or_else(|| bool_field(metadata.as_ref(), "is_public")),
             is_trashed: raw
                 .is_trashed
                 .or_else(|| bool_field(metadata.as_ref(), "is_trashed"))
-                .or_else(|| bool_field(relationship.as_ref(), "is_trashed"))
-                .unwrap_or(false),
+                .or_else(|| bool_field(relationship.as_ref(), "is_trashed")),
             song_count: raw
                 .song_count
                 .or_else(|| u64_field(metadata.as_ref(), "song_count"))
@@ -265,6 +263,8 @@ pub struct PlaylistTrackMutationFailure {
     pub clip_id: String,
     pub error_code: String,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
 }
 
 impl PlaylistTrackMutationFailure {
@@ -273,6 +273,7 @@ impl PlaylistTrackMutationFailure {
             clip_id: clip_id.to_string(),
             error_code: error.error_code().to_string(),
             message: error.to_string(),
+            details: error.details().cloned(),
         }
     }
 }
@@ -425,8 +426,8 @@ mod tests {
         assert_eq!(playlist.name, "番茄");
         assert_eq!(playlist.song_count, Some(9));
         assert_eq!(playlist.clip_count(), 9);
-        assert!(!playlist.is_public);
-        assert!(!playlist.is_trashed);
+        assert_eq!(playlist.is_public, Some(false));
+        assert_eq!(playlist.is_trashed, Some(false));
 
         let output = serde_json::to_value(&playlist).expect("serialize normalized playlist");
         assert_eq!(output["metadata"]["owner"]["handle"], "owner-handle");
