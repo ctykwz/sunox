@@ -9,13 +9,27 @@ use crate::core::CliError;
 
 pub async fn run() -> Result<(), CliError> {
     let cli = Cli::parse();
+    // Local repairs must remain reachable when runtime config is invalid.
+    // No business command is dispatched with a fallback/default context.
+    if let Some(Commands::Config(ConfigArgs {
+        action: ConfigAction::Set { key, value },
+    })) = &cli.command
+    {
+        return commands::config::set(
+            key,
+            value,
+            crate::output::OutputFormat::detect(cli.json),
+            &cli.config_overrides,
+        );
+    }
     let ctx = AppContext::new(
         cli.json,
         cli.quiet,
         cli.parallel,
         cli.read_only,
         &cli.config_overrides,
-    )?;
+    )
+    .map_err(commands::config::with_config_path)?;
     let Cli {
         prompt, command, ..
     } = cli;
@@ -61,6 +75,9 @@ async fn dispatch_command(
                     vocal: None,
                     weirdness: None,
                     style_influence: None,
+                    variety: None,
+                    mumble: false,
+                    max_mode: false,
                     enhance_tags: false,
                     instrumental: false,
                     token: None,
@@ -150,6 +167,9 @@ async fn run_clip(command: ClipCommand, ctx: &AppContext) -> Result<(), CliError
         ClipCommand::Extend(args) => commands::create::extend(args, ctx).await,
         ClipCommand::Concat(args) => commands::create::concat(args, ctx).await,
         ClipCommand::Cover(args) => commands::create::cover(args, ctx).await,
+        ClipCommand::Reuse(args) => commands::create::reuse(args, ctx).await,
+        ClipCommand::Underpaint(args) => commands::create::underpaint(args, ctx).await,
+        ClipCommand::Overpaint(args) => commands::create::overpaint(args, ctx).await,
         ClipCommand::Inspire(args) => commands::create::inspire(args, ctx).await,
         ClipCommand::Remaster(args) => commands::create::remaster(args, ctx).await,
         ClipCommand::Speed(args) => commands::create::speed(args, ctx).await,

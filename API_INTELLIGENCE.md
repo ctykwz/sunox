@@ -1,4 +1,4 @@
-# Suno API Intelligence — Reverse-Engineered through August 30, 2026
+# Suno API Intelligence — Reverse-Engineered through September 11, 2026
 
 Implementation notes in this file were refreshed for the Rust CLI structure on
 June 30, 2026. Non-Studio page-load traffic was recaptured from the user's
@@ -14,8 +14,15 @@ route and response envelope remain stable, while the request builder now uses
 the actual `/create` pathname, distinguishes uploaded-audio continuation as
 `task: "upload_extend"`, exposes Cowrite model discovery at
 `GET /api/generate/cowrite-lyrics/models/`, and supports `audio_weight` plus
-account-gated `aug_creativity` in `metadata.control_sliders`. Sunox implements
-the applicable `audio_weight` control and leaves the gated control unexposed.
+session-gated whole-number `aug_creativity` in `metadata.control_sliders` (0 through 4). Sunox now
+implements both controls. September 11 live v6 submissions confirmed that fractional
+`aug_creativity` is rejected and integer values are preserved. Current Web code additionally gates
+Variety, Mumble, and Max Mode with `/api/session/` flags `aug-creativity`, `mumble-mode`, and `max-mode`; Sunox checks those flags
+before submission. The audited account has `max-mode` but not `mumble-mode`, matching an earlier
+request whose `is_mumble=true` was cleared by the server. `is_max_mode=true` is preserved but may
+produce output much longer than the requested duration. A description-mode request with a 10-second
+duration was also accepted but completed at about 73 and 80 seconds, so Sunox exposes duration only
+for v6 Custom mode, matching the current Web builder.
 
 A deeper August 23 audit also compared account model capabilities, exact
 condition combinations, playlist v2 bodies, flat playlist responses, and audio
@@ -284,12 +291,16 @@ Mutation or credit-risk surfaces that need explicit confirmation before capture:
 
 ## Models (from /api/billing/info/)
 
-Read-only account response rechecked on 2026-07-10. Availability and defaults are account-specific;
-the length limits below are the values returned by that response.
+Read-only account response rechecked on 2026-09-11. Availability and defaults are account-specific;
+the length limits below are the values returned by that response. Older models remain selectable only
+when the current account continues to return them as usable.
 
 | Display Name | External Key | Default | Max Prompt | Max Tags | Max Neg Tags | Max GPT Desc |
 |---|---|---|---|---|---|---|
-| **v5.5** | `chirp-fenix` | **YES** | 5000 | 1000 | 1000 | 3000 |
+| **v6** | `chirp-hawk` | **YES** | 5000 | 1000 | 1000 | 3000 |
+| v6-wild | `chirp-hawk-wild` | No | 5000 | 1000 | 1000 | 3000 |
+| v6-mini | `chirp-goose` | No | 5000 | 1000 | 1000 | 3000 |
+| v5.5 | `chirp-fenix` | No | 5000 | 1000 | 1000 | 3000 |
 | v5 | `chirp-crow` | No | 5000 | 1000 | 1000 | 3000 |
 | v4.5+ | `chirp-bluejay` | No | 5000 | 1000 | 1000 | 3000 |
 | v4.5 | `chirp-auk` | No | 5000 | 1000 | 1000 | 3000 |
@@ -302,7 +313,8 @@ the length limits below are the values returned by that response.
 ### Remaster Models
 | Name | Key |
 |---|---|
-| v5.5 (default) | `chirp-flounder` |
+| v6 (default) | `chirp-halibut` |
+| v5.5 | `chirp-flounder` |
 | v5 | `chirp-carp` |
 | v4.5+ | `chirp-bass` |
 
@@ -315,8 +327,8 @@ Returns full account info, credits, plan, models, features, limits.
 Standalone whole-lyrics route captured in the July 26, 2026 Web bundle and a
 live authenticated request, then re-confirmed by the current first-party
 interaction chunk and one authorized minimal submission during the preceding
-August 24 protocol audit. That submission predates this 0.3.0 implementation
-pass; implementation and verification for this release made no account writes.
+August 24 protocol audit. That submission predates the 0.3.0 Cowrite implementation
+pass; that endpoint's implementation verification made no additional account writes.
 The editor calls its empty UI state
 `fresh_generate`, but that value was not an API mode: the final request sent the
 user's request as `instruction` with `mode: "apply_user_request"`:
@@ -421,6 +433,21 @@ The same July 3 capture included `metadata.lyrics_model: "remi-v1"` because a
 lyrics-subject flow selected that model. The current ordinary custom-lyrics
 builder does not send `metadata.lyrics_model`; simple description mode defaults
 it to `"default"`.
+
+The September 11, 2026 live v6 Pro validation established these additional
+server boundaries. `metadata.control_sliders.aug_creativity` must be a whole
+number from 0 through 4; an attempted fractional value returned a deterministic
+400 and produced no clip. Integer Variety values were preserved in completed
+clips. The server accepted a request containing `metadata.is_mumble=true`, but
+both its submission response and completed clips returned `is_mumble=false`. A subsequent current
+Web audit identified the missing `/api/session/` flag `mumble-mode`; the model's `mumble_mode`
+feature is necessary but not sufficient. Variety likewise follows the current Web `aug-creativity` session gate:
+explicit values fail closed when it is absent, while gated defaults are omitted. Sunox now requires the applicable gates before submission. A Max Mode request preserved
+`metadata.is_max_mode=true`, but one output substantially exceeded the requested
+short duration. Sunox also requires session flag `max-mode` in addition to the billing entitlement
+and supported model. In Max Mode, final length is server-authoritative. Separately, a v6 description
+request carrying top-level `duration: 10` completed at about 72.68 and 79.8 seconds. Acceptance did
+not mean compliance, and the current Web sends duration only in Custom mode.
 
 **Challenge handling**: The web calls `POST /api/c/check` with
 `{"ctype":"generation"}` before submit. Rust CLI commands that submit through
@@ -545,13 +572,21 @@ Current web remaster route, captured from
   "variation_category": "normal"
 }
 ```
-For `chirp-flounder` and `chirp-carp`, current Web posts the selected
-`variation_category`; Suno exposes Subtle, Normal (default), and High. The
-`chirp-bass` request omits that field entirely. Before submitting, current Web
+For `chirp-halibut`, `chirp-flounder`, and `chirp-carp`, current Web posts the selected
+`variation_category`; Suno exposes `subtle`, `normal` (default), and `high`. For v6
+`chirp-halibut`, it also posts `style_profile` with `natural`, `boost` (default), or `clarity`. The
+current v2 Remaster modal sends both defaults rather than omitting them. A live `chirp-halibut`
+request with `variation_category=high` and `style_profile=clarity` completed twice with both fields
+preserved in final clip metadata. The `chirp-bass` request omits variation entirely. Before submitting, current Web
 also requires a complete, non-trashed, non-infill source no longer than 960
 seconds whose server `action_config` exposes Remaster as visible and enabled.
 Sunox mirrors these gates and rejects an explicit `--variation` for
 `chirp-bass`.
+The lower-level request helper also contains `tags`, `freedom`, `tone`, `strength`, `clarity`, and
+`stereo_width`, but the current v2 Remaster modal does not pass or display them. Live single-field
+checks on an ordinary Pro account rejected tags as staff-only and rejected freedom; the other four
+were accepted but had no final metadata readback proving effect. Sunox therefore does not expose
+these builder-only fields.
 Response shape matches generation response with two submitted remaster clips,
 top-level `metadata`, `status`, `batch_size`, and `created_at`.
 
@@ -2242,7 +2277,7 @@ does not guess an action name or interpret opaque ownership metadata.
 **CURRENT CLI IMPLEMENTATION.** `clip cover-art` now exposes dynamic model
 discovery, pending/history/status reads, distinct two-result image/video batch
 submits, and explicit image/video apply commands. Writes fail closed unless the
-JWT account subject exactly matches the clip `user_id`, the clip is explicitly
+JWT `suno.com/claims/user_id` exactly matches the clip `user_id` (with legacy claim fallbacks), the clip is explicitly
 non-trashed, `generate_cover_art` is visible and enabled, and the matching live
 plan feature is present. Image/video submits fetch live categories, allowed
 durations, and cost first; reject prompts at or beyond the Web's 800 UTF-16

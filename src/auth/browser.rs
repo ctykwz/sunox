@@ -8,20 +8,23 @@ use super::environment::{
 use super::types::{BrowserAuth, BrowserEnvironment};
 use crate::core::CliError;
 
-/// Extract Suno auth cookies from the user's browsers.
-/// Tries Chrome, Arc, Brave, Firefox, and Edge in order.
-pub fn extract_browser_auth() -> Result<BrowserAuth, CliError> {
-    extract_browser_auth_matching(None)
+/// Find the next browser session candidate after explicitly rejected cookies.
+/// A candidate is not a verified login until Clerk and Suno both accept it.
+pub(crate) fn extract_browser_auth_excluding(
+    rejected_cookies: &HashSet<String>,
+) -> Result<BrowserAuth, CliError> {
+    extract_browser_auth_matching(None, rejected_cookies)
 }
 
 pub(crate) fn extract_browser_auth_for_clerk(
     clerk_client_cookie: &str,
 ) -> Result<BrowserAuth, CliError> {
-    extract_browser_auth_matching(Some(clerk_client_cookie))
+    extract_browser_auth_matching(Some(clerk_client_cookie), &HashSet::new())
 }
 
 fn extract_browser_auth_matching(
     expected_clerk_client_cookie: Option<&str>,
+    rejected_cookies: &HashSet<String>,
 ) -> Result<BrowserAuth, CliError> {
     let domains: Vec<String> = vec![
         "suno.com".into(),
@@ -43,15 +46,19 @@ fn extract_browser_auth_matching(
             source,
             &domains,
             expected_clerk_client_cookie,
+            rejected_cookies,
             &mut diagnostics,
         ) {
             return Ok(auth);
         }
     }
 
-    if let Some(auth) =
-        probe_firefox_profiles("Firefox", expected_clerk_client_cookie, &mut diagnostics)
-    {
+    if let Some(auth) = probe_firefox_profiles(
+        "Firefox",
+        expected_clerk_client_cookie,
+        rejected_cookies,
+        &mut diagnostics,
+    ) {
         return Ok(auth);
     }
 
@@ -66,6 +73,7 @@ fn record_probe_with_environment<E: std::fmt::Display>(
     result: Result<Vec<rookie::enums::Cookie>, E>,
     browser_environment: BrowserEnvironment,
     expected_clerk_client_cookie: Option<&str>,
+    rejected_cookies: &HashSet<String>,
     diagnostics: &mut Vec<String>,
 ) -> Option<BrowserAuth> {
     match result {
@@ -75,7 +83,8 @@ fn record_probe_with_environment<E: std::fmt::Display>(
                 browser_environment,
                 cookies,
                 expected_clerk_client_cookie,
-            );
+            )
+            .filter(|auth| !rejected_cookies.contains(&auth.clerk_client_cookie));
             if auth.is_some() {
                 eprintln!("Found Suno session in {display_name}");
             } else if expected_clerk_client_cookie.is_some() {
@@ -101,6 +110,7 @@ fn probe_chromium_profiles(
     source: &str,
     domains: &[String],
     expected_clerk_client_cookie: Option<&str>,
+    rejected_cookies: &HashSet<String>,
     diagnostics: &mut Vec<String>,
 ) -> Option<BrowserAuth> {
     let mut found_database = false;
@@ -145,6 +155,7 @@ fn probe_chromium_profiles(
                 chromium_profile_cookies(&profile_source, cookie_path, key_path, domains),
                 environment,
                 expected_clerk_client_cookie,
+                rejected_cookies,
                 diagnostics,
             ) {
                 return Some(auth);
@@ -202,6 +213,7 @@ fn profile_cookie_path(profile: &std::path::Path) -> Option<std::path::PathBuf> 
 fn probe_firefox_profiles(
     display_name: &str,
     expected_clerk_client_cookie: Option<&str>,
+    rejected_cookies: &HashSet<String>,
     diagnostics: &mut Vec<String>,
 ) -> Option<BrowserAuth> {
     let mut found_database = false;
@@ -236,6 +248,7 @@ fn probe_firefox_profiles(
                 firefox_profile_cookies(cookies_path),
                 environment,
                 expected_clerk_client_cookie,
+                rejected_cookies,
                 diagnostics,
             ) {
                 return Some(auth);
@@ -358,6 +371,23 @@ mod tests {
             value: value.into(),
             http_only: true,
             same_site: 0,
+        }
+    }
+
+    #[test]
+    fn rejected_cookie_is_skipped_without_excluding_a_different_profile_session() {
+        let rejected = HashSet::from(["revoked-cookie".to_string()]);
+        let mut diagnostics = Vec::new();
+        for (cookie, expected) in [("revoked-cookie", false), ("valid-cookie", true)] {
+            let candidate = record_probe_with_environment(
+                "test profile",
+                Ok::<_, &str>(vec![rookie_cookie("__client", cookie, "auth.suno.com")]),
+                BrowserEnvironment::default(),
+                None,
+                &rejected,
+                &mut diagnostics,
+            );
+            assert_eq!(candidate.is_some(), expected);
         }
     }
 

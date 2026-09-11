@@ -162,8 +162,9 @@ If timed lyrics contain any entry with `success=true` and a non-empty aligned
 result, or add it to a playlist; do not delete it unless the user explicitly asks.
 
 Treat commands that return new or processing clips as asynchronous workflows.
-After `sunox create`, `sunox clip inspire`, `sunox clip cover`, `sunox clip extend`, `sunox clip
-concat`, `sunox clip stems`, `sunox clip remaster`, `sunox clip speed`, or
+After `sunox create`, `sunox clip reuse`, `sunox clip inspire`, `sunox clip cover`, `sunox clip
+extend`, `sunox clip underpaint`, `sunox clip overpaint`, `sunox clip concat`, `sunox clip stems`,
+`sunox clip remaster`, `sunox clip speed`, or
 `sunox clip reverse` returns a new/processing clip ID, call `sunox clip wait
 <clip_id> --json` before download, quality filtering, or playlist decisions
 unless the user only asked to submit. `sunox clip crop` and `sunox clip fade`
@@ -294,7 +295,12 @@ sunox playlist delete <playlist_id> -y
 
 # Cover or remaster an existing clip
 sunox clip cover <clip_id> --tags "jazz, smooth piano" --model v5.5
-sunox clip remaster <clip_id> --model v5.5 --variation subtle # subtle, normal, or high
+sunox clip remaster <clip_id> --model v6
+
+# Reuse source lyrics/styles or add the missing musical layer
+sunox clip reuse <clip_id> --variety 2
+sunox clip underpaint <owned_vocal_or_upload_clip_id>
+sunox clip overpaint <owned_instrumental_or_upload_clip_id>
 
 # Adjust playback speed while keeping pitch
 sunox clip speed <clip_id> --multiplier 0.94
@@ -355,12 +361,15 @@ sunox config set output_dir ./songs
 | `--exclude` | Styles to avoid | Read `max_lengths.negative_tags` from `sunox models --json` |
 | `--lyrics` / `--lyrics-file` | Custom lyrics, or bracket-only structure beginning with `[Instrumental]` | Read `max_lengths.prompt`; conflicts with `--instrumental` |
 | `--prompt` (describe mode) | Free-text description | Read `max_lengths.gpt_description_prompt` |
-| `--model` | Live account model selector | account default when omitted; exact external key, account model ID, or unambiguous display name |
-| `--duration` | Requested duration in seconds | positive finite value; exact current v5.5 `chirp-fenix` only; account max when advertised |
+| `--model` | Live account model selector | built-in default is v6 Pro `chirp-hawk`; exact external key, account model ID, or unambiguous display name |
+| `--duration` | Requested duration in seconds | v6 Custom: whole seconds 10–360, default 180; exact v5.5 compatibility path; account max when advertised |
 | `--vocal` | Vocal gender | male, female; custom mode uses Web's `metadata.vocal_gender` |
 | `--persona` | Voice persona UUID | from Suno voice creation |
 | `--weirdness` | How experimental | 0–100 |
 | `--style-influence` | How strictly to follow tags | 0–100 |
+| `--variety` | v6 creativity variant | whole number 0–4; requires session flag `aug-creativity`; gated defaults are 0 on v6-wild and 1 on other v6 models |
+| `--mumble` | Request v6 non-lexical vocals | requires both the model feature and live session flag `mumble-mode` |
+| `--max-mode` | Request Max Mode | account/session/model-gated; final duration and charging are server-authoritative |
 | `--enhance-tags` | Call Suno's tag upsample flow before submit | explicit opt-in |
 | `--instrumental` | Unconstrained no-lyrics instrumental | conflicts with `--lyrics` and `--lyrics-file` |
 | `--token` | Externally supplied challenge token | only when Suno challenges the request |
@@ -371,8 +380,10 @@ sunox config set output_dir ./songs
 
 Do not assume a fixed version list. Run `sunox models --json` or
 `sunox capabilities --json` immediately before model-sensitive work. The
-default `default_model=auto` resolves a usable account default, then a usable
-free default, then the first model whose `can_use` field is true. An explicit
+default is the concrete v6 Pro selector `chirp-hawk`; it still requires an exact
+usable match in the live billing response. Explicit `default_model=auto` resolves
+a usable account default, then a usable free default, then the first model whose
+`can_use` field is true. An explicit
 selector requires a successful billing read and must match a usable live model;
 duplicate display names require an exact external key or account model ID.
 
@@ -380,7 +391,12 @@ Remaster uses its separate live model array and account feature gate. Before
 submission, run `sunox clip actions <id> --json`; the CLI itself also requires
 an exact, complete, non-trashed, non-infill source no longer than 960 seconds
 whose `remaster` action is visible and enabled. `chirp-bass` omits
-`variation_category` and rejects an explicit `--variation`. Automatic model
+`variation_category` and rejects an explicit `--variation`. v6 Remaster uses
+`chirp-halibut`, sends variation `normal` and style profile `boost` by default,
+and accepts variation `subtle|normal|high` plus style profile
+`natural|boost|clarity`. Do not send the lower-level builder's tags or slider
+fields: the current v2 modal does not expose them and live checks did not prove
+ordinary-account support. Automatic model
 selection skips future unknown request shapes and fails closed if no known
 Remaster model remains. For supported rows, both the display name and external
 key emitted in `capabilities` are accepted by `--model`.
@@ -481,15 +497,15 @@ sunox clip download $ids --output ./archive/
   custom lyrics as upsample context; instrumental requests omit lyrics.
 - Commands that submit through `/api/generate/v2-web/` preflight `POST /api/c/check` with `ctype=generation`; if Suno reports a challenge and stored Clerk refresh material exists, Sunox refreshes the JWT once and repeats the preflight. When a challenge remains, `challenge_browser=auto` first uses the installed Browser Bridge. The extension creates one nonce-bound Suno iframe inside Chrome's invisible offscreen document, uses the current Chrome profile's Suno context, installs controlled request and response rules before loading the fixed `https://suno.com/` origin carrier, stops and replaces the host response with a provider-only challenge document before host scripts run, and removes the frame on every terminal path. It does not discover or follow an application route. Response rules remove `Location`, `Set-Cookie`, and other side effects; a Location-suppressed standard redirect response may remain as the controlled document, but any redirect Chrome actually follows fails closed. A first Turnstile no-callback result rebuilds the widget exactly once; both widgets share one absolute 30-second budget after SDK readiness. Classified provider callbacks never trigger another fresh widget, while Turnstile's bounded same-widget recovery remains enabled within that budget; visible-interaction requests fail immediately. It creates no user tab, popup, minimized browser window, or separate browser process, and it never falls back to a visible or isolated-browser context. This flow is supported on both macOS and Windows. If a Bridge installation has been recorded but is unavailable or its pairing secret is missing, `auto` fails closed; it falls back to the matching isolated browser only when no Bridge installation has ever been recorded. hCaptcha uses provider 1 and Cloudflare Turnstile uses provider 2 according to `captcha_version`. Install or update the optional bridge with `sunox install-browser-extension --force`; never install or reload a browser extension without the user's authorization. The Bridge manifest uses its independent runtime build, so CLI-only releases do not require Reload. Installer JSON keeps `runtime_ack_pending=true` until the exact runtime and pairing authenticate. A first install returns `reload_required=null`, `pending_origin=load_unpacked`, and `activation_required=load_unpacked`; complete Load unpacked, then run `sunox doctor --browser-bridge`. A normal acknowledged update returns `reload_required=true` and `activation_required=reload`. Uncertain or restored browser state returns the single decision `activation_required=ensure_loaded`; its `activation_options` are mutually exclusive condition-labelled branches, never a sequence. Exact acknowledgement returns `reload_required=false,runtime_ack_pending=false`. Doctor sends missing or repairably corrupt pairing values through one managed `--force` repair, but unsafe or inaccessible secret entries such as symlinks, non-UTF-8 data, directories, or unreadable paths fail closed and must not be claimed repairable by force or Reload. When no challenge is required, `token` and `token_provider` are serialized as `null` to match the current Web client.
 - Prefer `--token <solved>` when an external token is already available. Use `--captcha` only to force verification even when preflight says it is unnecessary, or `--no-captcha` to disable automatic browser verification.
-- Generation paths (normal, describe, voice persona, inspiration, cover, extend,
-  generation-backed stems) use `/api/generate/v2-web/`; create, inspire, cover,
-  extend, and stems expose `--token`, `--captcha`, and `--no-captcha`.
+- Generation paths (normal, describe, voice persona, reuse, inspiration, cover, extend,
+  underpaint, overpaint, and generation-backed stems) use `/api/generate/v2-web/`; those
+  public generation commands expose `--token`, `--captcha`, and `--no-captcha`.
 - `sunox lyrics` discovers the currently confirmed Cowrite models with
   `GET /api/generate/cowrite-lyrics/models/`, then uses the synchronous
   `POST /api/generate/cowrite-lyrics/` fresh-generation contract. That POST was
   re-confirmed in the current first-party interaction chunk and an authorized
   minimal submission during the preceding August 24 protocol audit. The 0.3.0
-  implementation and verification pass itself made no account writes. It does
+  Cowrite implementation verification made no additional account writes. It does
   not use the removed submit/status polling flow.
 - Source-dependent commands read clips through the current
   `GET /api/clip/{id}` route; multi-clip polling uses feed/v3 exact-ID filters.

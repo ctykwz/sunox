@@ -116,29 +116,47 @@ pub async fn clerk_token_exchange(
     }
 
     let body: serde_json::Value = resp.json().await.map_err(transport_error)?;
-    let session_id = body
-        .get("response")
-        .and_then(|r| {
-            r.get("last_active_session_id")
-                .and_then(|s| s.as_str())
-                .filter(|session_id| !session_id.trim().is_empty())
-                .or_else(|| {
-                    r.get("sessions")
-                        .and_then(|s| s.as_array())
-                        .and_then(|sessions| sessions.first())
-                        .and_then(|session| session.get("id"))
-                        .and_then(|id| id.as_str())
-                        .filter(|session_id| !session_id.trim().is_empty())
-                })
-        })
-        .ok_or_else(|| CliError::Api {
-            code: "no_session",
-            message: "No active session found - log into suno.com in your browser first".into(),
-        })?
-        .to_string();
+    let session_id = session_id_from_client_response(&body)?;
 
     let jwt = clerk_refresh_jwt(client, clerk_cookie, &session_id, browser_environment).await?;
     Ok((session_id, jwt))
+}
+
+fn session_id_from_client_response(body: &serde_json::Value) -> Result<String, CliError> {
+    let invalid_shape = || CliError::Api {
+        code: "clerk_response_invalid",
+        message: "Clerk returned an unrecognized client session response".into(),
+    };
+    let no_session = || CliError::Api {
+        code: "no_session",
+        message: "No active session found - log into suno.com in your browser first".into(),
+    };
+    let response = body
+        .get("response")
+        .and_then(|value| value.as_object())
+        .ok_or_else(invalid_shape)?;
+    match response.get("last_active_session_id") {
+        Some(serde_json::Value::String(session_id)) if !session_id.trim().is_empty() => {
+            return Ok(session_id.clone());
+        }
+        Some(serde_json::Value::Null) | None => {}
+        _ => return Err(invalid_shape()),
+    }
+    match response.get("sessions") {
+        Some(serde_json::Value::Array(sessions)) => match sessions.first() {
+            Some(session) => session
+                .get("id")
+                .and_then(|id| id.as_str())
+                .filter(|id| !id.trim().is_empty())
+                .map(ToOwned::to_owned)
+                .ok_or_else(invalid_shape),
+            None => Err(no_session()),
+        },
+        None if response.get("last_active_session_id") == Some(&serde_json::Value::Null) => {
+            Err(no_session())
+        }
+        _ => Err(invalid_shape()),
+    }
 }
 
 /// Refresh JWT using stored Clerk cookie + session ID.
@@ -207,9 +225,55 @@ mod tests {
     use reqwest::StatusCode;
 
     use super::{
-        apply_clerk_headers, clerk_status_code, redacted_response_excerpt, validate_clerk_jwt,
+        apply_clerk_headers, clerk_status_code, redacted_response_excerpt,
+        session_id_from_client_response, validate_clerk_jwt,
     };
     use crate::auth::BrowserEnvironment;
+
+    #[test]
+    fn session_discovery_distinguishes_invalid_credentials_from_protocol_drift() {
+        for body in [
+            serde_json::json!({"response": {"last_active_session_id": null}}),
+            serde_json::json!({"response": {"sessions": []}}),
+        ] {
+            assert!(matches!(
+                session_id_from_client_response(&body),
+                Err(crate::core::CliError::Api {
+                    code: "no_session",
+                    ..
+                })
+            ));
+        }
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"response": {}}),
+            serde_json::json!({"response": {"sessions": "unknown"}}),
+            serde_json::json!({"response": {"sessions": [{}]}}),
+            serde_json::json!({"response": {"last_active_session_id": ""}}),
+        ] {
+            assert!(matches!(
+                session_id_from_client_response(&body),
+                Err(crate::core::CliError::Api {
+                    code: "clerk_response_invalid",
+                    ..
+                })
+            ));
+        }
+        assert_eq!(
+            session_id_from_client_response(
+                &serde_json::json!({"response": {"last_active_session_id": "session-active"}})
+            )
+            .unwrap(),
+            "session-active"
+        );
+        assert_eq!(
+            session_id_from_client_response(
+                &serde_json::json!({"response": {"sessions": [{"id": "session-fallback"}]}})
+            )
+            .unwrap(),
+            "session-fallback"
+        );
+    }
 
     #[test]
     fn clerk_status_distinguishes_rejection_from_server_failure() {

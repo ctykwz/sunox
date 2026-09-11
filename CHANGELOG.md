@@ -11,6 +11,28 @@ backward-compatible features, upstream protocol adaptations, and fixes.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-11
+
+### Added
+
+- Added Suno v6 generation selectors: v6 Pro `chirp-hawk`, v6 Wild `chirp-hawk-wild`, and v6 Mini
+  `chirp-goose`. New installations now default to v6 Pro, while every write still validates the
+  selector against current account billing data.
+- Added v6 Custom duration (whole seconds from 10–360, default 180), integer Variety
+  0–4, Mumble Mode, and Max Mode. Variety, Mumble, and Max Mode now fail closed against the
+  applicable billing/model capabilities and current `/api/session/` feature flags.
+- Added v6 Remaster through `chirp-halibut`, including typed variation values
+  `subtle|normal|high`, typed style profiles `natural|boost|clarity`, and their current Web defaults.
+
+### Changed
+
+- Keep `--duration` unavailable in v6 description mode: a live request accepted the field but did
+  not honor it, and the current Web sends duration only for Custom generation.
+- Capabilities now report account session gates and the `unlimited_credits` role without treating
+  that role as proof that individual operations do not affect billing balances.
+- Do not expose lower-level Remaster tags or slider fields that the current v2 modal omits and that
+  live ordinary-account checks did not prove effective.
+
 ## [0.3.1] - 2026-08-30
 
 ### Added

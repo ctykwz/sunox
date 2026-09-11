@@ -149,6 +149,18 @@ impl SunoClient {
                 error.to_string(),
             )
         })?;
+        crate::core::operation::record_response("/api/custom-model/create/", &raw).map_err(
+            |error| {
+                ambiguous_custom_model_create(
+                    &operation_id,
+                    clip_ids,
+                    name,
+                    "checkpoint_persist",
+                    error.error_code(),
+                    error.to_string(),
+                )
+            },
+        )?;
         let created: CustomModelCreateResponse = serde_json::from_value(raw).map_err(|error| {
             ambiguous_custom_model_create(
                 &operation_id,

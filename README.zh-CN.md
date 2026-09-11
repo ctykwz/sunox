@@ -80,7 +80,8 @@ sunox create \
   --lyrics-file lyrics.txt \
   --duration 180 \
   --weirdness 35 \
-  --style-influence 70
+  --style-influence 70 \
+  --variety 3
 ```
 
 ### 纯音乐输入模式
@@ -113,6 +114,10 @@ sunox download <clip_id_1> <clip_id_2> --output ./songs
 转换结果，缺失时才发起服务端转换。传 `--no-convert` 可禁止这个 POST；下载视频使用
 `--video`。prepared download 即使是 GET，也可能计入套餐下载额度。
 
+下载内容必须非空且通过基本媒体容器检查，才会替换目标文件。HTTP 200 错误页或截断的文件头
+会导致下载失败，即使使用 `--force` 也会保留原文件。Opus 会检查全部 Ogg 页，并要求完整的
+头部和音频包；WAV 会核对 RIFF/RF64 声明的区块长度及 PCM 帧对齐。这些检查不包含完整媒体解码。
+
 ## 常用命令
 
 ```text
@@ -134,6 +139,9 @@ sunox clip wait <ids>              等待生成完成
 sunox download <ids>               下载歌曲
 
 sunox clip cover <id>              翻唱
+sunox clip reuse <id>              复用源歌曲的歌词和风格
+sunox clip underpaint <id>         为自有的人声/上传音频添加伴奏
+sunox clip overpaint <id>          为自有的纯音乐/上传音频添加人声
 sunox clip extend <id>             续写
 sunox clip concat <ids>            拼接为完整歌曲
 sunox clip remaster <id>           重制
@@ -210,15 +218,23 @@ sunox update                       更新到最新 GitHub Release
 可以安全续跑。Web 会先裁切演唱样本再上传，因此 Sunox 只接受已经预裁切、实测 WAV 时长与
 `--sample-duration` 精确一致的样本，绝不会静默多上传音频。当前 Web 规则是源文件不足 10 秒时
 整段使用，否则选择 10 到 240 秒；验证录音仍以服务端为准，Web 当前目标约 15 秒，通用上传上限
-为 900 秒。后续用 Persona ID 配合
-`create --persona`，当前 Voice 生成要求账号可用的 v5.5 模型。
+为 900 秒。后续用 Persona ID 配合 `create --persona`；所选实时账号模型需要声明当前 Vox
+能力，v6 模型已支持。
 
 Lyrics 2.0 的选区重写、双源 mashup 轮询、歌词项目 CRUD/flush，以及
 `create --lyrics-project-id` 精确关联分别使用各自当前路由。rewrite 是单次 30 秒同步请求，mashup
 默认等待且轮询有明确上限；`--no-wait` 会返回 ID，供只读 `mashup-status` 查询，后者的
 `--timeout` 必须和 `--wait` 一起使用。传输结果不确定时都不会自动重放，歌词项目删除必须显式
-传 `-y/--yes`。音频 underpaint/overpaint 和 Song Editor 区段替换不属于这些歌词命令，也没有被
-冒充为已支持。
+传 `-y/--yes`。音频 underpaint/overpaint 是独立的生成型 clip 命令；Song Editor 区段替换不属于
+这些歌词命令，也没有被冒充为已支持。
+
+`clip reuse` 会精确读取源 clip，并且只在对应 CLI 参数缺省时填入歌词、风格、排除风格和标题；
+显式的 `--lyrics`/`--lyrics-file`、`--tags`、`--exclude`、`--title` 优先。CLI 会校验实时模型的
+`reuse_styles_lyrics` feature，但不会把这个 UI condition 当成 generation task 发送。
+`clip underpaint` / `clip overpaint` 使用当前的 `underpainting` / `overpainting` task 和对应源 ID
+字段。提交前会 fail-closed 校验 Edit Mode 权限、clip 完成且明确未删除、JWT 所属账号与 clip owner
+一致、源音频满足当前 Web 的人声/纯音乐 eligibility，以及实时模型支持对应的
+`underpaint` / `overpaint` condition。这些操作可能消耗 credits，最终资格与计费仍由服务端决定。
 
 Custom Model 训练至少需要 6 个不同源 Clip ID、`--confirm-rights`、账号实时可见的
 `custom_models` entitlement，以及 `--confirm-ui-available`：后者只能在当前 Suno Web 账号确实能看到
@@ -240,17 +256,34 @@ Cowrite 歌词模型会在运行时从 Suno 查询。可用
 协议中的 `audio_weight`。
 
 普通生成和 Cover 也不再依赖 CLI 内置的固定模型枚举：`--model` 可传当前账号模型的展示名、
-external key 或账号 model ID；不可用或同名歧义会在提交前失败。`--duration <秒>` 仅在选择
-当前 v5.5 `chirp-fenix` 时可用；若账号模型返回了 duration 上限，CLI 会按该值校验。
+external key 或账号 model ID；不可用或同名歧义会在提交前失败。新安装默认使用 v6 Pro
+`chirp-hawk`；可通过 `--model`、`SUNOX_DEFAULT_MODEL` 或 `config set default_model` 覆盖。
+v6 Custom 生成的 `--duration <秒>` 支持 10 到 360 的整数秒；若账号模型返回了更严格的 duration
+上限，CLI 也会按该值校验。精确的 v5.5 `chirp-fenix` 仍保留兼容 duration 路径；v6 描述模式
+不开放 duration；v6 Custom 未指定时长时使用当前 Web 默认值 180 秒。v6 Custom 还支持
+整数 `--variety 0..4`、由模型与 session gate 共同控制的 `--mumble` 非词汇
+人声，以及由账号权益、session gate 和模型共同控制的 `--max-mode`；实时能力未声明支持时会在提交前失败。
+Variety 还要求当前 Web 的 `aug-creativity` flag；该 gate 可用且未传 `--variety` 时，Sunox 跟随
+Web 默认值：`chirp-hawk-wild` 为 0，其他 v6 模型为 1；gate 缺失时省略默认值。
+提交后仍以 Suno 服务端为准。Sunox 会在这些受限控制写入前读取 `/api/session/`，按需要求
+`aug-creativity`、`mumble-mode` 或 `max-mode` flag；当前账号缺少 Mumble flag，因此会在提交前明确拒绝。Max Mode
+可以端到端保留，但不严格遵守短 `--duration`；启用 `--max-mode` 时应把时长视为请求值，而不是
+对最终成品长度的保证。
 `sunox capabilities --json` 会同时展示当前套餐、实时模型选择器、账号限制和各项权益的 CLI
 覆盖状态。
 
 Remaster 除了校验账号 feature 和模型列表，还会在提交前读取源 Clip：必须精确命中、已完成、
 未进回收站、不是 infill、时长不超过 960 秒，并且 `action_config` 中 Remaster 为
 `visible=true, disabled=false`。v4.5+ `chirp-bass` 协议不发送 `variation_category`，因此该模型
-显式传 `--variation` 会被本地拒绝。未传 `--model` 时只会自动选择 CLI 已知请求形状的
-实时模型；如果账号只暴露未知的未来模型，会在提交前失败。已支持的模型可按
-`capabilities` 返回的展示名或 external key 传给 `--model`。
+显式传 `--variation` 会被本地拒绝。未传 `--model` 时优先选择实时列表中标记为默认且 CLI 已知
+请求形状的模型，再回退到第一个已支持模型；如果账号只暴露未知的未来模型，会在提交前失败。已支持的模型可按
+`capabilities` 返回的展示名或 external key 传给 `--model`。v6 Remaster 使用
+`chirp-halibut`。variation 支持 `subtle`、默认 `normal`、`high`；style profile 支持
+`natural`、默认 `boost`、`clarity`，当前 Web 会同时发送两个默认值。真实 v6 Remaster 使用
+`--variation high --style-profile clarity` 已完成并在最终元数据中保留这两个值。虽然底层 Web
+请求 builder 仍包含 tags 和五个旧 slider 字段，但当前 v2 modal 不展示它们：tags 被服务端明确
+拒绝为 staff-only，freedom 被拒绝，其他 slider 即使接受也没有最终元数据回显。Sunox 因此不公开
+这些尚未证明生效的参数，避免用户为隐藏实验字段消耗 credits。
 
 ## 生成验证
 
@@ -397,8 +430,17 @@ sunox config set challenge_browser auto
 `-c key=value` 只覆盖当前一次调用。环境变量使用 `SUNOX_*` 前缀，例如
 `SUNOX_OUTPUT_DIR`、`SUNOX_DEFAULT_MODEL` 和 `SUNOX_BROWSER_PATH`。
 
+配置按默认值、配置文件、环境变量、命令行覆盖的顺序合并，再校验最终值。`config set` 可以
+直接修复非法配置项，并保留其他配置键；TOML 语法本身损坏时，仍需编辑错误中指出的文件。
+
 同一账号的写操作默认串行执行，避免刷新认证或修改远端资源时互相覆盖。`--parallel` 会为
 当前命令关闭这层保护，只应在确定需要并发写入时使用。
+
+账号写请求发送前，Sunox 会在其配置目录的 `operations/<operation_id>.json` 保存恢复信息。
+写命令失败或按 Ctrl+C 时，JSON 错误中的 `details.operation_recovery` 会给出检查点路径、
+已知资源 ID 和只读检查命令。Ctrl+C 会停止 CLI，Suno 仍可能完成已提交的任务；再次提交前
+请先检查这些资源。检查点只保存允许的标识符，不保存凭证或提示词，也不支持自动续跑。
+命令成功后会删除对应的操作检查点。
 
 全局 `--read-only` 会在第一次写请求前拒绝账号写操作。它仍允许账号读取和 prepared download
 （后者可能计入下载额度），并禁止时间轴歌词补生成及缺失 WAV/OPUS 的服务端转换；若结果已存在，

@@ -1,5 +1,5 @@
 use super::SunoClient;
-use super::types::BillingInfo;
+use super::types::{BillingInfo, SessionInfo};
 use crate::core::CliError;
 use std::time::{Duration, Instant};
 
@@ -18,16 +18,17 @@ impl SunoClient {
         Ok(())
     }
 
-    /// Revalidate authentication before a later write after a potentially
-    /// long upload or poll gap. `send_mutation_once` applies this centrally;
-    /// direct API/test clients that did not enter through `mutation_client`
-    /// remain unchanged.
+    /// Validate the first write even when a command only acquired an account
+    /// guard, then revalidate after a long preparation, upload, or poll gap.
+    /// Every single-shot sender applies this through `prepare_mutation_request`.
     pub(crate) async fn refresh_mutation_auth_if_stale(&self) -> Result<(), CliError> {
         let should_refresh = self
             .mutation_auth_preflight_at
             .lock()
             .expect("mutation auth preflight mutex poisoned")
-            .is_some_and(|validated_at| validated_at.elapsed() >= MUTATION_AUTH_MAX_AGE);
+            .map_or(self.requires_initial_mutation_preflight, |validated_at| {
+                validated_at.elapsed() >= MUTATION_AUTH_MAX_AGE
+            });
         if should_refresh {
             self.prepare_mutation_auth().await?;
         }
@@ -37,6 +38,14 @@ impl SunoClient {
     pub async fn billing_info(&self) -> Result<BillingInfo, CliError> {
         self.with_auth_retry(|| async {
             self.read_json_with_transport_retry(self.get("/api/billing/info/"))
+                .await
+        })
+        .await
+    }
+
+    pub async fn session_info(&self) -> Result<SessionInfo, CliError> {
+        self.with_auth_retry(|| async {
+            self.read_json_with_transport_retry(self.get("/api/session/"))
                 .await
         })
         .await

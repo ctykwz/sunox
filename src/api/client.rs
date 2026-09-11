@@ -23,6 +23,9 @@ pub struct SunoClient {
     /// held briefly to read/clone auth fields; never across awaits.
     pub(crate) auth: Mutex<AuthState>,
     pub(crate) device_override: Mutex<Option<String>>,
+    /// Live clients must validate even when no earlier command preflight ran.
+    /// Low-level endpoint fixtures can exercise the transport contract alone.
+    pub(crate) requires_initial_mutation_preflight: bool,
     pub(crate) mutation_auth_preflight_at: Mutex<Option<Instant>>,
 }
 
@@ -42,6 +45,7 @@ impl SunoClient {
             base_url: api_base_url(),
             auth: Mutex::new(auth),
             device_override: Mutex::new(None),
+            requires_initial_mutation_preflight: true,
             mutation_auth_preflight_at: Mutex::new(None),
         })
     }
@@ -58,6 +62,7 @@ impl SunoClient {
             base_url: BASE_URL.to_string(),
             auth: Mutex::new(auth),
             device_override: Mutex::new(None),
+            requires_initial_mutation_preflight: true,
             mutation_auth_preflight_at: Mutex::new(None),
         })
     }
@@ -72,6 +77,7 @@ impl SunoClient {
             base_url: base_url.trim_end_matches('/').to_string(),
             auth: Mutex::new(auth),
             device_override: Mutex::new(None),
+            requires_initial_mutation_preflight: false,
             mutation_auth_preflight_at: Mutex::new(None),
         })
     }

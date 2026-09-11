@@ -85,7 +85,8 @@ sunox create \
   --lyrics-file lyrics.txt \
   --duration 180 \
   --weirdness 35 \
-  --style-influence 70
+  --style-influence 70 \
+  --variety 3
 ```
 
 ### Instrumental input modes
@@ -127,6 +128,12 @@ conversion. Authorization can consume plan download allowance and is never blind
 an ambiguous response or redirect. A batch whose clip names resolve to the same destination fails
 before authorization, including with `--force`.
 
+Downloads must be nonempty and pass basic media container checks before replacing the destination.
+An HTTP 200 error page or truncated header fails the download and preserves an existing file,
+including with `--force`. Opus checks cover all Ogg pages and require complete headers and an audio
+packet; WAV checks enforce declared RIFF/RF64 chunk lengths and PCM frame alignment. These checks
+do not perform a full media decode.
+
 ## Common commands
 
 ```text
@@ -148,6 +155,9 @@ sunox clip wait <ids>             Wait for generation to finish
 sunox download <ids>              Download completed clips
 
 sunox clip cover <id>             Create a cover
+sunox clip reuse <id>             Reuse source lyrics and styles
+sunox clip underpaint <id>        Add instrumental backing to an owned vocal/upload clip
+sunox clip overpaint <id>         Add vocals to an owned instrumental/upload clip
 sunox clip extend <id>            Extend a clip
 sunox clip concat <ids>           Join clips into a full song
 sunox clip remaster <id>          Remaster a clip
@@ -216,21 +226,42 @@ by the current Web editor before submission.
 
 Generation and Cover models are also resolved from the current account instead of a compiled-in
 version list. `--model` accepts an exact external key, account model ID, or an unambiguous display
-name; unavailable and ambiguous selectors fail closed. `--duration <seconds>` is supported only
-when the selector resolves to the current v5.5 `chirp-fenix` model and is checked against that
-account model's advertised duration limit when present. Use `sunox capabilities --json` for the
-plan, live selectors, limits, and an entitlement-by-entitlement CLI coverage matrix.
+name; unavailable and ambiguous selectors fail closed. New installations default to v6 Pro
+`chirp-hawk`; use `--model`, `SUNOX_DEFAULT_MODEL`, or `config set default_model` to override it.
+For v6 Custom generation, `--duration <seconds>` accepts whole seconds from 10 through 360 and is also
+checked against the selected account model's advertised limit when present. The exact v5.5
+`chirp-fenix` model retains its compatibility duration path; v6 description mode does not expose
+duration. Omitting v6 Custom duration uses the current Web default of 180 seconds. v6 Custom mode
+also supports whole-number `--variety 0..4`, model- and session-gated `--mumble` non-lexical
+vocals, and account/session/model-gated `--max-mode`. These controls fail closed when the current
+billing or session capabilities do not advertise support. Variety additionally requires the current
+Web flag `aug-creativity`; when available and `--variety` is omitted, Sunox follows the Web defaults:
+0 for `chirp-hawk-wild`, and 1 for other v6 models. Without that gate the default is omitted. Suno remains authoritative after
+submission. Sunox reads `/api/session/` before these gated controls and requires `aug-creativity`,
+`mumble-mode`, or `max-mode` as applicable; an account without the Mumble flag is rejected before
+submission. Max Mode was preserved end to end in a live check, but it did not strictly honor a
+requested short duration; treat `--duration` as a request rather than a guaranteed output length
+when `--max-mode` is enabled. Use
+`sunox capabilities --json` for the plan, live
+selectors, limits, and entitlement-by-entitlement CLI coverage.
 
 `clip remaster` follows Suno Web's separate account contract: the current
 account must expose the `remaster` feature, and the selected model must appear
-in `remaster_model_types`. Without `--model`, Sunox uses the first model in that
-current Web list whose request shape this CLI understands; an account exposing
+in `remaster_model_types`. Without `--model`, Sunox uses the supported model marked as the current
+Web default, then falls back to the first supported model; an account exposing
 only future unknown models fails closed. `--model` accepts each supported row's display name or
 external key exactly as reported by `capabilities`. The legacy per-model `can_use` value remains visible in JSON
 for diagnostics but is not treated as a Web eligibility gate. Before submitting, Sunox also
 requires an exact complete, non-trashed, non-infill source of at most 960 seconds whose current
 `action_config` exposes an enabled Remaster action. The v4.5+ `chirp-bass` payload omits
-`variation_category`; passing `--variation` with that model is rejected locally.
+`variation_category`; passing `--variation` with that model is rejected locally. v6 Remaster uses
+`chirp-halibut`. Its variation values are `subtle`, `normal` (default), and `high`; its tonal
+profiles are `natural`, `boost` (default), and `clarity`. The current Web sends both defaults. A live
+v6 Remaster with `--variation high --style-profile clarity` completed with both values preserved.
+Although a lower-level Web request builder still contains tags and five legacy slider fields, the
+current v2 modal does not expose them: tags returned a staff-only error, freedom was rejected, and
+accepted slider requests did not expose a final metadata readback. Sunox therefore does not expose
+those unverified controls.
 
 Run `sunox --help` or `sunox <command> --help` for the complete set of options.
 
@@ -261,16 +292,26 @@ sample whose measured WAV duration exactly matches `--sample-duration`; it never
 extra audio. Current Web selection rules are the whole source below 10 seconds, otherwise 10 to
 240 seconds. The verification recording remains server-authoritative; Web currently targets about
 15 seconds and the generic upload ceiling is 900 seconds.
-Voice-backed generation uses the resulting Persona ID through `create --persona` and requires an
-eligible current v5.5 account model.
+Voice-backed generation uses the resulting Persona ID through `create --persona` and requires a
+live account model that advertises the current Vox capability; v6 models do.
 
 Lyrics 2.0 selection rewrite, two-source mashup polling, lyrics-project CRUD/flush, and exact
 project linking through `create --lyrics-project-id` use their distinct current routes. Rewrite is
 a single 30-second synchronous request; mashup polling is bounded, and neither transport ambiguity
 is replayed automatically. Mashup waits by default; `--no-wait` returns its IDs for the read-only
 `mashup-status`, whose `--timeout` requires `--wait`. Project deletion requires `-y/--yes`.
-Audio underpaint/overpaint and Song Editor section replacement are not claimed by these lyrics
-commands.
+Audio underpaint/overpaint are separate generation-backed clip commands; Song Editor section
+replacement is not claimed by these lyrics commands.
+
+`clip reuse` reads the exact source clip and fills lyrics, styles, excluded styles, and title only
+when the corresponding CLI option is omitted. Explicit `--lyrics`/`--lyrics-file`, `--tags`,
+`--exclude`, and `--title` win. The CLI verifies the live model's `reuse_styles_lyrics` feature,
+but never sends that UI condition as a generation task. `clip underpaint` and `clip overpaint` use
+the current `underpainting`/`overpainting` tasks and source-ID fields. They fail closed unless the
+account exposes Edit Mode, the clip is complete, explicitly non-trashed and owned by the active
+Suno user ID claim, the source matches the current Web vocal/instrumental eligibility rule, and the live
+model supports the matching `underpaint`/`overpaint` condition. These operations can consume
+credits; server-side eligibility and charging remain authoritative.
 
 Custom Model training requires at least six distinct source clip IDs, `--confirm-rights`, the live
 `custom_models` account entitlement, and `--confirm-ui-available` after visibly confirming that the
@@ -467,8 +508,21 @@ Use `-c key=value` for a one-command override. Environment variables use the `SU
 such as `SUNOX_OUTPUT_DIR`, `SUNOX_DEFAULT_MODEL`, `SUNOX_CHALLENGE_BROWSER`, and
 `SUNOX_BROWSER_PATH`.
 
+Settings are validated after merging defaults, the config file, environment variables, and CLI
+overrides, in that order. `config set` can repair an invalid setting without loading the whole
+business configuration, and preserves unrelated keys. Invalid TOML syntax still requires editing
+the file named in the error.
+
 Write operations are serialized per account by default. `--parallel` disables that protection for
 one command; use it only when same-account concurrent writes are intentional.
+
+Before an account write is sent, Sunox saves recovery evidence in `operations/<operation_id>.json`
+under its managed config directory. If a write command fails or you press Ctrl+C, JSON errors
+include `details.operation_recovery` with the checkpoint path, known resource IDs, and read-only
+inspection commands. Ctrl+C stops the CLI; Suno may still complete work already submitted. Inspect
+the recorded resources before submitting again. These checkpoints contain allowlisted identifiers,
+not credentials or prompts, and do not provide automatic resume. Successful commands remove their
+operation checkpoint.
 
 Pass global `--read-only` to reject account writes before the first write request. Read-only mode
 still allows account reads, but a download is allowed only when its source already reports

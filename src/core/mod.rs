@@ -2,6 +2,7 @@
 
 mod config;
 mod error;
+pub(crate) mod operation;
 mod paths;
 mod polling;
 mod validation;

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
@@ -46,7 +47,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            default_model: "auto".into(),
+            default_model: "chirp-hawk".into(),
             poll_interval_secs: 5,
             poll_timeout_secs: 600,
             output_dir: ".".into(),
@@ -64,9 +65,10 @@ impl AppConfig {
     }
 
     pub fn load_with_overrides(overrides: &[String]) -> Result<Self, CliError> {
-        let mut config = Self::load()?;
-        config.apply_overrides(overrides)?;
-        Ok(config)
+        if overrides.is_empty() {
+            return Self::load();
+        }
+        Self::load_from_path_with_overrides(Self::path(), std::env::vars(), overrides)
     }
 
     pub(crate) fn load_from_path<I>(
@@ -76,16 +78,51 @@ impl AppConfig {
     where
         I: IntoIterator<Item = (String, String)>,
     {
+        Self::load_from_path_with_overrides(path, vars, &[])
+    }
+
+    fn load_from_path_with_overrides<I>(
+        path: Option<std::path::PathBuf>,
+        vars: I,
+        overrides: &[String],
+    ) -> Result<Self, CliError>
+    where
+        I: IntoIterator<Item = (String, String)>,
+    {
+        // Resolve precedence before parsing any winning value. A valid CLI
+        // override must be able to replace an invalid environment or TOML
+        // value, including a persisted value with the wrong TOML type.
+        let mut winners = BTreeMap::new();
+        for (key, value) in vars {
+            if let Some(key) = environment_config_key(&key) {
+                winners.insert(key.to_string(), value);
+            }
+        }
+        for override_value in overrides {
+            let (key, value) = override_value.split_once('=').ok_or_else(|| {
+                CliError::Config(format!(
+                    "config override `{override_value}` must use key=value syntax"
+                ))
+            })?;
+            winners.insert(
+                key.trim().to_string(),
+                normalize_override_value(value.trim()),
+            );
+        }
+        let mut overlay = StoredConfig::default();
+        for (key, value) in winners {
+            overlay.set(&key, &value)?;
+        }
         let mut figment = Figment::new().merge(Serialized::defaults(AppConfig::default()));
         if let Some(path) = path {
             figment = figment.merge(Toml::file(path));
         }
         let mut config: AppConfig = figment
+            .merge(Serialized::defaults(overlay))
             .extract()
             .map_err(|e| CliError::Config(format!("parse config: {e}")))?;
-        config.apply_env_overrides(vars)?;
-        // Figment deserializes persisted TOML directly into AppConfig, so
-        // canonicalize it through the same gate used by config writes. Model
+        // Canonicalize the merged configuration through the same gate used
+        // by config writes. Model
         // availability is account-specific and is validated against billing
         // immediately before a generation submission.
         config.default_model = normalize_generation_model_selector(&config.default_model)?;
@@ -98,73 +135,23 @@ impl AppConfig {
         super::project_config_dir().map(|dir| dir.join("config.toml"))
     }
 
-    pub fn set_persisted(key: &str, value: &str) -> Result<Self, CliError> {
+    pub fn set_persisted(key: &str, value: &str) -> Result<(), CliError> {
         let path =
             Self::path().ok_or_else(|| CliError::Config("could not resolve config path".into()))?;
         let lock_path = path.with_extension("lock");
-        update_persisted_config(&path, &lock_path, key, value)?;
-        Self::load()
+        update_persisted_config(&path, &lock_path, key, value)
     }
+}
 
-    fn apply_env_overrides<I>(&mut self, vars: I) -> Result<(), CliError>
-    where
-        I: IntoIterator<Item = (String, String)>,
-    {
-        for (key, value) in vars {
-            match key.as_str() {
-                "SUNOX_DEFAULT_MODEL" => {
-                    self.default_model = normalize_generation_model_selector(&value)?
-                }
-                "SUNOX_POLL_INTERVAL_SECS" => {
-                    self.poll_interval_secs =
-                        parse_poll_interval("SUNOX_POLL_INTERVAL_SECS", &value)?;
-                }
-                "SUNOX_POLL_TIMEOUT_SECS" => {
-                    self.poll_timeout_secs = parse_poll_timeout("SUNOX_POLL_TIMEOUT_SECS", &value)?;
-                }
-                "SUNOX_OUTPUT_DIR" => self.output_dir = value,
-                "SUNOX_SERIAL_MUTATIONS" => {
-                    self.serial_mutations = parse_bool("SUNOX_SERIAL_MUTATIONS", &value)?;
-                }
-                "SUNOX_CHALLENGE_BROWSER" => {
-                    self.challenge_browser =
-                        ChallengeBrowserMode::parse("SUNOX_CHALLENGE_BROWSER", &value)?;
-                }
-                _ => {}
-            }
-        }
-        Ok(())
-    }
-
-    fn apply_overrides(&mut self, overrides: &[String]) -> Result<(), CliError> {
-        for override_value in overrides {
-            let (key, value) = override_value.split_once('=').ok_or_else(|| {
-                CliError::Config(format!(
-                    "config override `{override_value}` must use key=value syntax"
-                ))
-            })?;
-            self.set_value(key.trim(), normalize_override_value(value.trim()))?;
-        }
-        Ok(())
-    }
-
-    fn set_value(&mut self, key: &str, value: String) -> Result<(), CliError> {
-        match key {
-            "default_model" => self.default_model = normalize_generation_model_selector(&value)?,
-            "poll_interval_secs" => self.poll_interval_secs = parse_poll_interval(key, &value)?,
-            "poll_timeout_secs" => self.poll_timeout_secs = parse_poll_timeout(key, &value)?,
-            "output_dir" => self.output_dir = value,
-            "serial_mutations" => self.serial_mutations = parse_bool(key, &value)?,
-            "challenge_browser" => {
-                self.challenge_browser = ChallengeBrowserMode::parse(key, &value)?;
-            }
-            _ => {
-                return Err(CliError::Config(format!(
-                    "unknown config key `{key}`; valid keys: {VALID_CONFIG_KEYS}"
-                )));
-            }
-        }
-        Ok(())
+fn environment_config_key(key: &str) -> Option<&'static str> {
+    match key {
+        "SUNOX_DEFAULT_MODEL" => Some("default_model"),
+        "SUNOX_POLL_INTERVAL_SECS" => Some("poll_interval_secs"),
+        "SUNOX_POLL_TIMEOUT_SECS" => Some("poll_timeout_secs"),
+        "SUNOX_OUTPUT_DIR" => Some("output_dir"),
+        "SUNOX_SERIAL_MUTATIONS" => Some("serial_mutations"),
+        "SUNOX_CHALLENGE_BROWSER" => Some("challenge_browser"),
+        _ => None,
     }
 }
 
@@ -201,8 +188,23 @@ fn update_persisted_config(
     value: &str,
 ) -> Result<(), CliError> {
     let _guard = ConfigLockGuard::acquire(lock_path)?;
-    let mut stored = StoredConfig::load(path)?;
-    stored.set(key, value)?;
+    let mut stored: toml::Table = if path.exists() {
+        toml::from_str(&std::fs::read_to_string(path)?)
+            .map_err(|error| CliError::Config(format!("parse config: {error}")))?
+    } else {
+        toml::Table::new()
+    };
+    // Validate only the field being repaired. Preserve unrelated invalid
+    // fields and unknown keys so a targeted repair never resets user data.
+    let mut replacement = StoredConfig::default();
+    replacement.set(key, value)?;
+    let replacement = toml::Value::try_from(replacement)
+        .map_err(|error| CliError::Config(format!("serialize config: {error}")))?;
+    let value = replacement
+        .get(key)
+        .expect("validated config key is serialized")
+        .clone();
+    stored.insert(key.to_string(), value);
     let data = toml::to_string_pretty(&stored)
         .map_err(|error| CliError::Config(format!("serialize config: {error}")))?;
     atomic_write(path, data.as_bytes())
@@ -243,6 +245,7 @@ struct StoredConfig {
 }
 
 impl StoredConfig {
+    #[cfg(test)]
     fn load(path: &std::path::Path) -> Result<Self, CliError> {
         if !path.exists() {
             return Ok(Self::default());
@@ -284,7 +287,8 @@ pub(crate) fn normalize_generation_model_selector(value: &str) -> Result<String,
     }
     let lower = value.to_ascii_lowercase();
     match lower.as_str() {
-        "auto" | "v5.5" | "v5" | "v4.5+" | "v4.5-all" | "v4.5" | "v4" | "v3.5" | "v3" | "v2"
+        "auto" | "v6" | "v6-wild" | "v6-mini" | "v5.5" | "v5" | "v4.5+" | "v4.5-all" | "v4.5"
+        | "v4" | "v3.5" | "v3" | "v2" | "chirp-hawk" | "chirp-hawk-wild" | "chirp-goose"
         | "chirp-fenix" | "chirp-crow" | "chirp-bluejay" | "chirp-auk-turbo" | "chirp-auk"
         | "chirp-v4" | "chirp-v3-5" | "chirp-v3-0" | "chirp-v2-xxl-alpha" => Ok(lower),
         _ => Ok(value.to_string()),
@@ -476,10 +480,10 @@ mod tests {
     }
 
     #[test]
-    fn generation_model_defaults_to_account_auto_selection() {
+    fn generation_model_defaults_to_v6_pro() {
         let config = AppConfig::default();
 
-        assert_eq!(config.default_model, "auto");
+        assert_eq!(config.default_model, "chirp-hawk");
     }
 
     #[test]
@@ -544,10 +548,9 @@ mod tests {
 
     #[test]
     fn env_overrides_support_underscored_config_keys() {
-        let mut config = AppConfig::default();
-
-        config
-            .apply_env_overrides([
+        let config = AppConfig::load_from_path(
+            None,
+            [
                 ("SUNOX_DEFAULT_MODEL".to_string(), "v5".to_string()),
                 ("SUNOX_POLL_INTERVAL_SECS".to_string(), "9".to_string()),
                 ("SUNOX_POLL_TIMEOUT_SECS".to_string(), "777".to_string()),
@@ -556,8 +559,9 @@ mod tests {
                     "/tmp/suno-output".to_string(),
                 ),
                 ("SUNOX_SERIAL_MUTATIONS".to_string(), "false".to_string()),
-            ])
-            .expect("env overrides");
+            ],
+        )
+        .expect("env overrides");
 
         assert_eq!(config.default_model, "v5");
         assert_eq!(config.poll_interval_secs, 9);
@@ -568,36 +572,38 @@ mod tests {
 
     #[test]
     fn serial_mutations_override_accepts_boolean_value() {
-        let mut config = AppConfig::default();
-
-        config
-            .apply_overrides(&["serial_mutations=false".to_string()])
-            .expect("apply override");
+        let config = AppConfig::load_from_path_with_overrides(
+            None,
+            [],
+            &["serial_mutations=false".to_string()],
+        )
+        .expect("apply override");
 
         assert!(!config.serial_mutations);
     }
 
     #[test]
     fn serial_mutations_rejects_non_boolean_value() {
-        let mut config = AppConfig::default();
-
-        let err = config
-            .apply_overrides(&["serial_mutations=fast".to_string()])
-            .expect_err("invalid bool");
+        let err = AppConfig::load_from_path_with_overrides(
+            None,
+            [],
+            &["serial_mutations=fast".to_string()],
+        )
+        .expect_err("invalid bool");
 
         assert!(err.to_string().contains("expects true or false"));
     }
 
     #[test]
     fn env_override_accepts_account_display_name() {
-        let mut config = AppConfig::default();
-
-        config
-            .apply_env_overrides([(
+        let config = AppConfig::load_from_path(
+            None,
+            [(
                 "SUNOX_DEFAULT_MODEL".to_string(),
                 "My Account Model".to_string(),
-            )])
-            .expect("account display name");
+            )],
+        )
+        .expect("account display name");
 
         assert_eq!(config.default_model, "My Account Model");
     }

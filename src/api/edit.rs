@@ -187,13 +187,33 @@ impl SunoClient {
                 ));
             }
             let resp = self.check_response(resp).await?;
-            resp.json().await.map_err(|error| {
+            let raw: serde_json::Value = resp.json().await.map_err(|error| {
                 ambiguous_edit_submit(
                     operation,
                     &operation_id,
                     source_clip_id,
                     "response_body",
                     error,
+                )
+            })?;
+            crate::core::operation::record_response(path, &raw).map_err(|error| {
+                ambiguous_edit_submit_details(
+                    operation,
+                    &operation_id,
+                    source_clip_id,
+                    "checkpoint_persist",
+                    error.error_code(),
+                    error.to_string(),
+                )
+            })?;
+            serde_json::from_value(raw).map_err(|error| {
+                ambiguous_edit_submit_details(
+                    operation,
+                    &operation_id,
+                    source_clip_id,
+                    "response_body",
+                    "http_error",
+                    error.to_string(),
                 )
             })
         }?;

@@ -233,7 +233,23 @@ impl AuthState {
     }
 
     pub(crate) fn account_user_id(&self) -> Option<String> {
-        self.jwt_account_subject()
+        let jwt = self.jwt.as_deref()?;
+        let claims = decode_jwt_claims(jwt)?;
+        [
+            "suno.com/claims/user_id",
+            "suno/user_id",
+            "user_id",
+            "id",
+            "sub",
+        ]
+        .into_iter()
+        .find_map(|field| {
+            claims
+                .get(field)
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
     }
 
     pub(crate) fn matches_account_material(&self, other: &Self) -> bool {
@@ -433,6 +449,41 @@ mod tests {
         let header = BASE64URL.encode(r#"{"alg":"none","typ":"JWT"}"#);
         let claims = BASE64URL.encode(format!(r#"{{"sub":"{subject}","exp":4102444800}}"#));
         format!("{header}.{claims}.signature")
+    }
+
+    fn jwt_with_claims(claims: serde_json::Value) -> String {
+        let header = BASE64URL.encode(r#"{"alg":"none","typ":"JWT"}"#);
+        let claims = BASE64URL.encode(claims.to_string());
+        format!("{header}.{claims}.signature")
+    }
+
+    #[test]
+    fn account_user_id_prefers_suno_resource_owner_over_clerk_subject() {
+        let auth = AuthState {
+            jwt: Some(jwt_with_claims(serde_json::json!({
+                "sub": "clerk-user",
+                "suno.com/claims/user_id": "suno-user",
+                "exp": 4_102_444_800_u64
+            }))),
+            ..Default::default()
+        };
+
+        assert_eq!(auth.account_user_id().as_deref(), Some("suno-user"));
+        assert!(
+            auth.account_lock_key()
+                .expect("lock key")
+                .starts_with("account-")
+        );
+    }
+
+    #[test]
+    fn account_user_id_keeps_legacy_subject_fallback() {
+        let auth = AuthState {
+            jwt: Some(jwt_with_subject("legacy-user")),
+            ..Default::default()
+        };
+
+        assert_eq!(auth.account_user_id().as_deref(), Some("legacy-user"));
     }
 
     #[test]

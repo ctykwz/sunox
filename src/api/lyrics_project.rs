@@ -338,6 +338,7 @@ async fn decode_mutation_response<T: DeserializeOwned>(
     operation_id: &str,
     project_id: Option<&str>,
 ) -> Result<T, CliError> {
+    let path = response.url().path().to_string();
     let raw: Value = response.json().await.map_err(|error| {
         ambiguous_project_mutation(
             operation,
@@ -345,6 +346,16 @@ async fn decode_mutation_response<T: DeserializeOwned>(
             project_id,
             "response_body",
             "http_error",
+            error.to_string(),
+        )
+    })?;
+    crate::core::operation::record_response(&path, &raw).map_err(|error| {
+        ambiguous_project_mutation(
+            operation,
+            operation_id,
+            project_id,
+            "checkpoint_persist",
+            error.error_code(),
             error.to_string(),
         )
     })?;

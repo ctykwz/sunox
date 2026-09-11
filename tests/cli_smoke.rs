@@ -1321,7 +1321,7 @@ fn agent_info_exposes_the_current_free_model() {
 }
 
 #[test]
-fn agent_info_reports_auto_model_billing_fail_closed() {
+fn agent_info_reports_v6_pro_default_and_billing_fail_closed() {
     let output = Command::cargo_bin("sunox")
         .expect("binary")
         .args(["agent-info", "--json"])
@@ -1339,7 +1339,9 @@ fn agent_info_reports_auto_model_billing_fail_closed() {
 
     assert!(web_context.contains("fails closed"));
     assert!(web_context.contains("billing"));
+    assert!(web_context.contains("chirp-hawk"));
     assert!(default_model.contains("requires a successful billing read"));
+    assert!(default_model.contains("chirp-hawk"));
     assert!(!web_context.contains("chirp-auk-turbo"));
     assert!(!default_model.contains("chirp-auk-turbo"));
 }
@@ -1406,7 +1408,7 @@ fn agent_info_exposes_inspiration_as_supported() {
         .stdout(predicate::str::contains("\"clip inspire\""))
         .stdout(predicate::str::contains("\"clip_inspiration\""))
         .stdout(predicate::str::contains("\"playlist_condition_generation\"").not())
-        .stdout(predicate::str::contains("\"default_model\": \"auto"));
+        .stdout(predicate::str::contains("\"default_model\": \"chirp-hawk"));
 }
 
 #[test]
@@ -1425,13 +1427,17 @@ fn agent_info_distinguishes_clips_envelopes_from_the_concat_bare_clip() {
         ".data.clips[].id"
     );
     assert_eq!(contract["bare_clip"]["submitted_clip_id_path"], ".data.id");
-    assert!(
-        contract["clips_envelope"]["commands"]
-            .as_array()
-            .expect("clips envelope commands")
-            .iter()
-            .any(|command| command == "clip remaster")
-    );
+    let commands = contract["clips_envelope"]["commands"]
+        .as_array()
+        .expect("clips envelope commands");
+    for command in [
+        "clip reuse",
+        "clip underpaint",
+        "clip overpaint",
+        "clip remaster",
+    ] {
+        assert!(commands.iter().any(|candidate| candidate == command));
+    }
     assert_eq!(
         contract["bare_clip"]["commands"],
         serde_json::json!(["clip concat"])
@@ -1593,7 +1599,9 @@ fn global_config_override_applies_without_persisting() {
         .args(["config", "show", "--json"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"default_model\": \"auto\""))
+        .stdout(predicate::str::contains(
+            "\"default_model\": \"chirp-hawk\"",
+        ))
         .stdout(predicate::str::contains("\"serial_mutations\": true"));
 }
 
@@ -1748,8 +1756,11 @@ fn agent_info_separates_challenge_capable_commands_from_async_edits() {
         vec![
             "create",
             "clip cover",
+            "clip reuse",
             "clip inspire",
             "clip extend",
+            "clip underpaint",
+            "clip overpaint",
             "clip stems"
         ]
     );
@@ -1774,8 +1785,11 @@ fn agent_info_separates_challenge_capable_commands_from_async_edits() {
 
     for command in [
         "clip cover",
+        "clip reuse",
         "clip inspire",
         "clip extend",
+        "clip underpaint",
+        "clip overpaint",
         "clip concat",
         "clip stems",
         "clip remaster",

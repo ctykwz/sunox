@@ -758,7 +758,13 @@ async fn wait_for_private_vox_persona(
     polling: PollingOptions,
 ) -> Result<PersonaInfo, CliError> {
     let effective = bounded_polling(
-        polling,
+        PollingOptions {
+            // This short consistency check has a five-second Web budget.
+            // The general five-second CLI interval would consume that whole
+            // budget after one read, so retain the Web readback cadence here.
+            interval: PERSONA_READBACK_INTERVAL,
+            ..polling
+        },
         PERSONA_READBACK_INTERVAL,
         PERSONA_READBACK_MAX_POLLS,
     );
@@ -1422,12 +1428,13 @@ mod tests {
         )
         .expect("test client");
 
+        let defaults = crate::core::AppConfig::default();
         let persona = wait_for_private_vox_persona(
             &client,
             "persona-1",
             PollingOptions {
-                timeout: Duration::from_secs(2),
-                interval: Duration::from_millis(1),
+                timeout: Duration::from_secs(defaults.poll_timeout_secs),
+                interval: Duration::from_secs(defaults.poll_interval_secs),
             },
         )
         .await
@@ -1435,6 +1442,47 @@ mod tests {
 
         assert_eq!(persona.id, "persona-1");
         assert_eq!(requests.await.expect("requests").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn default_persona_readback_stops_at_the_web_poll_limit() {
+        let response =
+            r#"{"id":"persona-1","name":"My Voice","is_public":true,"persona_type":"vox"}"#;
+        let (api_url, requests) =
+            mock_sequence(vec![response.into(); super::PERSONA_READBACK_MAX_POLLS]).await;
+        let client = crate::api::SunoClient::new_for_tests(
+            api_url,
+            AuthState {
+                jwt: Some("test-jwt".into()),
+                ..AuthState::default()
+            },
+        )
+        .expect("test client");
+        let defaults = crate::core::AppConfig::default();
+        let persona = tokio::time::timeout(
+            Duration::from_secs(6),
+            wait_for_private_vox_persona(
+                &client,
+                "persona-1",
+                PollingOptions {
+                    timeout: Duration::from_secs(defaults.poll_timeout_secs),
+                    interval: Duration::from_secs(defaults.poll_interval_secs),
+                },
+            ),
+        )
+        .await
+        .expect("the short readback must retain its Web time budget")
+        .expect("return the last observed state for the workflow privacy check");
+
+        assert_eq!(persona.is_public, Some(true));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), requests)
+                .await
+                .expect("readback should have made all five requests")
+                .expect("requests")
+                .len(),
+            super::PERSONA_READBACK_MAX_POLLS
+        );
     }
 
     #[tokio::test]

@@ -22,7 +22,7 @@ mod voice;
 
 pub use account::{
     AccessibleFeatures, BillingInfo, DownloadCreditPack, DownloadUsage, MaxLengths, Model,
-    RemasterModelInfo,
+    RemasterModelInfo, SessionInfo,
 };
 pub use clip::{Clip, ClipActionConfig};
 pub use clip_info::{
@@ -50,7 +50,7 @@ pub use lyrics_project::{
     LyricsProjectTitleRequest, LyricsProjectsPage,
 };
 pub use metadata::{SetMetadataRequest, SetVisibilityRequest};
-pub use operations::{ConcatRequest, RemasterVariation};
+pub use operations::{ConcatRequest, RemasterStyleProfile, RemasterVariation};
 pub use persona::{
     CreatePersonaRequest, EditPersonaRequest, PersonaClipsResponse, PersonaInfo,
     PersonaListResponse, PersonaListScope,

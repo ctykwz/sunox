@@ -18,7 +18,7 @@ mod update;
 mod voice;
 mod wait;
 
-pub use crate::api::types::RemasterVariation;
+pub use crate::api::types::{RemasterStyleProfile, RemasterVariation};
 pub use agent::{InstallSkillArgs, SkillTarget};
 pub use auth::AuthArgs;
 pub use browser_extension::InstallBrowserExtensionArgs;
@@ -30,7 +30,8 @@ pub use clip::{
 pub use config::{ConfigAction, ConfigArgs};
 pub use create::{
     ConcatArgs, CoverArgs, CreateArgs, CropArgs, DescribeArgs, ExtendArgs, FadeArgs, GenerateArgs,
-    InspireArgs, LyricsArgs, RemasterArgs, ReverseArgs, SpeedArgs, StemGroup, StemMode, StemsArgs,
+    InspireArgs, LyricsArgs, PaintArgs, RemasterArgs, ReuseArgs, ReverseArgs, SpeedArgs, StemGroup,
+    StemMode, StemsArgs,
 };
 pub use doctor::DoctorArgs;
 pub use library::{
@@ -168,8 +169,8 @@ pub enum Commands {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, ClipCommand, Commands, CustomModelCommand, ModelsCommand, RemasterVariation,
-        StemGroup, StemMode, VoiceCommand,
+        Cli, ClipCommand, Commands, CustomModelCommand, ModelsCommand, RemasterStyleProfile,
+        RemasterVariation, StemGroup, StemMode, VoiceCommand,
     };
     use clap::Parser;
 
@@ -227,6 +228,26 @@ mod tests {
     }
 
     #[test]
+    fn remaster_accepts_v6_display_name_and_external_key() {
+        for selector in ["v6", "chirp-halibut"] {
+            let cli =
+                Cli::try_parse_from(["sunox", "clip", "remaster", "clip-a", "--model", selector])
+                    .expect("v6 remaster selector must be accepted");
+
+            let Some(Commands::Clip(clip)) = cli.command else {
+                panic!("expected clip command");
+            };
+            let ClipCommand::Remaster(args) = clip.command else {
+                panic!("expected remaster command");
+            };
+            assert_eq!(
+                args.model.expect("explicit model").to_api_key(),
+                "chirp-halibut"
+            );
+        }
+    }
+
+    #[test]
     fn clip_actions_accepts_an_exact_clip_id() {
         let cli = Cli::try_parse_from(["sunox", "clip", "actions", "clip-a"])
             .expect("valid clip actions command");
@@ -258,6 +279,109 @@ mod tests {
         };
         assert_eq!(args.model.as_deref(), Some("My Custom Model"));
         assert_eq!(args.duration, Some(245.5));
+    }
+
+    #[test]
+    fn create_accepts_v6_custom_controls() {
+        let cli = Cli::try_parse_from([
+            "sunox",
+            "create",
+            "--mumble",
+            "--model",
+            "v6",
+            "--duration",
+            "180",
+            "--variety",
+            "3",
+            "--max-mode",
+        ])
+        .expect("v6 Custom controls");
+
+        let Some(Commands::Create(args)) = cli.command else {
+            panic!("expected create command");
+        };
+        assert!(args.mumble);
+        assert!(args.max_mode);
+        assert_eq!(args.variety, Some(3));
+        assert_eq!(args.duration, Some(180.0));
+    }
+
+    #[test]
+    fn clip_reuse_and_paint_commands_parse_protocol_controls() {
+        let reuse = Cli::try_parse_from([
+            "sunox",
+            "clip",
+            "reuse",
+            "source-1",
+            "--lyrics",
+            "new lyrics",
+            "--variety",
+            "2",
+        ])
+        .expect("reuse command");
+        let Some(Commands::Clip(clip)) = reuse.command else {
+            panic!("expected clip command");
+        };
+        let ClipCommand::Reuse(args) = clip.command else {
+            panic!("expected reuse command");
+        };
+        assert_eq!(args.clip_id, "source-1");
+        assert_eq!(args.lyrics.as_deref(), Some("new lyrics"));
+        assert_eq!(args.variety, Some(2));
+
+        for command in ["underpaint", "overpaint"] {
+            let parsed = Cli::try_parse_from([
+                "sunox",
+                "clip",
+                command,
+                "source-1",
+                "--model",
+                "v6",
+                "--tags",
+                "chamber pop",
+            ])
+            .expect("paint command");
+            let Some(Commands::Clip(clip)) = parsed.command else {
+                panic!("expected clip command");
+            };
+            match clip.command {
+                ClipCommand::Underpaint(args) | ClipCommand::Overpaint(args) => {
+                    assert_eq!(args.clip_id, "source-1");
+                    assert_eq!(args.model.as_deref(), Some("v6"));
+                    assert_eq!(args.tags.as_deref(), Some("chamber pop"));
+                }
+                _ => panic!("expected paint command"),
+            }
+        }
+    }
+
+    #[test]
+    fn remaster_accepts_v6_variation_and_style_profile() {
+        let cli = Cli::try_parse_from([
+            "sunox",
+            "clip",
+            "remaster",
+            "clip-a",
+            "--model",
+            "v6",
+            "--variation",
+            "high",
+            "--style-profile",
+            "clarity",
+        ])
+        .expect("v6 Remaster controls");
+
+        let Some(Commands::Clip(clip)) = cli.command else {
+            panic!("expected clip command");
+        };
+        let ClipCommand::Remaster(args) = clip.command else {
+            panic!("expected remaster command");
+        };
+        assert!(matches!(args.variation, Some(RemasterVariation::High)));
+        assert!(matches!(
+            args.style_profile,
+            Some(RemasterStyleProfile::Clarity)
+        ));
     }
 
     #[test]
