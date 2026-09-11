@@ -71,7 +71,14 @@ fn account_lock_held(path: &Path) -> bool {
             FileExt::unlock(&probe).expect("unlock probe");
             false
         }
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => true,
+        Err(error)
+            if error.kind() == std::io::ErrorKind::WouldBlock
+                || cfg!(windows) && error.raw_os_error() == Some(33) =>
+        {
+            // LockFileEx reports ERROR_LOCK_VIOLATION for a conflicting byte-range
+            // lock, which Rust does not consistently map to WouldBlock.
+            true
+        }
         Err(error) => panic!("probe account lock: {error}"),
     }
 }
