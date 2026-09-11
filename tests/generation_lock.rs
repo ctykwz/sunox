@@ -213,7 +213,14 @@ fn mock_generation(lock_path: &Path) -> (String, Receiver<CapturedRequest>) {
                     FileExt::unlock(&probe).expect("unlock probe");
                     false
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => true,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        || cfg!(windows) && error.raw_os_error() == Some(33) =>
+                {
+                    // LockFileEx reports ERROR_LOCK_VIOLATION for a conflicting
+                    // byte-range lock instead of consistently mapping it to WouldBlock.
+                    true
+                }
                 Err(error) => panic!("probe account lock: {error}"),
             };
             let response = match path.as_str() {
