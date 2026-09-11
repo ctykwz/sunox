@@ -11,4 +11,6 @@ pub(crate) use submit::{
     build_generate_args_from_create, build_generate_request, validate_lyrics_project_reference,
 };
 pub use submit::{create, extend};
-pub use transform::{concat, cover, crop, fade, remaster, reverse, speed, stems};
+pub use transform::{
+    concat, cover, crop, fade, overpaint, remaster, reuse, reverse, speed, stems, underpaint,
+};

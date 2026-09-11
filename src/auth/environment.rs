@@ -11,6 +11,14 @@ use super::types::{BrowserAuth, BrowserEnvironment};
 use crate::browser::{installed_chromium_browser_sources, installed_firefox_browser_sources};
 use crate::core::CliError;
 
+/// Application-wide permission for background authentication metadata probes.
+/// Explicit interactive login grants its own browser launch permission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BrowserLaunchPolicy {
+    Allowed,
+    Forbidden,
+}
+
 pub(crate) fn browser_environment_for_profile(
     browser_source: &str,
     profile_dir: &Path,
@@ -421,15 +429,19 @@ pub(super) fn browser_source_for_profile_root(base_source: &str, user_data_dir: 
 
 pub(crate) async fn enrich_browser_auth_environment(
     auth: &mut BrowserAuth,
+    launch_policy: BrowserLaunchPolicy,
 ) -> Result<bool, CliError> {
     if browser_environment_is_complete(auth.browser_environment.as_ref()) {
         return Ok(false);
     }
     let existing = auth.browser_environment.clone();
     let existing_device_id = auth.device_id.clone();
-    let (recovered, recovered_device_id) =
-        recover_browser_metadata(existing.as_ref(), Some(auth.clerk_client_cookie.as_str()))
-            .await?;
+    let (recovered, recovered_device_id) = recover_browser_metadata(
+        existing.as_ref(),
+        Some(auth.clerk_client_cookie.as_str()),
+        launch_policy,
+    )
+    .await?;
     if auth.device_id.is_none() {
         auth.device_id = recovered_device_id;
     }
@@ -441,7 +453,10 @@ pub(crate) async fn enrich_browser_auth_environment(
     }
 }
 
-pub(crate) async fn recover_auth_state_environment(auth: &mut AuthState) -> Result<bool, CliError> {
+pub(crate) async fn recover_auth_state_environment(
+    auth: &mut AuthState,
+    launch_policy: BrowserLaunchPolicy,
+) -> Result<bool, CliError> {
     let device_id_is_present = auth
         .device_id
         .as_deref()
@@ -451,8 +466,12 @@ pub(crate) async fn recover_auth_state_environment(auth: &mut AuthState) -> Resu
     }
     let existing = auth.browser_environment.clone();
     let existing_device_id = auth.device_id.clone();
-    let (recovered, recovered_device_id) =
-        recover_browser_metadata(existing.as_ref(), auth.clerk_client_cookie.as_deref()).await?;
+    let (recovered, recovered_device_id) = recover_browser_metadata(
+        existing.as_ref(),
+        auth.clerk_client_cookie.as_deref(),
+        launch_policy,
+    )
+    .await?;
     if !device_id_is_present {
         auth.device_id = recovered_device_id;
     }
@@ -468,10 +487,12 @@ pub(crate) async fn recover_auth_state_environment(auth: &mut AuthState) -> Resu
 /// matching device identity, before it can be copied into a refreshed state.
 /// The compare-and-swap save prevents a local probe from overwriting a
 /// concurrent login, logout, or account switch.
-pub(crate) async fn load_auth_state_with_recovered_environment() -> Result<AuthState, CliError> {
+pub(crate) async fn load_auth_state_with_recovered_environment(
+    launch_policy: BrowserLaunchPolicy,
+) -> Result<AuthState, CliError> {
     let original = AuthState::load()?;
     let mut auth = original.clone();
-    if recover_auth_state_environment(&mut auth).await? {
+    if recover_auth_state_environment(&mut auth, launch_policy).await? {
         auth.save_if_unchanged(Some(&original))?;
     }
     Ok(auth)
@@ -499,6 +520,7 @@ fn browser_environment_is_complete(environment: Option<&BrowserEnvironment>) -> 
 async fn recover_browser_metadata(
     existing: Option<&BrowserEnvironment>,
     expected_clerk_client_cookie: Option<&str>,
+    launch_policy: BrowserLaunchPolicy,
 ) -> Result<(Option<BrowserEnvironment>, Option<String>), CliError> {
     let matching_browser = match expected_clerk_client_cookie {
         Some(cookie) => {
@@ -553,7 +575,12 @@ async fn recover_browser_metadata(
             client_hints: None,
         })
     });
-    let runtime_environment = if source.starts_with("firefox") {
+    // Cookie/profile metadata can still be reused when spawning is forbidden.
+    // Never turn a missing UA/client hint into an implicit browser launch in
+    // Bridge-only or configured-auto commands.
+    let runtime_environment = if launch_policy == BrowserLaunchPolicy::Forbidden {
+        None
+    } else if source.starts_with("firefox") {
         if installed_firefox_browser_sources()
             .iter()
             .any(|item| item == &source)
@@ -855,7 +882,7 @@ mod tests {
         let before = auth.browser_environment.clone();
 
         assert!(
-            !enrich_browser_auth_environment(&mut auth)
+            !enrich_browser_auth_environment(&mut auth, BrowserLaunchPolicy::Allowed)
                 .await
                 .expect("enrich")
         );

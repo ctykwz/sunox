@@ -111,6 +111,18 @@ impl SunoClient {
             })?;
             let lyrics_request_id = response_handle(&raw, "lyrics_request_id");
             let lyrics_id = response_handle(&raw, "lyrics_id");
+            crate::core::operation::record_response("/api/generate/lyrics-infill/", &raw).map_err(
+                |error| {
+                    ambiguous_rewrite(
+                        &operation_id,
+                        "checkpoint_persist",
+                        error.error_code(),
+                        error.to_string(),
+                        lyrics_request_id.as_deref(),
+                        lyrics_id.as_deref(),
+                    )
+                },
+            )?;
             serde_json::from_value(raw).map_err(|error| {
                 ambiguous_rewrite(
                     &operation_id,
@@ -194,6 +206,18 @@ impl SunoClient {
         })?;
         let mashup_id = response_handle(&raw, "mashup_id");
         let lyrics_request_id = response_handle(&raw, "lyrics_request_id");
+        crate::core::operation::record_response("/api/generate/lyrics-mashup", &raw).map_err(
+            |error| {
+                ambiguous_mashup_submit(
+                    &operation_id,
+                    "checkpoint_persist",
+                    error.error_code(),
+                    error.to_string(),
+                    mashup_id.as_deref(),
+                    lyrics_request_id.as_deref(),
+                )
+            },
+        )?;
         serde_json::from_value(raw).map_err(|error| {
             ambiguous_mashup_submit(
                 &operation_id,

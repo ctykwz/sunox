@@ -1,9 +1,10 @@
+use std::collections::HashSet;
 use std::future::Future;
 use std::io::Read;
 
 use crate::api::SunoClient;
 use crate::app::AppContext;
-use crate::auth::{self, AuthState, BrowserAuth};
+use crate::auth::{self, AuthState, BrowserAuth, BrowserLaunchPolicy};
 use crate::cli::AuthArgs;
 use crate::core::CliError;
 use crate::output::{self, OutputFormat};
@@ -41,11 +42,17 @@ pub async fn run(args: AuthArgs, ctx: &AppContext) -> Result<(), CliError> {
         args.login || args.refresh || jwt_input.is_some() || cookie_input.is_some();
     let should_login = args.login
         || (!has_explicit_auth_input && state.jwt.is_none() && state.clerk_client_cookie.is_none());
+    let launch_policy = if should_login {
+        // Login is an explicit browser workflow, including first-time `auth`.
+        BrowserLaunchPolicy::Allowed
+    } else {
+        ctx.browser_launch_policy()?
+    };
 
     if args.refresh {
         environment_recovery_attempted = true;
         let recovery_origin = state.clone();
-        if auth::recover_auth_state_environment(&mut state).await? {
+        if auth::recover_auth_state_environment(&mut state, launch_policy).await? {
             state.save_if_unchanged(Some(&recovery_origin))?;
         }
         state.clerk_client_cookie.as_ref().ok_or_else(|| {
@@ -55,32 +62,17 @@ pub async fn run(args: AuthArgs, ctx: &AppContext) -> Result<(), CliError> {
         auth::refresh_state_explicit(&http, &mut state).await?;
     } else if should_login {
         eprintln!("Extracting Suno session from your browser...");
-        let mut login = extract_browser_auth_with_fallback(
-            auth::extract_browser_auth,
+        let login = extract_browser_auth_with_fallback(
+            auth::extract_browser_auth_excluding,
+            validate_browser_login_candidate,
             auth::extract_interactive_browser_auth,
         )
         .await?;
-        auth::enrich_browser_auth_environment(&mut login.browser_auth).await?;
         environment_recovery_attempted = true;
-
-        let (session_id, jwt) = match login.verified_clerk {
-            Some(verified) => (verified.session_id, verified.jwt),
-            None => {
-                let http = crate::net::http::clerk_client()?;
-                eprintln!("Exchanging for access token via Clerk...");
-                auth::clerk_token_exchange(
-                    &http,
-                    &login.browser_auth.clerk_client_cookie,
-                    login.browser_auth.browser_environment.as_ref(),
-                )
-                .await?
-            }
-        };
-
-        store_browser_auth_state(&mut state, login.browser_auth, session_id, jwt);
+        store_browser_auth_state(&mut state, login.browser_auth, login.session_id, login.jwt);
     } else if let Some(cookie) = cookie_input.as_deref() {
         let mut browser_auth = auth::normalize_cookie_input(cookie)?;
-        auth::enrich_browser_auth_environment(&mut browser_auth).await?;
+        auth::enrich_browser_auth_environment(&mut browser_auth, launch_policy).await?;
         environment_recovery_attempted = true;
         let http = crate::net::http::clerk_client()?;
         eprintln!("Exchanging cookie for access token...");
@@ -102,7 +94,7 @@ pub async fn run(args: AuthArgs, ctx: &AppContext) -> Result<(), CliError> {
     let environment_recovered = if environment_recovery_attempted {
         false
     } else {
-        auth::recover_auth_state_environment(&mut state).await?
+        auth::recover_auth_state_environment(&mut state, launch_policy).await?
     };
     let recovery_can_be_saved_before_verify =
         environment_recovered && !should_login && cookie_input.is_none() && jwt_input.is_none();
@@ -193,45 +185,104 @@ fn read_secret_input(
         .transpose()
 }
 
-async fn extract_browser_auth_with_fallback<C, I, Fut>(
-    browser_cookie_probe: C,
+async fn extract_browser_auth_with_fallback<C, V, I, VFut, IFut>(
+    mut browser_cookie_probe: C,
+    mut validate_candidate: V,
     interactive_login: I,
 ) -> Result<LoginAuth, CliError>
 where
-    C: FnOnce() -> Result<BrowserAuth, CliError>,
-    I: FnOnce() -> Fut,
-    Fut: Future<Output = Result<(BrowserAuth, String, String), CliError>>,
+    C: FnMut(&HashSet<String>) -> Result<BrowserAuth, CliError>,
+    V: FnMut(BrowserAuth) -> VFut,
+    VFut: Future<Output = Result<LoginAuth, CliError>>,
+    I: FnOnce() -> IFut,
+    IFut: Future<Output = Result<(BrowserAuth, String, String), CliError>>,
 {
-    match browser_cookie_probe() {
-        Ok(browser_auth) => Ok(LoginAuth {
-            browser_auth,
-            verified_clerk: None,
-        }),
-        Err(cookie_error) => {
-            eprintln!("Browser cookie extraction failed: {cookie_error}");
-            eprintln!("Falling back to interactive browser login...");
-            let (browser_auth, session_id, jwt) =
-                interactive_login().await.map_err(|interactive_error| {
-                    CliError::Config(format!(
-                        "browser cookie extraction failed ({cookie_error}); interactive browser login failed ({interactive_error})"
-                    ))
-                })?;
-            Ok(LoginAuth {
-                browser_auth,
-                verified_clerk: Some(VerifiedClerkSession { session_id, jwt }),
-            })
+    let mut rejected_cookies = HashSet::new();
+    let cookie_error = loop {
+        let candidate = match browser_cookie_probe(&rejected_cookies) {
+            Ok(candidate) => candidate,
+            Err(error) => break error,
+        };
+        let cookie = candidate.clerk_client_cookie.clone();
+        if rejected_cookies.contains(&cookie) {
+            return Err(CliError::Config(
+                "browser session discovery returned an already rejected candidate".into(),
+            ));
         }
-    }
+        match validate_candidate(candidate).await {
+            Ok(login) => return Ok(login),
+            Err(error) if browser_session_was_rejected(&error) => {
+                rejected_cookies.insert(cookie);
+                eprintln!("Browser session was rejected; looking for another reusable session...");
+            }
+            // A transport, rate-limit, or unknown protocol error is not
+            // evidence that this account is invalid. Never switch to another
+            // account or open login in response to those failures.
+            Err(error) => return Err(error),
+        }
+    };
+    eprintln!("Browser cookie extraction failed: {cookie_error}");
+    eprintln!("Falling back to interactive browser login...");
+    let (browser_auth, session_id, jwt) =
+        interactive_login().await.map_err(|interactive_error| {
+            CliError::Config(format!(
+                "browser cookie extraction failed ({cookie_error}); interactive browser login failed ({interactive_error})"
+            ))
+        })?;
+    Ok(LoginAuth {
+        browser_auth,
+        session_id,
+        jwt,
+    })
 }
 
 struct LoginAuth {
     browser_auth: BrowserAuth,
-    verified_clerk: Option<VerifiedClerkSession>,
-}
-
-struct VerifiedClerkSession {
     session_id: String,
     jwt: String,
+}
+
+fn browser_session_was_rejected(error: &CliError) -> bool {
+    matches!(
+        error,
+        CliError::AuthExpired
+            | CliError::Api {
+                code: "clerk_exchange_rejected" | "clerk_refresh_rejected" | "no_session",
+                ..
+            }
+    )
+}
+
+async fn validate_browser_login_candidate(
+    mut browser_auth: BrowserAuth,
+) -> Result<LoginAuth, CliError> {
+    auth::enrich_browser_auth_environment(&mut browser_auth, BrowserLaunchPolicy::Allowed).await?;
+    let http = crate::net::http::clerk_client()?;
+    eprintln!("Exchanging for access token via Clerk...");
+    let (session_id, jwt) = auth::clerk_token_exchange(
+        &http,
+        &browser_auth.clerk_client_cookie,
+        browser_auth.browser_environment.as_ref(),
+    )
+    .await?;
+    let candidate_state = AuthState {
+        jwt: Some(jwt.clone()),
+        cookie: Some(browser_auth.cookie_header.clone()),
+        session_id: Some(session_id.clone()),
+        device_id: browser_auth.device_id.clone(),
+        browser_environment: browser_auth.browser_environment.clone(),
+        clerk_client_cookie: Some(browser_auth.clerk_client_cookie.clone()),
+    };
+    // Validation never persists or refreshes against the previously active
+    // account. Only the final verified candidate reaches the guarded save.
+    SunoClient::new_for_auth_validation(candidate_state)?
+        .validate_auth()
+        .await?;
+    Ok(LoginAuth {
+        browser_auth,
+        session_id,
+        jwt,
+    })
 }
 
 fn store_browser_auth_state(
@@ -278,12 +329,21 @@ mod tests {
         }
     }
 
+    async fn accept_candidate(browser_auth: BrowserAuth) -> Result<LoginAuth, CliError> {
+        Ok(LoginAuth {
+            browser_auth,
+            session_id: "verified-session".into(),
+            jwt: "verified-jwt".into(),
+        })
+    }
+
     #[tokio::test]
     async fn login_auth_uses_browser_cookie_when_available() {
         let interactive_called = Cell::new(false);
 
         let auth = extract_browser_auth_with_fallback(
-            || Ok(auth_with_client("browser-cookie")),
+            |_| Ok(auth_with_client("browser-cookie")),
+            accept_candidate,
             || async {
                 interactive_called.set(true);
                 Ok((
@@ -297,14 +357,14 @@ mod tests {
         .expect("auth");
 
         assert_eq!(auth.browser_auth.clerk_client_cookie, "browser-cookie");
-        assert!(auth.verified_clerk.is_none());
+        assert_eq!(auth.session_id, "verified-session");
         assert!(!interactive_called.get());
     }
 
     #[tokio::test]
     async fn login_auth_preserves_browser_environment_from_cookie_probe() {
         let auth = extract_browser_auth_with_fallback(
-            || {
+            |_| {
                 Ok(BrowserAuth {
                     clerk_client_cookie: "browser-cookie".into(),
                     cookie_header: "__client=browser-cookie".into(),
@@ -317,6 +377,7 @@ mod tests {
                     }),
                 })
             },
+            accept_candidate,
             || async {
                 Ok((
                     auth_with_client("interactive"),
@@ -339,7 +400,8 @@ mod tests {
     #[tokio::test]
     async fn login_auth_falls_back_to_interactive_browser_when_cookie_probe_fails() {
         let auth = extract_browser_auth_with_fallback(
-            || Err(CliError::Config("cookie blocked".into())),
+            |_| Err(CliError::Config("cookie blocked".into())),
+            accept_candidate,
             || async {
                 Ok((
                     auth_with_client("interactive"),
@@ -352,9 +414,112 @@ mod tests {
         .expect("auth");
 
         assert_eq!(auth.browser_auth.clerk_client_cookie, "interactive");
-        let verified = auth.verified_clerk.expect("verified Clerk session");
-        assert_eq!(verified.session_id, "verified-session");
-        assert_eq!(verified.jwt, "verified-jwt");
+        assert_eq!(auth.session_id, "verified-session");
+        assert_eq!(auth.jwt, "verified-jwt");
+    }
+
+    #[tokio::test]
+    async fn rejected_first_browser_session_does_not_hide_a_valid_second_session() {
+        let probes = Cell::new(0);
+        let interactive_called = Cell::new(false);
+        let login = extract_browser_auth_with_fallback(
+            |rejected| {
+                probes.set(probes.get() + 1);
+                Ok(auth_with_client(if rejected.contains("revoked-cookie") {
+                    "valid-cookie"
+                } else {
+                    "revoked-cookie"
+                }))
+            },
+            |candidate| async {
+                if candidate.clerk_client_cookie == "revoked-cookie" {
+                    Err(CliError::Api {
+                        code: "clerk_exchange_rejected",
+                        message: "HTTP 401".into(),
+                    })
+                } else {
+                    accept_candidate(candidate).await
+                }
+            },
+            || async {
+                interactive_called.set(true);
+                Err(CliError::Config("interactive must not run".into()))
+            },
+        )
+        .await
+        .expect("valid second browser session");
+        assert_eq!(login.browser_auth.clerk_client_cookie, "valid-cookie");
+        assert_eq!(probes.get(), 2);
+        assert!(!interactive_called.get());
+    }
+
+    #[tokio::test]
+    async fn all_rejected_browser_sessions_fall_back_to_verified_interactive_login() {
+        let login = extract_browser_auth_with_fallback(
+            |rejected| {
+                ["revoked-a", "revoked-b"]
+                    .into_iter()
+                    .find(|cookie| !rejected.contains(*cookie))
+                    .map(auth_with_client)
+                    .ok_or_else(|| CliError::Config("no remaining candidate".into()))
+            },
+            |_| async { Err(CliError::AuthExpired) },
+            || async {
+                Ok((
+                    auth_with_client("interactive"),
+                    "session".into(),
+                    "jwt".into(),
+                ))
+            },
+        )
+        .await
+        .expect("interactive fallback");
+        assert_eq!(login.browser_auth.clerk_client_cookie, "interactive");
+        assert_eq!(login.session_id, "session");
+    }
+
+    #[tokio::test]
+    async fn browser_validation_network_rate_limit_and_schema_errors_never_switch_accounts() {
+        let transport = reqwest::Client::new()
+            .get("http://[::1")
+            .build()
+            .unwrap_err();
+        for error in [
+            CliError::Http(transport),
+            CliError::RateLimited,
+            CliError::Api {
+                code: "clerk_exchange_failed",
+                message: "HTTP 503".into(),
+            },
+            CliError::Api {
+                code: "clerk_response_invalid",
+                message: "unknown response".into(),
+            },
+            CliError::Api {
+                code: "no_jwt",
+                message: "unknown token response".into(),
+            },
+        ] {
+            let expected = error.to_string();
+            let mut validation_error = Some(error);
+            let probes = Cell::new(0);
+            let interactive_called = Cell::new(false);
+            let result = extract_browser_auth_with_fallback(
+                |_| {
+                    probes.set(probes.get() + 1);
+                    Ok(auth_with_client("first-account"))
+                },
+                |_| std::future::ready(Err(validation_error.take().expect("one validation"))),
+                || async {
+                    interactive_called.set(true);
+                    Err(CliError::Config("unexpected interactive login".into()))
+                },
+            )
+            .await;
+            assert_eq!(result.err().expect("original error").to_string(), expected);
+            assert_eq!(probes.get(), 1);
+            assert!(!interactive_called.get());
+        }
     }
 
     #[test]

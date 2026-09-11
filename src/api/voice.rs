@@ -297,7 +297,13 @@ impl SunoClient {
                 context,
             ));
         }
-        let response = self.check_response(response).await?;
+        let response = if path == "/api/persona/create/" {
+            // A conflict can mean a prior accepted Voice workflow already created
+            // the persona, so preserve its possibly-sent recovery evidence.
+            self.check_response_preserving_conflict(response).await?
+        } else {
+            self.check_response(response).await?
+        };
         let body = response.bytes().await.map_err(|error| {
             ambiguous_voice_write(
                 workflow_id,
@@ -307,7 +313,25 @@ impl SunoClient {
                 context,
             )
         })?;
-        serde_json::from_slice(&body).map_err(|error| {
+        let raw: Value = serde_json::from_slice(&body).map_err(|error| {
+            ambiguous_voice_write(
+                workflow_id,
+                &format!("{stage}_response_schema"),
+                "json_error",
+                error.to_string(),
+                context,
+            )
+        })?;
+        crate::core::operation::record_response(path, &raw).map_err(|error| {
+            ambiguous_voice_write(
+                workflow_id,
+                &format!("{stage}_checkpoint_persist"),
+                error.error_code(),
+                error.to_string(),
+                context,
+            )
+        })?;
+        serde_json::from_value(raw).map_err(|error| {
             ambiguous_voice_write(
                 workflow_id,
                 &format!("{stage}_response_schema"),

@@ -1,4 +1,4 @@
-use super::{RemasterModel, RemasterVariation, VocalGender};
+use super::{RemasterModel, RemasterStyleProfile, RemasterVariation, VocalGender};
 
 #[derive(clap::Args)]
 pub struct CreateArgs {
@@ -36,7 +36,7 @@ pub struct CreateArgs {
     #[arg(short, long)]
     pub model: Option<String>,
 
-    /// Requested song duration in seconds (current v5.5 model only)
+    /// Requested song duration in seconds (supported Custom generation models)
     #[arg(long)]
     pub duration: Option<f64>,
 
@@ -51,6 +51,18 @@ pub struct CreateArgs {
     /// Style influence strength (0-100)
     #[arg(long)]
     pub style_influence: Option<f64>,
+
+    /// v6 Variety level (whole number 0-4, Custom mode only)
+    #[arg(long)]
+    pub variety: Option<u8>,
+
+    /// Generate non-lexical vocals in v6 Custom mode
+    #[arg(long, conflicts_with_all = ["lyrics", "lyrics_file", "instrumental", "prompt"])]
+    pub mumble: bool,
+
+    /// Enable account-gated Max Mode in Custom mode
+    #[arg(long)]
+    pub max_mode: bool,
 
     /// Enhance style tags through Suno's web prompt upsample flow before submit.
     #[arg(long)]
@@ -109,7 +121,7 @@ pub struct GenerateArgs {
     #[arg(short, long)]
     pub model: Option<String>,
 
-    /// Requested song duration in seconds (current v5.5 model only)
+    /// Requested song duration in seconds (supported Custom generation models)
     #[arg(long)]
     pub duration: Option<f64>,
 
@@ -124,6 +136,18 @@ pub struct GenerateArgs {
     /// Style influence strength (0-100)
     #[arg(long)]
     pub style_influence: Option<f64>,
+
+    /// v6 Variety level (whole number 0-4, Custom mode only)
+    #[arg(long)]
+    pub variety: Option<u8>,
+
+    /// Generate non-lexical vocals in v6 Custom mode
+    #[arg(long, conflicts_with_all = ["lyrics", "lyrics_file", "instrumental"])]
+    pub mumble: bool,
+
+    /// Enable account-gated Max Mode in Custom mode
+    #[arg(long)]
+    pub max_mode: bool,
 
     /// Enhance style tags through Suno's web prompt upsample flow before submit.
     #[arg(long)]
@@ -173,7 +197,7 @@ pub struct DescribeArgs {
     #[arg(short, long)]
     pub model: Option<String>,
 
-    /// Requested song duration in seconds (current v5.5 model only)
+    /// Requested song duration in seconds (v5.5 description mode only)
     #[arg(long)]
     pub duration: Option<f64>,
 
@@ -311,6 +335,110 @@ pub struct CoverArgs {
 }
 
 #[derive(clap::Args)]
+pub struct PaintArgs {
+    /// Source clip ID. Underpaint adds instrumental backing; overpaint adds vocals.
+    pub clip_id: String,
+
+    /// Generated song title. Defaults to the source title plus the Web action suffix.
+    #[arg(short, long)]
+    pub title: Option<String>,
+
+    /// Lyrics used for the generated result. Defaults to source lyrics when available.
+    #[arg(short, long, conflicts_with = "lyrics_file")]
+    pub lyrics: Option<String>,
+
+    /// Read lyrics from a file
+    #[arg(long)]
+    pub lyrics_file: Option<String>,
+
+    /// Style tags. Defaults to source styles when available.
+    #[arg(long)]
+    pub tags: Option<String>,
+
+    /// Styles to exclude. Defaults to the source exclude styles when available.
+    #[arg(long)]
+    pub exclude: Option<String>,
+
+    /// Generation model display name, external key, or account model ID
+    #[arg(short, long)]
+    pub model: Option<String>,
+
+    /// Challenge token (overrides the built-in solver)
+    #[arg(long)]
+    pub token: Option<String>,
+
+    /// Force browser challenge verification even when preflight says it is unnecessary.
+    #[arg(long, conflicts_with = "no_captcha")]
+    pub captcha: bool,
+
+    /// Disable automatic browser challenge verification; challenge preflight still runs.
+    #[arg(long)]
+    pub no_captcha: bool,
+}
+
+#[derive(clap::Args)]
+pub struct ReuseArgs {
+    /// Source clip ID whose lyrics and styles are reused
+    pub clip_id: String,
+
+    /// Generated song title. Defaults to the source title.
+    #[arg(short, long)]
+    pub title: Option<String>,
+
+    /// Override source lyrics
+    #[arg(short, long, conflicts_with = "lyrics_file")]
+    pub lyrics: Option<String>,
+
+    /// Read overriding lyrics from a file
+    #[arg(long)]
+    pub lyrics_file: Option<String>,
+
+    /// Override source style tags
+    #[arg(long)]
+    pub tags: Option<String>,
+
+    /// Override source excluded styles
+    #[arg(long)]
+    pub exclude: Option<String>,
+
+    /// Generation model display name, external key, or account model ID
+    #[arg(short, long)]
+    pub model: Option<String>,
+
+    /// Requested song duration in seconds
+    #[arg(long)]
+    pub duration: Option<f64>,
+
+    /// Weirdness level (0-100)
+    #[arg(long)]
+    pub weirdness: Option<f64>,
+
+    /// Style influence strength (0-100)
+    #[arg(long)]
+    pub style_influence: Option<f64>,
+
+    /// v6 Variety level (whole number 0-4)
+    #[arg(long)]
+    pub variety: Option<u8>,
+
+    /// Enhance the resolved style tags before submit
+    #[arg(long)]
+    pub enhance_tags: bool,
+
+    /// Challenge token (overrides the built-in solver)
+    #[arg(long)]
+    pub token: Option<String>,
+
+    /// Force browser challenge verification even when preflight says it is unnecessary.
+    #[arg(long, conflicts_with = "no_captcha")]
+    pub captcha: bool,
+
+    /// Disable automatic browser challenge verification; challenge preflight still runs.
+    #[arg(long)]
+    pub no_captcha: bool,
+}
+
+#[derive(clap::Args)]
 pub struct InspireArgs {
     /// Source clip ID to use as inspiration
     pub clip_id: String,
@@ -376,6 +504,10 @@ pub struct RemasterArgs {
     /// How strongly the remaster may vary from the source
     #[arg(long, value_enum)]
     pub variation: Option<RemasterVariation>,
+
+    /// Tonal profile for v6 Remaster (natural, boost, or clarity)
+    #[arg(long, value_enum)]
+    pub style_profile: Option<RemasterStyleProfile>,
 }
 
 #[derive(clap::Args)]

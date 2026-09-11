@@ -263,6 +263,15 @@ pub enum ClipCommand {
     /// Create a cover of an existing clip
     Cover(CoverArgs),
 
+    /// Generate a new song by reusing a clip's styles and lyrics
+    Reuse(super::ReuseArgs),
+
+    /// Add instrumental backing to an owned vocal or upload clip
+    Underpaint(super::PaintArgs),
+
+    /// Add vocals to an owned instrumental or upload clip
+    Overpaint(super::PaintArgs),
+
     /// Generate a new song using a clip as loose inspiration
     Inspire(InspireArgs),
 

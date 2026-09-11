@@ -80,6 +80,10 @@ fn serve_json_sequence(responses: Vec<String>) -> (String, Receiver<CapturedRequ
                     Err(error) => panic!("accept mock request: {error}"),
                 }
             };
+            // Darwin can inherit O_NONBLOCK from the listener; receive deadlines need blocking IO.
+            stream
+                .set_nonblocking(false)
+                .expect("blocking accepted connection");
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("request timeout");

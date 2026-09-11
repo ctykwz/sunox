@@ -171,7 +171,11 @@ impl CliError {
 
     pub fn exit_code(&self) -> i32 {
         match self {
-            Self::Config(_) => 2,
+            Self::Config(_)
+            | Self::Diagnostic {
+                code: "config_error",
+                ..
+            } => 2,
             Self::AuthMissing | Self::AuthExpired | Self::AuthChanged => 3,
             Self::RateLimited => 4,
             Self::NotFound(_) | Self::SunoApi { status: 404, .. } => 5,
@@ -248,6 +252,12 @@ impl CliError {
                 "Inspect error.details for succeeded paths, authorized_sources, the failed clip, and not_attempted IDs before retrying"
             }
             Self::Diagnostic {
+                code: "config_error",
+                ..
+            } => {
+                "Inspect error.details.config.path; use `sunox config set <key> <value>` to repair a field, or correct invalid TOML syntax in that file"
+            }
+            Self::Diagnostic {
                 code: "download_authorization_required",
                 ..
             } => {
@@ -305,7 +315,9 @@ impl CliError {
             Self::Update(_) => {
                 "Check your network connection or download the binary directly from GitHub Releases"
             }
-            Self::Interrupted => "The operation was cancelled and temporary files were cleaned up",
+            Self::Interrupted => {
+                "The CLI stopped; Suno may still complete writes already sent. Inspect any operation_recovery details before submitting again"
+            }
         }
     }
 

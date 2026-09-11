@@ -1,7 +1,7 @@
 use crate::api::SunoClient;
-use crate::auth::{AuthState, load_auth_state_with_recovered_environment};
-use crate::core::AppConfig;
+use crate::auth::{AuthState, BrowserLaunchPolicy, load_auth_state_with_recovered_environment};
 use crate::core::CliError;
+use crate::core::{AppConfig, ChallengeBrowserMode};
 use crate::output::OutputFormat;
 
 use super::mutation_lock::MutationLockGuard;
@@ -34,8 +34,25 @@ impl AppContext {
     }
 
     pub async fn client(&self) -> Result<SunoClient, CliError> {
-        let auth = load_auth_state_with_recovered_environment().await?;
+        let auth =
+            load_auth_state_with_recovered_environment(self.browser_launch_policy()?).await?;
         SunoClient::new_with_refresh(auth).await
+    }
+
+    pub(crate) fn browser_launch_policy(&self) -> Result<BrowserLaunchPolicy, CliError> {
+        let bridge_configured = match self.config.challenge_browser {
+            ChallengeBrowserMode::Auto => {
+                // An unsafe/unknown installation must never grant permission
+                // to spawn. Ordinary reads can still use stored request
+                // metadata; challenge execution reports the pairing error.
+                crate::browser_bridge::bridge_is_configured().unwrap_or(true)
+            }
+            _ => false,
+        };
+        Ok(browser_launch_policy(
+            self.config.challenge_browser,
+            bridge_configured,
+        ))
     }
 
     pub async fn mutation_client(
@@ -75,12 +92,43 @@ impl AppContext {
     }
 }
 
+fn browser_launch_policy(
+    mode: ChallengeBrowserMode,
+    bridge_configured: bool,
+) -> BrowserLaunchPolicy {
+    match mode {
+        ChallengeBrowserMode::Existing => BrowserLaunchPolicy::Forbidden,
+        ChallengeBrowserMode::Auto if bridge_configured => BrowserLaunchPolicy::Forbidden,
+        ChallengeBrowserMode::Auto | ChallengeBrowserMode::Isolated => BrowserLaunchPolicy::Allowed,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::core::AppConfig;
     use crate::output::OutputFormat;
 
-    use super::AppContext;
+    use super::{AppContext, BrowserLaunchPolicy, ChallengeBrowserMode, browser_launch_policy};
+
+    #[test]
+    fn metadata_probe_obeys_the_same_browser_process_policy_as_challenges() {
+        assert_eq!(
+            browser_launch_policy(ChallengeBrowserMode::Existing, false),
+            BrowserLaunchPolicy::Forbidden
+        );
+        assert_eq!(
+            browser_launch_policy(ChallengeBrowserMode::Auto, true),
+            BrowserLaunchPolicy::Forbidden
+        );
+        assert_eq!(
+            browser_launch_policy(ChallengeBrowserMode::Auto, false),
+            BrowserLaunchPolicy::Allowed
+        );
+        assert_eq!(
+            browser_launch_policy(ChallengeBrowserMode::Isolated, true),
+            BrowserLaunchPolicy::Allowed
+        );
+    }
 
     fn context(parallel: bool, serial_mutations: bool, read_only: bool) -> AppContext {
         let config = AppConfig {

@@ -3,7 +3,7 @@
   globalThis.__sunoxBridgeOffscreenLoaded = true;
 
   const bridgeConfig = globalThis.SUNOX_BRIDGE_CONFIG;
-  const { errorMessage } = globalThis.SUNOX_BRIDGE_SHARED || {};
+  const { errorMessage, isRetryableManagedNetworkReason } = globalThis.SUNOX_BRIDGE_SHARED || {};
   const transport = globalThis.SUNOX_BRIDGE_TRANSPORTS?.[bridgeConfig?.transport];
   const runtimeBuild = bridgeConfig?.loopback?.runtimeBuild;
   if (
@@ -11,6 +11,7 @@
     || typeof runtimeBuild !== "string"
     || !/^\d+\.\d+\.\d+$/.test(runtimeBuild)
     || typeof errorMessage !== "function"
+    || typeof isRetryableManagedNetworkReason !== "function"
     || transport?.contractVersion !== 1
     || typeof transport.claimChallenge !== "function"
     || typeof transport.submitResult !== "function"
@@ -35,12 +36,6 @@
   const managedNoncePattern =
     /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
   const managedFrameResultAckType = "sunox-managed-frame-result-ack-v1";
-  const retryableManagedNetworkReasons = new Set([
-    "managed_network_connection",
-    "managed_network_name_resolution",
-    "managed_network_protocol",
-    "managed_network_timeout"
-  ]);
   const pollWorkerStaleMs = 5_000;
   const maxTokenLength = 16_384;
   let busy = false;
@@ -396,7 +391,7 @@
           if (
             attempt === 1
             && !executeRequested
-            && retryableManagedNetworkReasons.has(message.reason)
+            && isRetryableManagedNetworkReason(message.reason)
           ) {
             finishForRetry(error);
           } else {

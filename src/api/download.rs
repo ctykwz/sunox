@@ -120,6 +120,15 @@ impl SunoClient {
                 error.to_string(),
             )
         })?;
+        crate::core::operation::record_response("/api/download/authorize", &response_value)
+            .map_err(|error| {
+                ambiguous_download_authorization_from_cli_error(
+                    &operation_id,
+                    clip_id,
+                    "checkpoint_persist",
+                    error,
+                )
+            })?;
         let authorization: DownloadAuthorizationResponse = serde_json::from_value(response_value)
             .map_err(|error| {
             ambiguous_download_authorization_details(

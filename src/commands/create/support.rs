@@ -86,15 +86,16 @@ pub(super) async fn execute_generation_submission<Prepare, PrepareFuture>(
     prepare: Prepare,
 ) -> Result<GenerationResult, CliError>
 where
-    Prepare: FnOnce() -> PrepareFuture,
+    Prepare: FnOnce(crate::api::SunoClient) -> PrepareFuture,
     PrepareFuture: Future<
         Output = Result<(crate::api::SunoClient, crate::api::types::GenerateRequest), CliError>,
     >,
 {
-    ctx.ensure_mutations_allowed()?;
-    let (client, mut request) = prepare().await?;
-    let initial_auth = client.auth_state_snapshot();
-    let _guard = ctx.acquire_mutation_lock_for(&initial_auth)?;
+    let (client, _guard) = ctx.mutation_client().await?;
+    // Preparation can enhance tags through a remote POST. Keep that first
+    // write under the same account guard as challenge resolution and submit,
+    // with a validated timestamp so long preparation rechecks before writing.
+    let (client, mut request) = prepare(client).await?;
     let solution = resolve_generation_challenge(
         token,
         challenge_mode,

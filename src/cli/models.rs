@@ -68,8 +68,10 @@ pub enum VocalGender {
 
 #[derive(ValueEnum, Clone, Debug, Default)]
 pub enum RemasterModel {
-    #[value(name = "v5.5", alias = "chirp-flounder")]
+    #[value(name = "v6", alias = "chirp-halibut")]
     #[default]
+    V6,
+    #[value(name = "v5.5", alias = "chirp-flounder")]
     V55,
     #[value(name = "v5", alias = "chirp-carp")]
     V5,
@@ -80,6 +82,7 @@ pub enum RemasterModel {
 impl RemasterModel {
     pub fn to_api_key(&self) -> &'static str {
         match self {
+            Self::V6 => "chirp-halibut",
             Self::V55 => "chirp-flounder",
             Self::V5 => "chirp-carp",
             Self::V45Plus => "chirp-bass",
@@ -88,6 +91,7 @@ impl RemasterModel {
 
     pub fn display_name(&self) -> &'static str {
         match self {
+            Self::V6 => "v6",
             Self::V55 => "v5.5",
             Self::V5 => "v5",
             Self::V45Plus => "v4.5+",
@@ -95,6 +99,9 @@ impl RemasterModel {
     }
 
     pub fn supports_api_key(key: &str) -> bool {
-        matches!(key, "chirp-flounder" | "chirp-carp" | "chirp-bass")
+        matches!(
+            key,
+            "chirp-halibut" | "chirp-flounder" | "chirp-carp" | "chirp-bass"
+        )
     }
 }

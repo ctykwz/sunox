@@ -22,11 +22,25 @@ arguments and renders the domain report. Captcha, doctor, and update code depend
 - Read requests may retry only where the route is explicitly idempotent.
 - Account writes are sent once with redirects disabled. Transport loss, redirects, response-body
   loss after acceptance, and server errors are reported as ambiguous mutations, never replayed.
-- Commands preflight the active account through billing before their first write. Workflows that
-  can spend more than 30 seconds uploading or polling revalidate before a later write. Every raw
+- Production clients preflight the active account through billing before their first write, even
+  when the caller has only acquired the account lock. Workflows that spend more than 30 seconds
+  preparing, uploading, or polling revalidate before a later write. Every raw
   no-redirect mutation builder must pass through `prepare_mutation_request`; higher-level writes
   use `send_mutation_once`, which applies the same preparation centrally.
 - Multi-stage writes preserve durable IDs and expose read-only inspection or recovery guidance.
+- The CLI scopes each command with `core::operation` recovery state. Mutation preparation saves
+  request identities before sending; successful JSON write responses add resource identities before
+  the next stage. Failure and Ctrl+C preserve this journal and report possible remote effects;
+  successful commands remove it. The journal stores allowlisted IDs, never request payloads or auth,
+  and provides inspection rather than automatic replay. Route-specific adapters preserve known
+  response wrappers and request aliases, and distinguish audio from image upload identities.
+- Generation holds its account write lock before prompt enhancement and through submission.
+- Background auth metadata recovery honors the application browser launch policy. Reusable login
+  candidates are validated before selection; only explicit credential rejection advances candidates.
+- Downloads validate nonempty content and basic media container structure before atomic commit.
+  Opus validation walks every page and packet boundary, including continued comments; WAV
+  validation honors finite RIFF/RF64 sizes, extended chunk tables, and PCM frame alignment.
+  Neither path performs a full codec decode.
 - Unknown model, plan, entitlement, response, or protocol shapes fail closed.
 - Tests never use a real Suno account. The debug-only API override accepts only loopback HTTP
   origins and is absent from release behavior.

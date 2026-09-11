@@ -14,3 +14,12 @@ pub enum RemasterVariation {
     Normal,
     High,
 }
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RemasterStyleProfile {
+    Natural,
+    #[default]
+    Boost,
+    Clarity,
+}

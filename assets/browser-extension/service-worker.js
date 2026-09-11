@@ -1,3 +1,6 @@
+importScripts("shared.js");
+const { isRetryableManagedNetworkReason } = globalThis.SUNOX_BRIDGE_SHARED;
+
 const POLL_ALARM = "sunox-bridge-poll";
 const OFFSCREEN_PATH = "offscreen.html";
 const SERVICE_WORKER_RUNTIME_BUILD = "__SUNOX_BRIDGE_RUNTIME_BUILD__";
@@ -873,7 +876,7 @@ async function rotateFrameEnvironment(
   provider,
   ownerDocumentId
 ) {
-  if (environment.network.invalid || !environment.network.retiring) {
+  if (!frameEnvironmentCanRetry(environment) || !environment.network.retiring) {
     throw new Error("The prior managed frame environment cannot be reused");
   }
   let rulesReplaced = false;
@@ -926,6 +929,7 @@ function createManagedNetworkState(
     contentDocumentId: null,
     currentUrl: null,
     documentUrl: null,
+    executionStarted: false,
     frameId: null,
     invalid: false,
     invalidReason: null,
@@ -1006,12 +1010,22 @@ function retireManagedFrame(nonce) {
   } catch {}
 }
 
+function frameEnvironmentCanRetry(environment) {
+  const network = environment?.network;
+  return Boolean(network)
+    && !network.executionStarted
+    && (
+      !network.invalid
+      || isRetryableManagedNetworkReason(network.invalidReason)
+    );
+}
+
 function retireFrameEnvironmentForRetry(nonce) {
   if (
     !MANAGED_NONCE_PATTERN.test(nonce)
     || !activeFrameEnvironment
     || activeFrameEnvironment.nonce !== nonce
-    || activeFrameEnvironment.network.invalid
+    || !frameEnvironmentCanRetry(activeFrameEnvironment)
   ) return false;
   if (
     managedFrame
@@ -1075,6 +1089,7 @@ async function executeManagedFrameRequest(message, ownerDocumentId) {
     || message.provider !== managedFrame.provider
   ) return false;
   managedFrame.executing = true;
+  activeFrameEnvironment.network.executionStarted = true;
   managedFrame.requestId = message.requestId;
   try {
     managedFrame.port.postMessage({

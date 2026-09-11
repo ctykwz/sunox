@@ -80,6 +80,14 @@ sunox create \
   --style-influence 70
 ```
 
+新規インストールでは v6 Pro (`chirp-hawk`) が既定です。v6 Custom モードでは
+`--duration 10..360`（整数秒）、`--variety 0..4`、`--mumble`、`--max-mode` を利用でき、
+送信前に現在のアカウントモデル、権限、session flag を検証します。Sunox は対応するオプションの送信前に
+`mumble-mode` または `max-mode` を必須とします。Max Mode では指定した duration が最終的な
+曲の長さを保証しません。
+v6 Remaster は `chirp-halibut` を使用します。`--variation` は `subtle`、既定の `normal`、
+`high`、`--style-profile` は `natural`、既定の `boost`、`clarity` を受け付けます。
+
 ### インストゥルメンタルの入力モード
 
 どちらか一方だけを選びます。`--instrumental` は `--lyrics` や `--lyrics-file` と同時に使えません。
@@ -117,7 +125,10 @@ sunox clip wait <ids>              生成完了を待つ
 sunox download <ids>               完成した曲をダウンロード
 
 sunox clip cover <id>              カバーを生成
+sunox clip reuse <id>              元の歌詞とスタイルを再利用
 sunox clip extend <id>             曲を延長
+sunox clip underpaint <id>         所有する Clip に伴奏を追加
+sunox clip overpaint <id>          所有する Clip にボーカルを追加
 sunox clip concat <ids>            複数の Clip を連結
 sunox clip remaster <id>           リマスター
 sunox clip speed <id>              再生速度を変更

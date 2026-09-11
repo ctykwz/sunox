@@ -12,6 +12,10 @@ const offscreenSource = await readFile(
   new URL("../assets/browser-extension/offscreen.js", import.meta.url),
   "utf8"
 );
+const sharedSource = await readFile(
+  new URL("../assets/browser-extension/shared.js", import.meta.url),
+  "utf8"
+);
 const bridgeSource = await readFile(
   new URL("../assets/browser-extension/bridge.js", import.meta.url),
   "utf8"
@@ -561,6 +565,7 @@ function popupServiceWorkerHarness({
   managedResultDeliveryFailures = 0,
   offscreenRuntimeBuild = runtimeBuild,
   offscreenCloseKeepsContext = false,
+  onOffscreenMessage = null,
   sessionRuleFailureCalls = [],
   storageSetError = null,
   windowGetError = null,
@@ -783,6 +788,10 @@ function popupServiceWorkerHarness({
         }
       },
       async sendMessage(message) {
+        if (onOffscreenMessage) {
+          calls.notifications.push(message);
+          return await onOffscreenMessage(message);
+        }
         if (message.type === "sunox-offscreen-start-v1") {
           calls.offscreenStarts += 1;
           return {
@@ -1075,6 +1084,10 @@ function popupServiceWorkerHarness({
   };
   const context = {
     chrome,
+    importScripts(path) {
+      assert.equal(path, "shared.js");
+      vm.runInContext(sharedSource, context);
+    },
     clearInterval(timer) {
       if (timer) timer.cleared = true;
     },
@@ -6293,11 +6306,6 @@ test("offscreen heartbeat reports only recent poll-worker ticks as healthy", () 
       transport: "test",
       loopback: { runtimeBuild }
     },
-    SUNOX_BRIDGE_SHARED: {
-      errorMessage(error) {
-        return error instanceof Error ? error.message : String(error);
-      }
-    },
     SUNOX_BRIDGE_TRANSPORTS: {
       test: {
         contractVersion: 1,
@@ -6326,6 +6334,7 @@ test("offscreen heartbeat reports only recent poll-worker ticks as healthy", () 
   };
   context.globalThis = context;
   vm.createContext(context);
+  vm.runInContext(sharedSource, context);
   vm.runInContext(offscreenSource, context);
 
   const ping = () => {
@@ -6438,11 +6447,6 @@ test("offscreen heartbeat protects a claim request while its response is in flig
       transport: "test",
       loopback: { runtimeBuild }
     },
-    SUNOX_BRIDGE_SHARED: {
-      errorMessage(error) {
-        return error instanceof Error ? error.message : String(error);
-      }
-    },
     SUNOX_BRIDGE_TRANSPORTS: {
       test: {
         contractVersion: 1,
@@ -6464,6 +6468,7 @@ test("offscreen heartbeat protects a claim request while its response is in flig
   };
   context.globalThis = context;
   vm.createContext(context);
+  vm.runInContext(sharedSource, context);
   vm.runInContext(offscreenSource, context);
 
   const dispatch = (message) => {
@@ -6626,11 +6631,6 @@ test("offscreen solves a claimed challenge in an invisible iframe without reques
       transport: "test",
       loopback: { runtimeBuild }
     },
-    SUNOX_BRIDGE_SHARED: {
-      errorMessage(error) {
-        return error instanceof Error ? error.message : String(error);
-      }
-    },
     SUNOX_BRIDGE_TRANSPORTS: {
       test: {
         contractVersion: 1,
@@ -6657,6 +6657,7 @@ test("offscreen solves a claimed challenge in an invisible iframe without reques
   };
   context.globalThis = context;
   vm.createContext(context);
+  vm.runInContext(sharedSource, context);
   vm.runInContext(offscreenSource, context);
   dispatchRuntimeMessage({ type: "sunox-offscreen-start-v1", runtimeBuild });
   await flushAsync();
@@ -6873,11 +6874,6 @@ function offscreenReadinessHarness({
       transport: "test",
       loopback: { runtimeBuild }
     },
-    SUNOX_BRIDGE_SHARED: {
-      errorMessage(error) {
-        return error instanceof Error ? error.message : String(error);
-      }
-    },
     SUNOX_BRIDGE_TRANSPORTS: {
       test: {
         contractVersion: 1,
@@ -6909,6 +6905,7 @@ function offscreenReadinessHarness({
   };
   context.globalThis = context;
   vm.createContext(context);
+  vm.runInContext(sharedSource, context);
   vm.runInContext(offscreenSource, context);
   const startedAt = now;
   return {
@@ -6944,6 +6941,147 @@ function offscreenReadinessHarness({
     }
   };
 }
+
+// Keep both production controllers connected: webRequest changes the real
+// service-worker state, and its diagnostics/retirement replies drive the real
+// offscreen controller. Only Chrome/DOM/provider transport is simulated.
+function integratedManagedFrameHarness({
+  firstNetworkError = null,
+  firstRequestOverrides = {},
+  afterExecute = null
+} = {}) {
+  let worker;
+  let port;
+  const offscreen = offscreenReadinessHarness({
+    environmentResponse(message) {
+      return worker.dispatchFromOffscreen(message);
+    },
+    onRetire({ message }) {
+      return worker.dispatchFromOffscreen(message);
+    },
+    onRelease({ message }) {
+      return worker.dispatchFromOffscreen(message);
+    },
+    async onExecute({ message }) {
+      const response = await worker.dispatchFromOffscreen(message);
+      if (response?.accepted) {
+        await afterExecute?.({ worker, message, port });
+        port.deliver({
+          type: "sunox-managed-frame-result-v2",
+          requestId: message.requestId,
+          token: "integrated-network-retry-token"
+        });
+      }
+      return response;
+    },
+    onFrameAppended({ frame, index }) {
+      const request = {
+        frameId: index + 1,
+        requestId: `integrated-request-${index}`,
+        url: frame.src
+      };
+      if (index === 0 && firstNetworkError) {
+        worker.observeManagedError({
+          ...request,
+          ...firstRequestOverrides,
+          error: firstNetworkError
+        });
+        return;
+      }
+      worker.observeManagedResponse(request);
+      port = worker.connect({
+        documentId: `integrated-content-${index}`,
+        frameId: request.frameId,
+        id: "abcdefghijklmnopabcdefghijklmnop",
+        origin: "https://suno.com",
+        url: frame.src
+      }, "sunox-managed-frame-v2");
+    }
+  });
+  worker = popupServiceWorkerHarness({
+    autoObserveManagedResponse: false,
+    onOffscreenMessage(message) {
+      return offscreen.dispatchRuntimeMessage(message);
+    }
+  });
+  return { offscreen, worker };
+}
+
+async function waitForIntegratedFrameResult(harness) {
+  for (let turn = 0; turn < 30 && harness.offscreen.submitted.length === 0; turn += 1) {
+    await flushAsync();
+  }
+  assert.equal(harness.offscreen.submitted.length, 1, "controllers did not reach a terminal result");
+  await flushAsync();
+}
+
+test("real service-worker and offscreen controllers retry only classified transient network failures", async () => {
+  for (const error of [
+    "net::ERR_CONNECTION_RESET",
+    "net::ERR_NAME_NOT_RESOLVED",
+    "net::ERR_HTTP2_PROTOCOL_ERROR",
+    "net::ERR_TIMED_OUT"
+  ]) {
+    const harness = integratedManagedFrameHarness({ firstNetworkError: error });
+    await waitForIntegratedFrameResult(harness);
+    const { offscreen, worker } = harness;
+    assert.equal(offscreen.frames.length, 2, error);
+    assert.notEqual(offscreen.frameNonce(offscreen.frames[0]), offscreen.frameNonce(offscreen.frames[1]), error);
+    assert.equal(offscreen.executeMessages.length, 1, error);
+    assert.equal(offscreen.claims, 1, error);
+    assert.equal(offscreen.submitted[0].token, "integrated-network-retry-token", error);
+    assert.equal(offscreen.frames.every((frame) => frame.removed), true, error);
+    assert.equal(worker.calls.sessionRules.filter((change) => change.addRules).length, 2, error);
+    assert.deepEqual(JSON.parse(JSON.stringify(worker.calls.sessionRules.at(-1))), {
+      removeRuleIds: [29_764, 29_765]
+    });
+  }
+});
+
+test("real controller retry never clears policy or ownership violations", async () => {
+  for (const options of [
+    { firstNetworkError: "net::ERR_BLOCKED_BY_CLIENT" },
+    {
+      firstNetworkError: "net::ERR_CONNECTION_RESET",
+      firstRequestOverrides: { parentDocumentId: "unowned-document" }
+    }
+  ]) {
+    const harness = integratedManagedFrameHarness(options);
+    await waitForIntegratedFrameResult(harness);
+    assert.equal(harness.offscreen.frames.length, 1);
+    assert.equal(harness.offscreen.executeMessages.length, 0);
+    assert.equal(harness.offscreen.submitted[0].token, null);
+    assert.equal(harness.offscreen.environmentMessages.some((message) => message.type === "sunox-frame-environment-retire-v1"), false);
+    assert.equal(harness.offscreen.frames[0].removed, true);
+  }
+});
+
+test("real controller cannot retire or rotate an environment after provider execution starts", async () => {
+  let retirement;
+  let rotation;
+  const harness = integratedManagedFrameHarness({
+    async afterExecute({ worker, message }) {
+      retirement = await worker.dispatchFromOffscreen({
+        type: "sunox-frame-environment-retire-v1",
+        clientId: message.clientId,
+        nonce: message.nonce
+      });
+      rotation = await worker.dispatchFromOffscreen({
+        type: "sunox-frame-environment-prepare-v1",
+        clientId: message.clientId,
+        nonce: crypto.randomUUID(),
+        previousNonce: message.nonce,
+        provider: message.provider
+      });
+    }
+  });
+  await waitForIntegratedFrameResult(harness);
+  assert.equal(retirement.accepted, false);
+  assert.equal(rotation.accepted, false);
+  assert.equal(harness.offscreen.frames.length, 1);
+  assert.equal(harness.offscreen.executeMessages.length, 1);
+  assert.equal(harness.offscreen.submitted[0].token, "integrated-network-retry-token");
+});
 
 test("offscreen refuses polling startup from a stale service-worker build", async () => {
   const harness = offscreenReadinessHarness();
@@ -7667,6 +7805,7 @@ test("all Browser Bridge scripts parse as standalone extension scripts", () => {
   for (const [name, source] of [
     ["service-worker.js", serviceWorkerSource],
     ["offscreen.js", offscreenSource],
+    ["shared.js", sharedSource],
     ["bridge.js", bridgeSource],
     ["page.js", pageSource],
     ["transport-loopback.js", loopbackTransportSource]
@@ -7819,7 +7958,7 @@ test("managed page scripts reject dynamic paths and redirect parameters", () => 
 });
 
 test("manifest and scripts expose only the invisible offscreen-frame transport", () => {
-  assert.equal(runtimeBuild, "0.3.51");
+  assert.equal(runtimeBuild, "0.3.52");
   assert.equal(manifest.version, "__SUNOX_BRIDGE_RUNTIME_BUILD__");
   assert.equal(manifest.version_name, "__SUNOX_BRIDGE_RUNTIME_BUILD__");
   assert.equal(manifest.minimum_chrome_version, "128");

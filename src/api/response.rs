@@ -6,8 +6,14 @@ impl SunoClient {
         &self,
         resp: reqwest::Response,
     ) -> Result<reqwest::Response, CliError> {
-        self.check_response_with_invalid_token_policy(resp, true)
-            .await
+        self.check_response_with_policy(resp, true, false).await
+    }
+
+    pub(crate) async fn check_response_preserving_conflict(
+        &self,
+        resp: reqwest::Response,
+    ) -> Result<reqwest::Response, CliError> {
+        self.check_response_with_policy(resp, true, true).await
     }
 
     pub(crate) async fn check_generation_response(
@@ -15,16 +21,24 @@ impl SunoClient {
         resp: reqwest::Response,
         has_challenge_token: bool,
     ) -> Result<reqwest::Response, CliError> {
-        self.check_response_with_invalid_token_policy(resp, !has_challenge_token)
+        self.check_response_with_policy(resp, !has_challenge_token, false)
             .await
     }
 
-    async fn check_response_with_invalid_token_policy(
+    async fn check_response_with_policy(
         &self,
         resp: reqwest::Response,
         generic_invalid_token_is_auth: bool,
+        preserve_conflict: bool,
     ) -> Result<reqwest::Response, CliError> {
         let status = resp.status();
+        if status.is_client_error()
+            && !(preserve_conflict && status == reqwest::StatusCode::CONFLICT)
+        {
+            crate::core::operation::record_rejection(resp.url().path())?;
+        } else if status.is_success() {
+            crate::core::operation::record_acknowledgement(resp.url().path())?;
+        }
         if status == 401 {
             return Err(CliError::AuthExpired);
         }

@@ -84,6 +84,14 @@ sunox create \
   --style-influence 70
 ```
 
+Las instalaciones nuevas usan por defecto v6 Pro (`chirp-hawk`). En modo Custom, v6 acepta
+`--duration 10..360` en segundos enteros, `--variety 0..4`, `--mumble` y `--max-mode`; la
+disponibilidad real se valida con los modelos, derechos y flags de sesión de la cuenta. Sunox exige
+`mumble-mode` o `max-mode` antes de enviar la opción correspondiente. Con Max Mode, la duración solicitada no
+garantiza la duración final.
+El Remaster v6 usa `chirp-halibut`: `--variation` admite `subtle`, `normal` (predeterminado) y
+`high`; `--style-profile` admite `natural`, `boost` (predeterminado) y `clarity`.
+
 ### Modos instrumentales
 
 Elige un solo modo. `--instrumental` no se puede combinar con `--lyrics` ni `--lyrics-file`:
@@ -122,7 +130,10 @@ sunox clip wait <ids>               Esperar a que termine la generación
 sunox download <ids>                Descargar canciones terminadas
 
 sunox clip cover <id>               Crear un cover
+sunox clip reuse <id>               Reutilizar letra y estilos
 sunox clip extend <id>              Extender una canción
+sunox clip underpaint <id>          Añadir acompañamiento a un clip propio
+sunox clip overpaint <id>           Añadir voz a un clip propio
 sunox clip concat <ids>             Unir varios clips
 sunox clip remaster <id>            Remasterizar
 sunox clip speed <id>               Cambiar la velocidad

@@ -10,6 +10,8 @@ use super::SunoClient;
 use super::extend::ExtendClipOptions;
 use super::inspiration::InspirationOptions;
 use super::lyrics::CowriteLyricsOptions;
+use super::paint::{PaintMode, PaintOptions};
+use super::remaster::RemasterOptions;
 use super::types::{
     Clip, ClipReaction, ControlSliders, CreateAudioUploadRequest, CreateAudioUploadSpec,
     CreateImageUploadRequest, CreatePersonaRequest, CreateVoiceVerificationRequest,
@@ -2002,6 +2004,234 @@ async fn generate_rejects_control_sliders_for_a_model_without_the_web_capability
 }
 
 #[tokio::test]
+async fn v6_generation_preserves_variety_mumble_and_max_mode_contract() {
+    let mut billing = serde_json::from_str::<serde_json::Value>(&billing_info_with_models(
+        "tier-pro",
+        serde_json::json!([{
+            "name": "v6 Pro",
+            "external_key": "chirp-hawk",
+            "can_use": true,
+            "is_default_model": true,
+            "description": "v6 fixture",
+            "features": ["create_control_sliders", "mumble_mode"],
+            "max_lengths": {},
+            "major_version": 6
+        }]),
+    ))
+    .expect("billing fixture");
+    billing["accessible_features"] = serde_json::json!(["max_mode"]);
+    let billing = billing.to_string();
+    let server = MockServer::json_sequence(&[
+        billing.as_str(),
+        r#"{"flags":{"aug-creativity":true,"mumble-mode":true,"max-mode":true},"roles":{}}"#,
+        r#"{"clips":[{"id":"clip-v6","title":"Mumble","status":"submitted","model_name":"chirp-hawk","created_at":"2026-09-11T00:00:00Z"}]}"#,
+    ])
+    .await;
+    let client = server.client();
+    let mut generate = GenerateRequest::new("chirp-hawk", "custom");
+    generate.set_challenge_token(Some("captcha-token".into()));
+    generate.metadata.control_sliders = Some(ControlSliders {
+        weirdness_constraint: None,
+        style_weight: None,
+        audio_weight: None,
+        aug_creativity: Some(3.0),
+    });
+    generate.metadata.is_mumble = Some(true);
+    generate.metadata.is_max_mode = Some(true);
+
+    client.generate(&generate).await.expect("v6 generation");
+
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[1].path, "/api/session/");
+    assert_eq!(requests[2].path, "/api/generate/v2-web/");
+    let body = serde_json::from_str::<serde_json::Value>(&requests[2].body).expect("request json");
+    assert_eq!(body["mv"], "chirp-hawk");
+    assert_eq!(body["metadata"]["control_sliders"]["aug_creativity"], 3.0);
+    assert_eq!(body["metadata"]["is_mumble"], true);
+    assert_eq!(body["metadata"]["is_max_mode"], true);
+}
+
+#[tokio::test]
+async fn v6_generation_applies_current_web_variety_defaults() {
+    for (external_key, expected) in [("chirp-hawk", 1.0), ("chirp-hawk-wild", 0.0)] {
+        let billing = billing_info_with_models(
+            "tier-pro",
+            serde_json::json!([{
+                "name": "v6",
+                "external_key": external_key,
+                "can_use": true,
+                "is_default_model": true,
+                "description": "v6 fixture",
+                "features": ["create_control_sliders"],
+                "max_lengths": {},
+                "major_version": 6
+            }]),
+        );
+        let session = r#"{"flags":{"aug-creativity":true},"roles":{}}"#;
+        let server = MockServer::json_sequence(&[billing.as_str(), session]).await;
+        let client = server.client();
+        let mut request = GenerateRequest::new(external_key, "custom");
+
+        client
+            .prepare_generation_request(&mut request)
+            .await
+            .expect("v6 variety default");
+
+        assert_eq!(
+            request
+                .metadata
+                .control_sliders
+                .as_ref()
+                .and_then(|sliders| sliders.aug_creativity),
+            Some(expected),
+            "unexpected default for {external_key}"
+        );
+        assert_eq!(request.duration, Some(180.0));
+        let requests = server.captured_all().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].path, "/api/session/");
+    }
+}
+
+#[tokio::test]
+async fn v6_generation_omits_gated_variety_default_when_session_gate_is_absent() {
+    let billing = billing_info_with_models(
+        "tier-pro",
+        serde_json::json!([{
+            "name": "v6",
+            "external_key": "chirp-hawk",
+            "can_use": true,
+            "is_default_model": true,
+            "description": "v6 fixture",
+            "features": ["create_control_sliders"],
+            "max_lengths": {},
+            "major_version": 6
+        }]),
+    );
+    let server = MockServer::json_sequence(&[billing.as_str(), r#"{"flags":{},"roles":{}}"#]).await;
+    let client = server.client();
+    let mut request = GenerateRequest::new("chirp-hawk", "custom");
+
+    client
+        .prepare_generation_request(&mut request)
+        .await
+        .expect("ungated default should be omitted, not reject generation");
+
+    assert!(request.metadata.control_sliders.is_none());
+}
+
+#[tokio::test]
+async fn explicit_v6_variety_requires_the_live_session_gate() {
+    let billing = billing_info_with_models(
+        "tier-pro",
+        serde_json::json!([{
+            "name": "v6",
+            "external_key": "chirp-hawk",
+            "can_use": true,
+            "is_default_model": true,
+            "description": "v6 fixture",
+            "features": ["create_control_sliders"],
+            "max_lengths": {},
+            "major_version": 6
+        }]),
+    );
+    let server = MockServer::json_sequence(&[billing.as_str(), r#"{"flags":{},"roles":{}}"#]).await;
+    let client = server.client();
+    let mut request = GenerateRequest::new("chirp-hawk", "custom");
+    request.metadata.control_sliders = Some(ControlSliders {
+        weirdness_constraint: None,
+        style_weight: None,
+        audio_weight: None,
+        aug_creativity: Some(2.0),
+    });
+
+    let error = client
+        .prepare_generation_request(&mut request)
+        .await
+        .expect_err("explicit Variety must fail closed without its Web gate");
+
+    assert!(matches!(error, CliError::Config(message) if message.contains("aug-creativity")));
+}
+
+#[tokio::test]
+async fn v6_generation_controls_fail_closed_on_missing_model_or_account_gates() {
+    let v6_without_mumble = billing_info_with_models(
+        "tier-pro",
+        serde_json::json!([{
+            "name": "v6 Pro",
+            "external_key": "chirp-hawk",
+            "can_use": true,
+            "is_default_model": true,
+            "description": "v6 fixture",
+            "features": ["create_control_sliders"],
+            "max_lengths": {},
+            "major_version": 6
+        }]),
+    );
+    let server = MockServer::json(&v6_without_mumble).await;
+    let client = server.client();
+    let mut mumble = GenerateRequest::new("chirp-hawk", "custom");
+    mumble.metadata.is_mumble = Some(true);
+    let error = client
+        .prepare_generation_request(&mut mumble)
+        .await
+        .expect_err("Mumble must require the model feature");
+    assert!(matches!(error, CliError::Config(message) if message.contains("Mumble Mode")));
+    assert_eq!(server.captured_all().await.len(), 1);
+
+    let v6_with_mumble = billing_info_with_models(
+        "tier-pro",
+        serde_json::json!([{
+            "name": "v6 Pro",
+            "external_key": "chirp-hawk",
+            "can_use": true,
+            "is_default_model": true,
+            "description": "v6 fixture",
+            "features": ["create_control_sliders", "mumble_mode"],
+            "max_lengths": {},
+            "major_version": 6
+        }]),
+    );
+    let server =
+        MockServer::json_sequence(&[v6_with_mumble.as_str(), r#"{"flags":{},"roles":{}}"#]).await;
+    let client = server.client();
+    let mut mumble = GenerateRequest::new("chirp-hawk", "custom");
+    mumble.metadata.is_mumble = Some(true);
+    let error = client
+        .prepare_generation_request(&mut mumble)
+        .await
+        .expect_err("Mumble must require the account gate");
+    assert!(matches!(error, CliError::Config(message) if message.contains("mumble-mode")));
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].path, "/api/session/");
+
+    let v6_without_entitlement = billing_info_with_models(
+        "tier-pro",
+        serde_json::json!([{
+            "name": "v6 Pro",
+            "external_key": "chirp-hawk",
+            "can_use": true,
+            "is_default_model": true,
+            "description": "v6 fixture",
+            "max_lengths": {},
+            "major_version": 6
+        }]),
+    );
+    let server = MockServer::json(&v6_without_entitlement).await;
+    let client = server.client();
+    let mut max_mode = GenerateRequest::new("chirp-hawk", "custom");
+    max_mode.metadata.is_max_mode = Some(true);
+    let error = client
+        .prepare_generation_request(&mut max_mode)
+        .await
+        .expect_err("Max Mode must require the account entitlement");
+    assert!(matches!(error, CliError::Config(message) if message.contains("max_mode entitlement")));
+    assert_eq!(server.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
 async fn sourced_vox_reference_falls_back_to_current_legacy_task_for_an_older_model() {
     let billing = billing_info_with_models(
         "tier-pro",
@@ -3036,6 +3266,65 @@ async fn remaster_default_variation_posts_normal() {
     assert_eq!(requests.len(), 2);
     let body = serde_json::from_str::<serde_json::Value>(&requests[1].body).expect("request json");
     assert_eq!(body["variation_category"], "normal");
+}
+
+#[tokio::test]
+async fn v6_remaster_posts_current_web_defaults() {
+    let source = r#"{"id":"clip-a","title":"Source","status":"complete","model_name":"chirp-hawk","created_at":"2026-09-11T00:00:00Z","is_trashed":false,"metadata":{"duration":180.0},"action_config":{"actions":[{"action_type":"remaster","visible":true,"disabled":false}]}}"#;
+    let generated = r#"{"clips":[{"id":"remaster-v6","title":"Remaster","status":"submitted","model_name":"chirp-halibut","created_at":"2026-09-11T00:00:00Z"}]}"#;
+    let server = MockServer::json_sequence(&[source, generated]).await;
+    let client = server.client();
+
+    client
+        .remaster("clip-a", "chirp-halibut", None)
+        .await
+        .expect("v6 remaster");
+
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].path, "/api/generate/upsample");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[1].body).expect("request json"),
+        serde_json::json!({
+            "clip_id": "clip-a",
+            "model_name": "chirp-halibut",
+            "variation_category": "normal",
+            "style_profile": "boost"
+        })
+    );
+}
+
+#[tokio::test]
+async fn v6_remaster_posts_explicit_variation_and_style_profile() {
+    let source = r#"{"id":"clip-a","title":"Source","status":"complete","model_name":"chirp-hawk","created_at":"2026-09-11T00:00:00Z","is_trashed":false,"metadata":{"duration":180.0},"action_config":{"actions":[{"action_type":"remaster","visible":true,"disabled":false}]}}"#;
+    let generated = r#"{"clips":[{"id":"remaster-v6","title":"Remaster","status":"submitted","model_name":"chirp-halibut","created_at":"2026-09-11T00:00:00Z"}]}"#;
+    let server = MockServer::json_sequence(&[source, generated]).await;
+    let client = server.client();
+
+    client
+        .remaster_with_options(
+            "clip-a",
+            "chirp-halibut",
+            RemasterOptions {
+                variation: Some(crate::api::types::RemasterVariation::High),
+                style_profile: Some(crate::api::types::RemasterStyleProfile::Clarity),
+            },
+        )
+        .await
+        .expect("v6 explicit Remaster controls");
+
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].path, "/api/generate/upsample");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&requests[1].body).expect("request json"),
+        serde_json::json!({
+            "clip_id": "clip-a",
+            "model_name": "chirp-halibut",
+            "variation_category": "high",
+            "style_profile": "clarity"
+        })
+    );
 }
 
 #[tokio::test]
@@ -4195,6 +4484,101 @@ async fn extend_fetches_source_clip_and_posts_string_title_contract() {
     assert_eq!(body["metadata"]["is_remix"], true);
     assert_eq!(body["metadata"]["lyrics_updated"], false);
     assert_eq!(body["metadata"]["user_tier"], "tier-pro");
+}
+
+#[tokio::test]
+async fn underpaint_uses_owned_vocal_source_and_current_v2_web_contract() {
+    let mut billing: serde_json::Value =
+        serde_json::from_str(&billing_info_response("tier-pro")).expect("billing fixture");
+    billing["accessible_features"] = serde_json::json!(["edit_mode"]);
+    billing["models"][0]["allowed_condition_combinations"] = serde_json::json!([["underpaint"]]);
+    let billing = billing.to_string();
+    let server = MockServer::json_sequence(&[
+        billing.as_str(),
+        r#"{"id":"clip-vocal","title":"Source Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-09-11T00:00:00Z","is_trashed":false,"user_id":"user-1","metadata":{"prompt":"[Verse]\nOriginal words","tags":"source pop","negative_tags":"metal","stem_type_group_name":"Vocals"}}"#,
+        billing.as_str(),
+        r#"{"required":false}"#,
+        r#"{"clips":[{"id":"underpaint-1","title":"Source Song (Add Instrumental)","status":"submitted","model_name":"chirp-fenix","created_at":"2026-09-11T00:00:00Z"}]}"#,
+    ])
+    .await;
+    let client = server.client();
+
+    let request = client
+        .prepare_paint_request(PaintOptions {
+            clip_id: "clip-vocal",
+            title: None,
+            lyrics: None,
+            tags: None,
+            negative_tags: None,
+            model: "auto",
+            mode: PaintMode::Underpaint,
+        })
+        .await
+        .expect("prepare underpaint");
+    let clips = client.generate(&request).await.expect("underpaint");
+
+    assert_eq!(clips[0].id, "underpaint-1");
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 5);
+    assert_eq!(requests[0].path, "/api/billing/info/");
+    assert_eq!(requests[1].path, "/api/clip/clip-vocal");
+    assert_eq!(requests[2].path, "/api/billing/info/");
+    assert_eq!(requests[3].path, "/api/c/check");
+    assert_eq!(requests[4].path, "/api/generate/v2-web/");
+    let body: serde_json::Value =
+        serde_json::from_str(&requests[4].body).expect("generation request");
+    assert_eq!(body["task"], "underpainting");
+    assert_eq!(body["underpainting_clip_id"], "clip-vocal");
+    assert!(body.get("overpainting_clip_id").is_none());
+    assert_eq!(body["metadata"]["is_remix"], true);
+    assert_eq!(body["prompt"], "[Verse]\nOriginal words");
+    assert_eq!(body["tags"], "source pop");
+    assert_eq!(body["negative_tags"], "metal");
+}
+
+#[tokio::test]
+async fn paint_fails_before_submit_without_edit_mode_or_ownership() {
+    let no_access = MockServer::json(&billing_info_response("tier-pro")).await;
+    let error = no_access
+        .client()
+        .prepare_paint_request(PaintOptions {
+            clip_id: "clip-vocal",
+            title: None,
+            lyrics: None,
+            tags: None,
+            negative_tags: None,
+            model: "auto",
+            mode: PaintMode::Underpaint,
+        })
+        .await
+        .expect_err("edit mode entitlement is required");
+    assert!(error.to_string().contains("edit_mode"));
+    assert_eq!(no_access.captured_all().await.len(), 1);
+
+    let mut billing: serde_json::Value =
+        serde_json::from_str(&billing_info_response("tier-pro")).expect("billing fixture");
+    billing["accessible_features"] = serde_json::json!(["edit_mode"]);
+    let billing = billing.to_string();
+    let wrong_owner = MockServer::json_sequence(&[
+        billing.as_str(),
+        r#"{"id":"clip-vocal","title":"Source Song","status":"complete","model_name":"chirp-fenix","created_at":"2026-09-11T00:00:00Z","is_trashed":false,"user_id":"user-other","metadata":{"stem_type_group_name":"Vocals"}}"#,
+    ])
+    .await;
+    let error = wrong_owner
+        .client()
+        .prepare_paint_request(PaintOptions {
+            clip_id: "clip-vocal",
+            title: None,
+            lyrics: None,
+            tags: None,
+            negative_tags: None,
+            model: "auto",
+            mode: PaintMode::Underpaint,
+        })
+        .await
+        .expect_err("ownership is required");
+    assert!(error.to_string().contains("owned"));
+    assert_eq!(wrong_owner.captured_all().await.len(), 2);
 }
 
 #[tokio::test]

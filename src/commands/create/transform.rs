@@ -1,7 +1,7 @@
 use crate::app::AppContext;
 use crate::cli::{
-    ConcatArgs, CoverArgs, CropArgs, FadeArgs, RemasterArgs, ReverseArgs, SpeedArgs, StemGroup,
-    StemMode, StemsArgs,
+    ConcatArgs, CoverArgs, CropArgs, FadeArgs, PaintArgs, RemasterArgs, ReuseArgs, ReverseArgs,
+    SpeedArgs, StemGroup, StemMode, StemsArgs,
 };
 use crate::core::{AppConfig, CliError, normalize_generation_model_selector};
 
@@ -26,16 +26,137 @@ pub async fn cover(args: CoverArgs, ctx: &AppContext) -> Result<(), CliError> {
     }
     let challenge_mode = ChallengeMode::from_flags(args.captcha, args.no_captcha);
     let token = args.token.clone();
-    let clips = execute_generation_submission(token, challenge_mode, ctx, move || async move {
-        let client = ctx.client().await?;
-        let mut req = client
-            .prepare_cover_request(&args.clip_id, &model, args.tags.as_deref(), None)
-            .await?;
-        client.prepare_generation_request(&mut req).await?;
-        Ok((client, req))
-    })
-    .await?;
+    let clips =
+        execute_generation_submission(token, challenge_mode, ctx, move |client| async move {
+            let mut req = client
+                .prepare_cover_request(&args.clip_id, &model, args.tags.as_deref(), None)
+                .await?;
+            client.prepare_generation_request(&mut req).await?;
+            Ok((client, req))
+        })
+        .await?;
     output_generation(&clips, ctx);
+    Ok(())
+}
+
+pub async fn reuse(args: ReuseArgs, ctx: &AppContext) -> Result<(), CliError> {
+    let model = normalize_generation_model_selector(
+        args.model
+            .as_deref()
+            .unwrap_or(ctx.config.default_model.as_str()),
+    )?;
+    let lyrics = match (args.lyrics, args.lyrics_file) {
+        (Some(lyrics), _) => Some(lyrics),
+        (_, Some(path)) => Some(std::fs::read_to_string(path)?),
+        _ => None,
+    };
+    let mut req = crate::api::types::GenerateRequest::new(&model, "custom");
+    req.title = Some(args.title.clone().unwrap_or_default());
+    req.prompt = lyrics.clone().unwrap_or_default();
+    req.tags = Some(args.tags.clone().unwrap_or_default());
+    req.negative_tags = args.exclude.clone().unwrap_or_default();
+    req.duration = args.duration;
+    req.metadata.control_sliders = crate::workflow::generation::build_control_sliders(
+        args.weirdness,
+        args.style_influence,
+        args.variety,
+    )?;
+    let challenge_mode = ChallengeMode::from_flags(args.captcha, args.no_captcha);
+    let token = args.token;
+    let clip_id = args.clip_id;
+    let enhance_tags = args.enhance_tags;
+    let explicit_title = args.title.is_some();
+    let explicit_tags = args.tags.is_some();
+    let explicit_negative_tags = args.exclude.is_some();
+    let explicit_lyrics = lyrics.is_some();
+
+    if !ctx.quiet {
+        eprintln!("Reusing source styles and lyrics with {model}...");
+    }
+    let result =
+        execute_generation_submission(token, challenge_mode, ctx, move |client| async move {
+            super::submit::resolve_reuse_source(
+                &mut req,
+                &client,
+                &clip_id,
+                explicit_title,
+                explicit_tags,
+                explicit_negative_tags,
+                explicit_lyrics,
+            )
+            .await?;
+            let required_features: &[&str] = if enhance_tags {
+                &[
+                    "reuse_styles_lyrics",
+                    crate::api::generate::TAG_UPSAMPLE_FEATURE,
+                ]
+            } else {
+                &["reuse_styles_lyrics"]
+            };
+            let limits = client
+                .prepare_generation_request_with_features(&mut req, required_features)
+                .await?;
+            if enhance_tags {
+                super::submit::enhance_resolved_tags(&mut req, &client).await?;
+                crate::api::generate::validate_generation_lengths_with_limits(&req, &limits)?;
+            }
+            Ok((client, req))
+        })
+        .await?;
+    output_generation(&result, ctx);
+    Ok(())
+}
+
+pub async fn underpaint(args: PaintArgs, ctx: &AppContext) -> Result<(), CliError> {
+    paint(args, crate::api::paint::PaintMode::Underpaint, ctx).await
+}
+
+pub async fn overpaint(args: PaintArgs, ctx: &AppContext) -> Result<(), CliError> {
+    paint(args, crate::api::paint::PaintMode::Overpaint, ctx).await
+}
+
+async fn paint(
+    args: PaintArgs,
+    mode: crate::api::paint::PaintMode,
+    ctx: &AppContext,
+) -> Result<(), CliError> {
+    let model = normalize_generation_model_selector(
+        args.model
+            .as_deref()
+            .unwrap_or(ctx.config.default_model.as_str()),
+    )?;
+    let lyrics = match (args.lyrics, args.lyrics_file) {
+        (Some(lyrics), _) => Some(lyrics),
+        (_, Some(path)) => Some(std::fs::read_to_string(path)?),
+        _ => None,
+    };
+    let challenge_mode = ChallengeMode::from_flags(args.captcha, args.no_captcha);
+    let token = args.token;
+    let label = match mode {
+        crate::api::paint::PaintMode::Underpaint => "instrumental backing",
+        crate::api::paint::PaintMode::Overpaint => "vocals",
+    };
+    if !ctx.quiet {
+        eprintln!("Adding {label} with {model}...");
+    }
+    let result =
+        execute_generation_submission(token, challenge_mode, ctx, move |client| async move {
+            let mut req = client
+                .prepare_paint_request(crate::api::paint::PaintOptions {
+                    clip_id: &args.clip_id,
+                    title: args.title.as_deref(),
+                    lyrics: lyrics.as_deref(),
+                    tags: args.tags.as_deref(),
+                    negative_tags: args.exclude.as_deref(),
+                    model: &model,
+                    mode,
+                })
+                .await?;
+            client.prepare_generation_request(&mut req).await?;
+            Ok((client, req))
+        })
+        .await?;
+    output_generation(&result, ctx);
     Ok(())
 }
 
@@ -65,7 +186,14 @@ pub async fn remaster(args: RemasterArgs, ctx: &AppContext) -> Result<(), CliErr
     }
     let _mutation_guard = ctx.acquire_mutation_lock_for(&client.auth_state_snapshot())?;
     let result = client
-        .remaster(&args.clip_id, &model, args.variation)
+        .remaster_with_options(
+            &args.clip_id,
+            &model,
+            crate::api::remaster::RemasterOptions {
+                variation: args.variation,
+                style_profile: args.style_profile,
+            },
+        )
         .await?;
     output_generation(&result, ctx);
     Ok(())
@@ -109,7 +237,15 @@ fn select_remaster_model(
     } else {
         models
             .iter()
-            .find(|model| crate::cli::RemasterModel::supports_api_key(&model.external_key))
+            .find(|model| {
+                model.is_default_model
+                    && crate::cli::RemasterModel::supports_api_key(&model.external_key)
+            })
+            .or_else(|| {
+                models
+                    .iter()
+                    .find(|model| crate::cli::RemasterModel::supports_api_key(&model.external_key))
+            })
     };
     let selected = selected.ok_or_else(|| {
         if let Some(requested) = requested {
@@ -124,7 +260,7 @@ fn select_remaster_model(
             .collect::<Vec<_>>()
             .join(", ");
         CliError::Config(format!(
-            "Suno account reports no supported remaster models; reported keys: {reported}. Supported keys are chirp-flounder, chirp-carp, and chirp-bass"
+            "Suno account reports no supported remaster models; reported keys: {reported}. Supported keys are chirp-halibut, chirp-flounder, chirp-carp, and chirp-bass"
         ))
     })?;
     Ok(selected.external_key.clone())
@@ -290,25 +426,25 @@ pub async fn stems(args: StemsArgs, ctx: &AppContext) -> Result<(), CliError> {
     let challenge_mode = ChallengeMode::from_flags(args.captcha, args.no_captcha);
     let token = args.token.clone();
     let mode = args.mode;
-    let clips = execute_generation_submission(token, challenge_mode, ctx, move || async move {
-        let client = ctx.client().await?;
-        let mut req = match mode {
-            StemMode::Auto => client.prepare_stems_request(&args.clip_id, None).await?,
-            StemMode::Split => {
-                client
-                    .prepare_split_stems_request(
-                        &args.clip_id,
-                        stem.expect("validated split stem").api_group(),
-                        stem.expect("validated split stem").canonical_name(),
-                        None,
-                    )
-                    .await?
-            }
-        };
-        client.prepare_generation_request(&mut req).await?;
-        Ok((client, req))
-    })
-    .await?;
+    let clips =
+        execute_generation_submission(token, challenge_mode, ctx, move |client| async move {
+            let mut req = match mode {
+                StemMode::Auto => client.prepare_stems_request(&args.clip_id, None).await?,
+                StemMode::Split => {
+                    client
+                        .prepare_split_stems_request(
+                            &args.clip_id,
+                            stem.expect("validated split stem").api_group(),
+                            stem.expect("validated split stem").canonical_name(),
+                            None,
+                        )
+                        .await?
+                }
+            };
+            client.prepare_generation_request(&mut req).await?;
+            Ok((client, req))
+        })
+        .await?;
     output_generation(&clips, ctx);
     Ok(())
 }
@@ -371,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn remaster_auto_uses_first_supported_web_model_without_filtering_can_use() {
+    fn remaster_auto_prefers_the_supported_web_default_without_filtering_can_use() {
         let models = vec![
             RemasterModelInfo {
                 name: "future".into(),
@@ -397,8 +533,29 @@ mod tests {
         ];
 
         assert_eq!(
-            select_remaster_model(&models, None).expect("first supported Web-listed model"),
-            "chirp-carp"
+            select_remaster_model(&models, None).expect("supported Web default model"),
+            "chirp-flounder"
+        );
+    }
+
+    #[test]
+    fn remaster_auto_uses_the_current_v6_model() {
+        let models = vec![RemasterModelInfo {
+            name: "v6".into(),
+            external_key: "chirp-halibut".into(),
+            is_default_model: true,
+            can_use: Some(false),
+            extra: Default::default(),
+        }];
+
+        assert_eq!(
+            select_remaster_model(&models, None).expect("v6 Remaster model"),
+            "chirp-halibut"
+        );
+        assert_eq!(
+            select_remaster_model(&models, Some(&RemasterModel::V6))
+                .expect("explicit v6 Remaster model"),
+            "chirp-halibut"
         );
     }
 

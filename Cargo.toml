@@ -1,6 +1,6 @@
 [package]
 name = "sunox"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 rust-version = "1.88"
 description = "Generate AI music from your terminal via direct Suno web workflows"
@@ -22,7 +22,7 @@ tokio-util = { version = "0.7", features = ["io"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 reqwest = { version = "0.12", features = ["json", "multipart", "rustls-tls", "stream"], default-features = false }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["arbitrary_precision"] }
 thiserror = "2"
 toml = "0.8"
 figment = { version = "0.10", features = ["toml", "env"] }

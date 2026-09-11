@@ -65,12 +65,16 @@ impl SunoClient {
     }
 
     async fn cover_art_cost(&self, path: &str, body: Value) -> Result<CoverArtCost, CliError> {
-        let response = self.post(path).json(&body).send().await?;
-        let response = self.check_cover_art_response(response).await?;
-        let cost: CoverArtCost = response.json().await.map_err(|error| CliError::Api {
-            code: "schema_drift",
-            message: format!("invalid cover-art cost response: {error}"),
-        })?;
+        let cost: CoverArtCost = self
+            .with_auth_retry(|| async {
+                let response = self.post(path).json(&body).send().await?;
+                let response = self.check_cover_art_response(response).await?;
+                response.json().await.map_err(|error| CliError::Api {
+                    code: "schema_drift",
+                    message: format!("invalid cover-art cost response: {error}"),
+                })
+            })
+            .await?;
         if !cost.cost.is_finite() || cost.cost < 0.0 {
             return Err(CliError::Api {
                 code: "schema_drift",
@@ -149,6 +153,15 @@ impl SunoClient {
                 operation,
                 media_type,
                 "response_body",
+                error.to_string(),
+            )
+        })?;
+        crate::core::operation::record_response(path, &raw).map_err(|error| {
+            ambiguous_cover_art_submit(
+                &operation_id,
+                operation,
+                media_type,
+                "checkpoint_persist",
                 error.to_string(),
             )
         })?;
@@ -277,12 +290,15 @@ impl SunoClient {
         path: &str,
         body: &impl serde::Serialize,
     ) -> Result<T, CliError> {
-        let response = self.post(path).json(body).send().await?;
-        let response = self.check_response(response).await?;
-        response.json().await.map_err(|error| CliError::Api {
-            code: "schema_drift",
-            message: format!("invalid cover-art read response from {path}: {error}"),
+        self.with_auth_retry(|| async {
+            let response = self.post(path).json(body).send().await?;
+            let response = self.check_response(response).await?;
+            response.json().await.map_err(|error| CliError::Api {
+                code: "schema_drift",
+                message: format!("invalid cover-art read response from {path}: {error}"),
+            })
         })
+        .await
     }
 
     async fn check_cover_art_response(
@@ -293,6 +309,7 @@ impl SunoClient {
         if status.as_u16() != 402 && status.as_u16() != 400 {
             return self.check_response(response).await;
         }
+        crate::core::operation::record_rejection(response.url().path())?;
         let text = response.text().await.unwrap_or_default();
         let parsed = serde_json::from_str::<Value>(&text)
             .unwrap_or_else(|_| serde_json::json!({"body": text}));
@@ -419,13 +436,34 @@ impl SunoClient {
             ));
         }
         let response = self.check_cover_art_response(response).await?;
-        let applied: CoverArtApplyResponse = response.json().await.map_err(|error| {
+        let raw: Value = response.json().await.map_err(|error| {
             ambiguous_cover_art_apply(
                 &operation_id,
                 clip_id,
                 media_type,
                 media_id,
                 "response_body",
+                error.to_string(),
+            )
+        })?;
+        crate::core::operation::record_response(&format!("/api/gen/{clip_id}/set_metadata/"), &raw)
+            .map_err(|error| {
+                ambiguous_cover_art_apply(
+                    &operation_id,
+                    clip_id,
+                    media_type,
+                    media_id,
+                    "checkpoint_persist",
+                    error.to_string(),
+                )
+            })?;
+        let applied: CoverArtApplyResponse = serde_json::from_value(raw).map_err(|error| {
+            ambiguous_cover_art_apply(
+                &operation_id,
+                clip_id,
+                media_type,
+                media_id,
+                "response_schema",
                 error.to_string(),
             )
         })?;
@@ -493,6 +531,17 @@ impl SunoClient {
                 error.to_string(),
             )
         })?;
+        crate::core::operation::record_response("/api/gen/prompt_image/", &raw).map_err(
+            |error| {
+                ambiguous_prompt_image(
+                    &operation_id,
+                    prompt,
+                    "checkpoint_persist",
+                    error.error_code(),
+                    error.to_string(),
+                )
+            },
+        )?;
         serde_json::from_value(raw).map_err(|error| {
             ambiguous_prompt_image(
                 &operation_id,

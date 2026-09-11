@@ -16,6 +16,9 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "install-skill", "install-browser-extension", "update"
         ],
         "models": {
+            "v6": "chirp-hawk",
+            "v6-wild": "chirp-hawk-wild",
+            "v6-mini": "chirp-goose",
             "v5.5": "chirp-fenix",
             "v5": "chirp-crow",
             "v4.5+": "chirp-bluejay",
@@ -26,8 +29,9 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "v3": "chirp-v3-0",
             "v2": "chirp-v2-xxl-alpha",
         },
-        "model_selection": "Model availability, defaults, IDs, task capabilities, and max_lengths are account-specific. default_model=auto selects a usable account default, then usable free default, then first usable model. Every generation and Cover selector requires a successful billing read; auto fails closed before generation when billing is unavailable, and no compiled-in model is substituted. Explicit selectors resolve by exact external key, exact account model ID, or unambiguous case-insensitive display name; unusable or ambiguous matches fail before submission. --duration is accepted only for exact current v5.5 chirp-fenix and is checked against max_lengths.duration when advertised. Remaster uses the separate accessible_features and remaster_model_types contract, then preflights source state and action_config; legacy remaster can_use is diagnostic only.",
+        "model_selection": "The default generation selector is v6 Pro chirp-hawk. Model availability, IDs, task capabilities, and max_lengths remain account-specific and every generation or Cover selector requires a successful billing read. default_model=auto selects a usable account default, then usable free default, then first usable model. Explicit selectors resolve by exact external key, exact account model ID, or unambiguous case-insensitive display name; unavailable, unusable, and ambiguous matches fail before submission. --duration accepts whole seconds from 10..360 for v6 Custom generation and retains the exact v5.5 chirp-fenix compatibility path; advertised max_lengths.duration is also enforced. Remaster uses the separate accessible_features and remaster_model_types contract, then preflights source state and action_config; legacy remaster can_use is diagnostic only.",
         "remaster_models": {
+            "v6": "chirp-halibut",
             "v5.5": "chirp-flounder",
             "v5": "chirp-carp",
             "v4.5+": "chirp-bass",
@@ -74,6 +78,9 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "sunox clip wait <clip_id> --json",
             "sunox clip upload-status <upload_id> --json",
             "sunox clip inspire <clip_id> --title <title> --tags <tags> --lyrics-file <path> --json",
+            "sunox clip reuse <clip_id> --json",
+            "sunox clip underpaint <clip_id> --json",
+            "sunox clip overpaint <clip_id> --json",
             "sunox clip download <clip_id> --json",
             "sunox clip download <clip_id> --format wav --json",
             "sunox clip get-stems <clip_id> --json",
@@ -108,7 +115,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
             "read_only": "pass global --read-only for audits and inspections that must not write. It blocks account writes before submission, disables aligned-lyrics augmentation, and permits a download only for an already unlocked source whose is_download_unlocked field is exactly true; it never calls /api/download/authorize",
             "ambiguous_mutation": "generation, download authorization, Remaster, conversion, Voice, Custom Model, lyrics-project, visual, or another submitted-write ambiguity includes an operation ID and recovery details. Download authorization may consume allowance and must never be replayed blindly; inspect exact read-only state and retry only when recovery.resumable=true",
             "single_write_transport": "Suno business writes refresh authentication before submission, send at most once, never follow redirects, and map transport loss, 3xx, 5xx, or an unreadable accepted response to ambiguous_mutation; only read/validation requests use auth retry",
-            "paid_or_credit_work": "create, inspire, cover, extend, stems, remaster, speed, reverse, crop, fade, upload, Voice creation, Custom Model training, AI image/video generation, conversion, and prepared download/export workflows can be stateful, credit-sensitive, or plan-metered; only run the amount, operation, and format the user requested",
+            "paid_or_credit_work": "create, reuse, inspire, cover, extend, underpaint, overpaint, stems, remaster, speed, reverse, crop, fade, upload, Voice creation, Custom Model training, AI image/video generation, conversion, and prepared download/export workflows can be stateful, credit-sensitive, or plan-metered; only run the amount, operation, and format the user requested",
             "download_quality": "current CLI uses prepared MP3 by default, supports prepared M4A/WAV and video MP4, and retains OPUS only as unlocked legacy compatibility; agents should request a file/format only when needed",
             "public_visibility": "do not publish clips, playlists, or personas or make them public unless the user explicitly asks",
             "persona_create_visibility": "persona create is private by default and requires explicit --public to create a public persona",
@@ -125,11 +132,11 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                     "--captcha": "force browser-backed challenge verification even when preflight says it is unnecessary",
                     "--no-captcha": "disable automatic browser verification; generation challenge preflight still runs and a required challenge is surfaced without submitting"
                 },
-                "modes": "description mode when a non-instrumental prompt is provided; custom lyrics mode when --lyrics or --lyrics-file is provided, including bracket-only [Instrumental] structure; unconstrained instrumental mode when --instrumental is provided, with the prompt folded into style tags. --instrumental conflicts with --lyrics and --lyrics-file instead of silently discarding them",
+                "modes": "description mode when a non-instrumental prompt is provided; custom mode when --lyrics, --lyrics-file, --mumble, or --instrumental is provided. Bracket-only [Instrumental] structure is custom lyrics; unconstrained --instrumental folds the prompt into style tags. --instrumental conflicts with --lyrics and --lyrics-file, and description mode rejects Custom-only --variety/--max-mode instead of silently discarding them",
                 "structured_instrumental_quality_gate": "for controlled sections, rhythm, or arrangement, omit --instrumental and pass a file beginning with [Instrumental] whose remaining non-empty lines are all bracketed directions. After clip wait, call clip timed-lyrics <clip_id> --json; any successful non-empty aligned word rejects that generated version from downstream use",
-                "request_contract": "custom lyrics use prompt with metadata.create_mode=custom, omit gpt_description_prompt, and encode --vocal as metadata.vocal_gender=m|f; description mode uses gpt_description_prompt with metadata.create_mode=simple, metadata.lyrics_model=default, and leaves prompt empty",
+                "request_contract": "custom lyrics use prompt with metadata.create_mode=custom, omit gpt_description_prompt, and encode --vocal as metadata.vocal_gender=m|f; description mode uses gpt_description_prompt with metadata.create_mode=simple, metadata.lyrics_model=default, and leaves prompt empty. v6 Custom duration defaults to 180 seconds and accepts whole seconds from 10..360; description mode rejects --duration because a live request accepted 10 seconds but produced clips around 73 and 80 seconds. --variety maps the whole-number range 0..4 directly to metadata.control_sliders.aug_creativity and requires v6 plus session flag aug-creativity; gated defaults are 0 for chirp-hawk-wild and 1 for other v6 models, and are omitted without the gate. --mumble sends metadata.is_mumble=true and requires both the live model's mumble_mode feature and session flag mumble-mode. --max-mode sends metadata.is_max_mode=true and requires the account max_mode entitlement, session flag max-mode, and a supported model; with Max Mode, requested duration is not a guarantee of final clip length",
                 "persona_contract": "--persona follows the current Advanced Persona picker contract: Sunox reads GET /api/persona/get-persona/{id}/, rejects hidden or trashed Personas, normalizes an empty/zero root_clip_id to no source, uses only a valid root clip as artist_clip_id, and sends task=vox for Vox or task=artist_consistency for legacy. Rootless Vox sends persona_id with artist_start_s=0 and no artist_clip_id/artist_end_s; legacy without a usable root fails closed. A sourced Vox selected with an older Persona-capable model falls back to artist_consistency; rootless Vox requires a Vox-capable model. Root-backed references use 0..root clip duration and never substitute detail.clip.id or vocal_clip_id from normal Persona selection",
-                "web_context": "generation metadata.user_tier and default model are resolved from current account /api/billing/info/; selection prefers a usable is_default_model, then a usable is_default_free_model, then the first model whose can_use field is true. default_model=auto requires that successful billing read and fails closed before challenge or generation when billing is unavailable; no compiled-in model fallback is submitted",
+                "web_context": "generation metadata.user_tier and the configured model selector are resolved against current account /api/billing/info/. The built-in selector is chirp-hawk (v6 Pro); default_model=auto instead prefers a usable is_default_model, then usable is_default_free_model, then the first model whose can_use field is true. Every selector requires that successful billing read and fails closed before challenge or generation when unavailable; no unvalidated compiled-in fallback is submitted",
                 "enhance_tags": "pass --enhance-tags only when the user wants Suno to enhance style tags; Sunox first verifies that the resolved model has the custom badge or tag_upsample feature, reads /api/personalization/settings so metadata.last_tags_generation.personalization_enabled matches styles_augmentation (missing defaults true), then calls /api/prompts/upsample with current custom lyrics as context for vocal requests, validates the returned tags against the model length limit, carries the returned tags plus request_id into metadata.last_tags_generation, and marks override_fields=[\"tags\"]",
                 "response_derived_metadata": "do not fabricate tag-upsample metadata; metadata.last_tags_generation is only valid after a real /api/prompts/upsample response and should otherwise be omitted",
                 "title": "optional; omitted title is sent as an empty string for description mode because Suno currently requires params.title to be a string"
@@ -171,10 +178,11 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                 "route": "POST /api/generate/upsample",
                 "body": {
                     "clip_id": "<source clip id>",
-                    "model_name": "chirp-flounder|chirp-carp|chirp-bass",
-                    "variation_category": "subtle|normal|high for chirp-flounder/chirp-carp; omitted for chirp-bass"
+                    "model_name": "chirp-halibut|chirp-flounder|chirp-carp|chirp-bass",
+                    "variation_category": "subtle|normal|high for chirp-halibut/chirp-flounder/chirp-carp; defaults to normal; omitted for chirp-bass",
+                    "v6_optional": "chirp-halibut only: style_profile=natural|boost|clarity; defaults to boost. Lower-level tags and slider fields are intentionally not exposed because the current v2 modal omits them and live checks did not prove ordinary-account support"
                 },
-                "defaults": "chirp-flounder/chirp-carp default to normal when --variation is omitted; chirp-bass rejects explicit --variation and omits the field",
+                "defaults": "chirp-halibut sends variation=normal and style_profile=boost; chirp-flounder/chirp-carp send variation=normal; chirp-bass rejects explicit --variation and omits the field",
                 "eligibility": "requires accessible_features.remaster, a model present in remaster_model_types, and an exact complete, explicitly non-trashed, non-infill source no longer than 960 seconds whose action_config remaster action has visible=true and disabled=false. Legacy model can_use remains diagnostic only.",
                 "response": "generation response with submitted clips"
             },
@@ -205,6 +213,18 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                 "body_constraints": "task=cover, generation_type=SIMPLE_REMIX, metadata.create_mode=simple, metadata.is_remix=true, cover_clip_id=<source clip id>, title=<source title string>; account base-model availability is validated before v3/v3.5 map to chirp-v3-5-tau and v4 maps to chirp-v4-tau; v4.5-all keeps the explicit chirp-auk-turbo Web override",
                 "response": "generation response with submitted cover clips"
             },
+            "clip reuse": {
+                "route": "GET /api/clip/<clip_id>, then POST /api/generate/v2-web/",
+                "semantics": "reuse_styles_lyrics is a Web feature and UI condition, never a submitted generation task; Sunox expands source metadata.prompt/tags/negative_tags/title into a normal Custom request",
+                "overrides": "explicit --lyrics/--lyrics-file, --tags, --exclude, and --title win over source values; source must be complete and expose lyrics or styles metadata",
+                "model_gate": "the selected live model must explicitly list reuse_styles_lyrics in models.features; a generic custom badge is not sufficient"
+            },
+            "clip underpaint/overpaint": {
+                "route": "GET /api/billing/info/, GET /api/clip/<clip_id>, live model preparation, then POST /api/generate/v2-web/",
+                "body_constraints": "underpaint sends task=underpainting plus underpainting_clip_id; overpaint sends task=overpainting plus overpainting_clip_id; both send metadata.is_remix=true and no time range",
+                "safety": "requires live edit_mode entitlement, exact Suno user-ID claim ownership, complete and explicitly non-trashed source, current Web source eligibility, and matching live underpaint/overpaint model condition",
+                "eligibility": "underpaint accepts upload or Vocals/Backing_Vocals stems; overpaint accepts upload, Instrumental stems, empty lyrics, or a single bracket-only prompt"
+            },
             "clip inspire": {
                 "route": "POST /api/generate/v2-web/; with explicit --enhance-tags, first POST /api/prompts/upsample",
                 "status": "implemented from the live-captured playlist-conditioned Use as Inspiration request",
@@ -218,15 +238,15 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                 "response": "queued or processing clip; wait for the returned ID before downstream work"
             },
             "challenge_capable_generation_commands": {
-                "commands": ["create", "clip cover", "clip inspire", "clip extend", "clip stems"],
+                "commands": ["create", "clip cover", "clip reuse", "clip inspire", "clip extend", "clip underpaint", "clip overpaint", "clip stems"],
                 "create_description_mode": "sunox create <description> is a mode of the create command; there is no standalone describe subcommand",
                 "challenge_flags": "only these commands expose --token, --captcha, and --no-captcha because they submit through /api/generate/v2-web/ and can hit the generation challenge gate"
             },
             "async_clip_edits": {
-                "returns_new_or_processing": ["clip cover", "clip inspire", "clip extend", "clip concat", "clip stems", "clip remaster", "clip speed", "clip reverse"],
+                "returns_new_or_processing": ["clip cover", "clip reuse", "clip inspire", "clip extend", "clip underpaint", "clip overpaint", "clip concat", "clip stems", "clip remaster", "clip speed", "clip reverse"],
                 "waits_for_complete": ["clip crop", "clip fade"],
                 "post_submit_workflow": "commands in returns_new_or_processing require clip wait before downstream work; clip crop and clip fade already wait for the resulting clip to complete and do not require another wait after success",
-                "challenge_note": "only clip cover, clip inspire, clip extend, and clip stems expose challenge flags; clip concat, clip remaster, clip speed, clip reverse, clip crop, and clip fade use their own edit routes and do not expose --token, --captcha, or --no-captcha"
+                "challenge_note": "clip cover, clip reuse, clip inspire, clip extend, clip underpaint, clip overpaint, and clip stems expose challenge flags; clip concat, clip remaster, clip speed, clip reverse, clip crop, and clip fade use their own edit routes and do not expose --token, --captcha, or --no-captcha"
             },
             "clip speed": {
                 "route": "POST /api/clips/adjust-speed/",
@@ -270,7 +290,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
         "features": [
             "account_capabilities", "read_only", "clip_actions", "generation_duration",
             "tags", "enhance_tags", "negative_tags", "vocal_gender",
-            "weirdness", "style_influence", "audio_influence",
+            "weirdness", "style_influence", "variety", "mumble_mode", "max_mode", "audio_influence",
             "instrumental", "extend", "concat", "cover", "clip_inspiration", "remaster",
             "stems", "existing_stem_banks", "clip_speed", "clip_reverse", "clip_crop", "clip_fade",
             "download_formats", "download_no_convert", "lyrics", "timed_lyrics", "set_metadata",
@@ -327,7 +347,8 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
                     "clip list", "clip search", "clip info", "clip actions", "clip status", "clip wait",
                     "clip download", "clip upload", "clip upload-status", "clip delete", "clip restore", "clip purge", "clip empty-trash",
                     "clip like", "clip dislike", "clip set", "clip publish",
-                    "clip timed-lyrics", "clip extend", "clip concat",
+                    "clip timed-lyrics", "clip extend", "clip concat", "clip reuse",
+                    "clip underpaint", "clip overpaint",
                     "clip cover", "clip inspire", "clip remaster", "clip speed", "clip reverse",
                     "clip crop", "clip fade", "clip stems", "clip get-stems",
                     "clip generate-image", "clip generate-video", "clip video-status",
@@ -403,12 +424,12 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
         },
         "provider": "direct_suno_unofficial",
         "auth_required": true,
-        "default_model": "auto (requires a successful billing read; usable account default, then usable free default, then first can_use model; billing unavailable fails closed before generation)",
+        "default_model": "chirp-hawk (v6 Pro; requires a successful billing read and exact can_use validation; override with --model, config, or SUNOX_DEFAULT_MODEL)",
     });
     info["generation_json_contract"] = serde_json::json!({
         "preserves_exact_upstream_response": true,
         "clips_envelope": {
-            "commands": ["create", "clip cover", "clip inspire", "clip extend", "clip stems", "clip remaster"],
+            "commands": ["create", "clip cover", "clip reuse", "clip inspire", "clip extend", "clip underpaint", "clip overpaint", "clip stems", "clip remaster"],
             "data_path": ".data",
             "submitted_clip_id_path": ".data.clips[].id"
         },
@@ -436,7 +457,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
         "create": "requires the active persona plan feature, refetches and matches the exact current phrase ID, uploads a pre-trimmed singing sample and dynamic-phrase recording as voice_recording assets, processes both through /api/processed_clip/voice-vox-stem, verifies ownership through /api/voice-verification/, creates a private vox Persona, then polls read-only detail until is_public=false and the vox type converge",
         "input_boundary": "current Web accepts a source from 3 seconds; a source below 10 seconds is selected in full, while longer selection is 10..240 seconds. The CLI does not silently re-encode: --sample must be a valid WAV already trimmed to exactly the rounded --sample-duration. Verification is a valid WAV and the Web recorder targets about 15 seconds. Name/styles/description use current HTML UTF-16 limits 80/256/2000. The CLI does not capture microphone audio itself",
         "polling": "processed audio is capped at 1s x 120 and verification at 1.5s x 40; user polling configuration may shorten but cannot expand those current Web budgets",
-        "generation": "the resulting Voice is managed through persona commands and selected with create --persona; current Suno Voice generation requires an eligible v5.5 model",
+        "generation": "the resulting Voice is managed through persona commands and selected with create --persona; the selected live account model must advertise the current vox capability and condition combination",
         "safety": "--confirm-rights, --confirm-eligibility, and --confirm-biometric-consent are separate mandatory attestations. Suno Terms/Privacy, disclosed training use and account choices, Statsig gates, and server eligibility remain authoritative. Every server ID is atomically checkpointed for inspection, but the multi-write workflow has no generic safe resume command and no mutation POST is automatically replayed after an uncertain response"
     });
     info["command_notes"]["models custom"] = serde_json::json!({
@@ -470,7 +491,7 @@ pub async fn agent_info(_ctx: &AppContext) -> Result<(), CliError> {
     info["command_notes"]["clip cover-art"] = serde_json::json!({
         "routes": ["GET /api/video_gen/model-configs", "POST /api/video_gen/cost/image", "POST /api/video_gen/cost/video", "POST /api/video_gen/image/generate", "POST /api/video_gen/video/generate", "POST /api/video_gen/pending_batches", "POST /api/video_gen/history", "POST /api/video_gen/poll_batches", "POST /api/gen/{clip_id}/set_metadata/"],
         "workflow": "models/pending/history/status are inspection surfaces; image/video submit two-result batches after dynamic model and cost preflight; apply-image/apply-video require the batch ID, prove that the exact completed result belongs to the selected clip, and perform clip readback",
-        "safety": "all writes require exact JWT-subject to clip-user_id ownership, explicit non-trashed state, enabled generate_cover_art action, and the matching plan feature; generation never auto-applies a result; a lost submit or apply response is never replayed because the protocol has no client idempotency key"
+        "safety": "all writes require the exact Suno user-ID claim to match clip.user_id, explicit non-trashed state, enabled generate_cover_art action, and the matching plan feature; generation never auto-applies a result; a lost submit or apply response is never replayed because the protocol has no client idempotency key"
     });
     info["command_notes"]["clip generate-video"] = serde_json::json!({
         "routes": ["POST /api/video/generate/{clip_id}/ with no body", "GET /api/video/generate/{clip_id}/status/"],

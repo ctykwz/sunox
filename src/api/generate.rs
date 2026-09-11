@@ -1,12 +1,17 @@
 use super::SunoClient;
 use super::types::{
-    Clip, FeedFilters, FeedResponse, FeedV3Request, GenerateRequest, GenerateResponse,
-    GenerationResult, MaxLengths, Model,
+    Clip, ControlSliders, FeedFilters, FeedResponse, FeedV3Request, GenerateRequest,
+    GenerateResponse, GenerationResult, MaxLengths, Model,
 };
 use crate::core::{CliError, MutationAmbiguity};
 
 const CREATE_CONTROL_SLIDERS_FEATURE: &str = "create_control_sliders";
+const AUG_CREATIVITY_SESSION_FLAG: &str = "aug-creativity";
+const MUMBLE_MODE_FEATURE: &str = "mumble_mode";
 pub(crate) const TAG_UPSAMPLE_FEATURE: &str = "tag_upsample";
+const V6_MIN_DURATION_SECONDS: f64 = 10.0;
+const V6_DEFAULT_DURATION_SECONDS: f64 = 180.0;
+const V6_MAX_DURATION_SECONDS: f64 = 360.0;
 
 impl SunoClient {
     /// Submit a music generation request (custom mode or inspiration mode).
@@ -66,7 +71,7 @@ impl SunoClient {
             Err(error) if is_transient_billing_transport(&error) => {
                 if req.duration.is_some() {
                     return Err(CliError::Config(
-                        "could not verify --duration against the current Suno billing model and its exact v5.5 limits; refusing to submit without live account model validation"
+                        "could not verify --duration against the current Suno billing model; refusing to submit without live account model validation"
                             .into(),
                     ));
                 }
@@ -176,16 +181,155 @@ impl SunoClient {
         } else {
             model.external_key.clone()
         };
+        if req.duration.is_none()
+            && req.metadata.create_mode == "custom"
+            && matches!(
+                req.task.as_deref(),
+                None | Some("vox") | Some("artist_consistency")
+            )
+            && is_v6_model(model)
+        {
+            req.duration = Some(V6_DEFAULT_DURATION_SECONDS);
+        }
+        let v6_custom_create = matches!(
+            req.task.as_deref(),
+            None | Some("vox") | Some("artist_consistency")
+        ) && req.metadata.create_mode == "custom"
+            && is_v6_model(model);
+        let explicit_variety = req
+            .metadata
+            .control_sliders
+            .as_ref()
+            .and_then(|sliders| sliders.aug_creativity)
+            .is_some();
         if req.metadata.control_sliders.is_some()
             && !model.supports_web_feature(CREATE_CONTROL_SLIDERS_FEATURE)
         {
             return Err(CliError::Config(format!(
-                "Suno model `{}` does not support --weirdness/--style-influence; refusing to submit while preserving the requested controls",
+                "Suno model `{}` does not support the requested Create controls; refusing to submit while preserving them",
                 model.external_key
             )));
         }
+        if req
+            .metadata
+            .control_sliders
+            .as_ref()
+            .and_then(|sliders| sliders.aug_creativity)
+            .is_some()
+            && !is_v6_model(model)
+        {
+            return Err(CliError::Config(format!(
+                "Suno model `{}` does not support --variety; select a current v6 model",
+                model.external_key
+            )));
+        }
+        if let Some(variety) = req
+            .metadata
+            .control_sliders
+            .as_ref()
+            .and_then(|sliders| sliders.aug_creativity)
+            && (!variety.is_finite() || !(0.0..=4.0).contains(&variety) || variety.fract() != 0.0)
+        {
+            return Err(CliError::Config(format!(
+                "--variety must map to a whole-number aug_creativity value between 0 and 4, got {variety}"
+            )));
+        }
+        if req.metadata.is_mumble == Some(true)
+            && !model
+                .features
+                .iter()
+                .any(|feature| feature == MUMBLE_MODE_FEATURE)
+        {
+            return Err(CliError::Config(format!(
+                "Suno model `{}` does not advertise Mumble Mode",
+                model.external_key
+            )));
+        }
+        if req.metadata.is_max_mode == Some(true) {
+            let account_supports_max_mode = info
+                .accessible_features
+                .as_ref()
+                .is_some_and(|features| features.contains("max_mode"))
+                || info
+                    .plan
+                    .usage_plan_features
+                    .iter()
+                    .any(|feature| feature.name == "max_mode");
+            if !account_supports_max_mode {
+                return Err(CliError::Config(
+                    "the current Suno account does not advertise the max_mode entitlement".into(),
+                ));
+            }
+            if !model_supports_max_mode(model) {
+                return Err(CliError::Config(format!(
+                    "Suno model `{}` does not support Max Mode",
+                    model.external_key
+                )));
+            }
+        }
+        let wants_default_variety = !explicit_variety
+            && v6_custom_create
+            && model.supports_web_feature(CREATE_CONTROL_SLIDERS_FEATURE);
+        let requires_session_gate = explicit_variety
+            || req.metadata.is_mumble == Some(true)
+            || req.metadata.is_max_mode == Some(true);
+        let session = if requires_session_gate || wants_default_variety {
+            match self.session_info().await {
+                Ok(session) => Some(session),
+                Err(error) if requires_session_gate => {
+                    return Err(CliError::Config(format!(
+                        "could not verify the current account's Web feature gates; refusing to submit the gated Create request: {error}"
+                    )));
+                }
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+        if explicit_variety
+            && !session
+                .as_ref()
+                .is_some_and(|session| session.flag_enabled(AUG_CREATIVITY_SESSION_FLAG))
+        {
+            return Err(CliError::Config(
+                "the current Suno account does not advertise the `aug-creativity` Web gate".into(),
+            ));
+        }
+        if wants_default_variety
+            && session
+                .as_ref()
+                .is_some_and(|session| session.flag_enabled(AUG_CREATIVITY_SESSION_FLAG))
+            && let Some(default_variety) = default_v6_variety(model)
+        {
+            req.metadata
+                .control_sliders
+                .get_or_insert(ControlSliders {
+                    weirdness_constraint: None,
+                    style_weight: None,
+                    audio_weight: None,
+                    aug_creativity: None,
+                })
+                .aug_creativity = Some(default_variety);
+        }
+        if let Some(session) = session.as_ref() {
+            if req.metadata.is_mumble == Some(true) && !session.flag_enabled("mumble-mode") {
+                return Err(CliError::Config(
+                    "the current Suno account does not advertise the `mumble-mode` Web gate".into(),
+                ));
+            }
+            if req.metadata.is_max_mode == Some(true) && !session.flag_enabled("max-mode") {
+                return Err(CliError::Config(
+                    "the current Suno account does not advertise the `max-mode` Web gate".into(),
+                ));
+            }
+        }
         for feature in required_features {
-            if !model.supports_web_feature(feature) {
+            let supported = if *feature == "reuse_styles_lyrics" {
+                model.features.iter().any(|candidate| candidate == feature)
+            } else {
+                model.supports_web_feature(feature)
+            };
+            if !supported {
                 return Err(CliError::Config(format!(
                     "Suno model `{}` does not support Web Create feature `{feature}`",
                     model.external_key
@@ -278,6 +422,16 @@ impl SunoClient {
                 error.to_string(),
             )
         })?;
+        crate::core::operation::record_response("/api/generate/v2-web/", &raw).map_err(
+            |error| {
+                ambiguous_generation_submit(
+                    transaction_uuid,
+                    "checkpoint_persist",
+                    error.error_code(),
+                    error.to_string(),
+                )
+            },
+        )?;
         let result: GenerateResponse = serde_json::from_value(raw.clone()).map_err(|error| {
             ambiguous_generation_submit(
                 transaction_uuid,
@@ -434,6 +588,16 @@ fn generation_web_requirement(task: Option<&str>) -> Option<WebModelRequirement>
             conditions: &["playlist"],
             label: "Inspiration",
         }),
+        Some("underpainting") => Some(WebModelRequirement {
+            task: "underpainting",
+            conditions: &["underpaint"],
+            label: "Underpaint",
+        }),
+        Some("overpainting") => Some(WebModelRequirement {
+            task: "overpainting",
+            conditions: &["overpaint"],
+            label: "Overpaint",
+        }),
         Some("vox") => Some(WebModelRequirement {
             task: "vox",
             conditions: &["vox"],
@@ -540,10 +704,19 @@ fn validate_generation_duration(req: &GenerateRequest, model: &Model) -> Result<
             "generation duration must be a positive finite number of seconds".into(),
         ));
     }
-    if model.external_key != "chirp-fenix" {
+    let is_v6_custom = req.metadata.create_mode == "custom" && is_v6_model(model);
+    if model.external_key != "chirp-fenix" && !is_v6_custom {
         return Err(CliError::Config(format!(
-            "--duration is only supported by the current v5.5 generation model `chirp-fenix`; selector resolved to `{}`",
+            "--duration is supported by v6 Custom generation and the v5.5 `chirp-fenix` compatibility path; selector resolved to `{}`",
             model.external_key
+        )));
+    }
+    if is_v6_custom
+        && (!(V6_MIN_DURATION_SECONDS..=V6_MAX_DURATION_SECONDS).contains(&duration)
+            || duration.fract() != 0.0)
+    {
+        return Err(CliError::Config(format!(
+            "v6 Custom generation duration must be a whole number between {V6_MIN_DURATION_SECONDS} and {V6_MAX_DURATION_SECONDS} seconds"
         )));
     }
     let Some(raw_limit) = model.max_lengths.extra.get("duration") else {
@@ -563,10 +736,41 @@ fn validate_generation_duration(req: &GenerateRequest, model: &Model) -> Result<
     };
     if duration > limit {
         return Err(CliError::Config(format!(
-            "requested duration {duration} seconds exceeds the current account limit of {limit} seconds for `chirp-fenix`"
+            "requested duration {duration} seconds exceeds the current account limit of {limit} seconds for `{}`",
+            model.external_key
         )));
     }
     Ok(())
+}
+
+fn is_v6_model(model: &Model) -> bool {
+    model
+        .extra
+        .get("major_version")
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|version| version >= 6)
+        || matches!(
+            model.external_key.as_str(),
+            "chirp-hawk" | "chirp-hawk-wild" | "chirp-goose"
+        )
+}
+
+fn default_v6_variety(model: &Model) -> Option<f64> {
+    if !is_v6_model(model) {
+        return None;
+    }
+    Some(if model.external_key.contains("hawk-wild") {
+        0.0
+    } else {
+        1.0
+    })
+}
+
+pub(crate) fn model_supports_max_mode(model: &Model) -> bool {
+    ["crow", "eagle", "fenix", "goose", "hawk", "chirp-custom"]
+        .iter()
+        .any(|part| model.external_key.to_ascii_lowercase().contains(part))
+        || model.badges.iter().any(|badge| badge == "custom")
 }
 
 fn validate_generation_lengths(req: &GenerateRequest, model: &Model) -> Result<(), CliError> {
@@ -616,7 +820,7 @@ fn generation_challenge_error(challenge: &super::challenge::GenerationChallenge)
 #[cfg(test)]
 mod tests {
     use super::{
-        cover_base_model, cover_reference_model, generation_web_requirement,
+        cover_base_model, cover_reference_model, default_v6_variety, generation_web_requirement,
         select_generation_model, validate_generation_duration, validate_generation_lengths,
     };
     use crate::api::types::{GenerateRequest, MaxLengths, Model};
@@ -743,6 +947,19 @@ mod tests {
     }
 
     #[test]
+    fn paint_tasks_map_to_distinct_web_condition_names() {
+        let underpaint =
+            generation_web_requirement(Some("underpainting")).expect("Underpaint requirement");
+        assert_eq!(underpaint.task, "underpainting");
+        assert_eq!(underpaint.conditions, ["underpaint"]);
+
+        let overpaint =
+            generation_web_requirement(Some("overpainting")).expect("Overpaint requirement");
+        assert_eq!(overpaint.task, "overpainting");
+        assert_eq!(overpaint.conditions, ["overpaint"]);
+    }
+
+    #[test]
     fn cover_reference_models_match_the_current_web_mapping() {
         assert_eq!(cover_base_model("chirp-v3-5-tau"), "chirp-v3-5");
         assert_eq!(cover_base_model("chirp-v4-tau"), "chirp-v4");
@@ -773,7 +990,7 @@ mod tests {
     }
 
     #[test]
-    fn duration_requires_exact_v55_and_uses_account_limit_when_present() {
+    fn v55_duration_uses_account_limit_when_present() {
         let mut limits = MaxLengths::default();
         limits
             .extra
@@ -797,6 +1014,63 @@ mod tests {
     }
 
     #[test]
+    fn v6_custom_duration_uses_current_web_bounds() {
+        let mut hawk = model(true, true, MaxLengths::default());
+        hawk.name = "v6".into();
+        hawk.external_key = "chirp-hawk".into();
+        hawk.extra
+            .insert("major_version".into(), serde_json::json!(6));
+        let mut request = GenerateRequest::new("chirp-hawk", "custom");
+
+        for duration in [10.0, 11.0, 123.0, 180.0, 359.0, 360.0] {
+            request.duration = Some(duration);
+            validate_generation_duration(&request, &hawk).expect("valid v6 duration");
+        }
+        for duration in [9.0, 12.5, 361.0] {
+            request.duration = Some(duration);
+            let error = validate_generation_duration(&request, &hawk)
+                .expect_err("duration outside Web bounds");
+            assert!(error.to_string().contains("whole number"));
+        }
+    }
+
+    #[test]
+    fn v6_custom_default_duration_matches_the_current_web() {
+        assert_eq!(super::V6_DEFAULT_DURATION_SECONDS, 180.0);
+    }
+
+    #[test]
+    fn v6_variety_defaults_match_the_current_web_models() {
+        let mut hawk = model(true, true, MaxLengths::default());
+        hawk.external_key = "chirp-hawk".into();
+        hawk.extra
+            .insert("major_version".into(), serde_json::json!(6));
+        assert_eq!(default_v6_variety(&hawk), Some(1.0));
+
+        hawk.external_key = "chirp-hawk-wild".into();
+        assert_eq!(default_v6_variety(&hawk), Some(0.0));
+
+        hawk.external_key = "chirp-goose".into();
+        assert_eq!(default_v6_variety(&hawk), Some(1.0));
+
+        let legacy = model(true, true, MaxLengths::default());
+        assert_eq!(default_v6_variety(&legacy), None);
+    }
+
+    #[test]
+    fn v6_description_duration_remains_fail_closed() {
+        let mut hawk = model(true, true, MaxLengths::default());
+        hawk.external_key = "chirp-hawk".into();
+        hawk.extra
+            .insert("major_version".into(), serde_json::json!(6));
+        let mut request = GenerateRequest::new("chirp-hawk", "simple");
+        request.duration = Some(180.0);
+
+        validate_generation_duration(&request, &hawk)
+            .expect_err("v6 description duration was not captured");
+    }
+
+    #[test]
     fn duration_does_not_guess_an_upper_bound_when_billing_omits_it() {
         let mut fenix = model(true, true, MaxLengths::default());
         fenix.name = "v5.5".into();
@@ -808,14 +1082,18 @@ mod tests {
     }
 
     #[test]
-    fn duration_rejects_non_v55_models() {
+    fn duration_rejects_unsupported_legacy_models() {
         let crow = model(true, true, MaxLengths::default());
         let mut request = GenerateRequest::new("chirp-auk-turbo", "custom");
         request.duration = Some(120.0);
 
         let error = validate_generation_duration(&request, &crow)
-            .expect_err("duration is exclusive to exact current v5.5");
+            .expect_err("duration is unsupported by this legacy model");
 
-        assert!(error.to_string().contains("only supported"));
+        assert!(
+            error
+                .to_string()
+                .contains("supported by v6 Custom generation")
+        );
     }
 }

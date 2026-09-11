@@ -26,25 +26,25 @@ pub async fn inspire(args: InspireArgs, ctx: &AppContext) -> Result<(), CliError
     if !ctx.quiet {
         eprintln!("Generating from clip inspiration...");
     }
-    let clips = execute_generation_submission(token, challenge_mode, ctx, move || async move {
-        let client = ctx.client().await?;
-        let req = client
-            .prepare_inspiration_request(InspirationOptions {
-                clip_id: &args.clip_id,
-                title: &args.title,
-                tags: &args.tags,
-                enhance_tags: args.enhance_tags,
-                negative_tags: &negative_tags,
-                lyrics: &lyrics,
-                weirdness: args.weirdness,
-                audio_influence: args.audio_influence,
-                challenge_token: None,
-                model: ctx.config.default_model.as_str(),
-            })
-            .await?;
-        Ok((client, req))
-    })
-    .await?;
+    let clips =
+        execute_generation_submission(token, challenge_mode, ctx, move |client| async move {
+            let req = client
+                .prepare_inspiration_request(InspirationOptions {
+                    clip_id: &args.clip_id,
+                    title: &args.title,
+                    tags: &args.tags,
+                    enhance_tags: args.enhance_tags,
+                    negative_tags: &negative_tags,
+                    lyrics: &lyrics,
+                    weirdness: args.weirdness,
+                    audio_influence: args.audio_influence,
+                    challenge_token: None,
+                    model: ctx.config.default_model.as_str(),
+                })
+                .await?;
+            Ok((client, req))
+        })
+        .await?;
     output_generation(&clips, ctx);
     Ok(())
 }

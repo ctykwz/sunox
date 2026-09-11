@@ -1,5 +1,5 @@
 use crate::api::types::{
-    AccessibleFeatures, BillingInfo, DownloadCreditPack, DownloadUsage, MaxLengths,
+    AccessibleFeatures, BillingInfo, DownloadCreditPack, DownloadUsage, MaxLengths, SessionInfo,
 };
 use crate::app::AppContext;
 use crate::cli::RemasterModel;
@@ -33,8 +33,9 @@ pub async fn models(ctx: &AppContext) -> Result<(), CliError> {
 }
 
 pub async fn capabilities(ctx: &AppContext) -> Result<(), CliError> {
-    let info = ctx.client().await?.billing_info().await?;
-    let report = capability_report(&info);
+    let client = ctx.client().await?;
+    let (info, session) = tokio::try_join!(client.billing_info(), client.session_info())?;
+    let report = capability_report(&info, Some(&session));
 
     match ctx.fmt {
         OutputFormat::Json => output::json::success(report),
@@ -46,7 +47,7 @@ pub async fn capabilities(ctx: &AppContext) -> Result<(), CliError> {
             println!("Remaster models");
             output::table::remaster_models(&info.remaster_model_types);
 
-            let feature_rows = feature_rows(&info);
+            let feature_rows = feature_rows(&info, Some(&session));
             println!("Account features and CLI coverage");
             output::table::account_features(&feature_rows);
 
@@ -60,8 +61,8 @@ pub async fn capabilities(ctx: &AppContext) -> Result<(), CliError> {
     Ok(())
 }
 
-fn capability_report(info: &BillingInfo) -> Value {
-    let features = feature_rows(info)
+fn capability_report(info: &BillingInfo, session: Option<&SessionInfo>) -> Value {
+    let features = feature_rows(info, session)
         .into_iter()
         .map(|(name, sources, status, commands, note)| {
             let sources = sources.split(", ").collect::<Vec<_>>();
@@ -99,8 +100,10 @@ fn capability_report(info: &BillingInfo) -> Value {
                 "is_default_model": model.is_default_model,
                 "is_default_free_model": model.is_default_free_model,
                 "capabilities": model.capabilities,
+                "allowed_condition_combinations": model.allowed_condition_combinations,
                 "features": model.features,
                 "badges": model.badges,
+                "major_version": model.extra.get("major_version").and_then(Value::as_u64),
                 "max_lengths": safe_model_max_lengths(&model.max_lengths),
             })
         })
@@ -133,6 +136,10 @@ fn capability_report(info: &BillingInfo) -> Value {
             "plan_key": info.plan.plan_key,
             "active": info.is_active,
             "period": info.period,
+            "unlimited_credits_role": session
+                .and_then(|session| session.roles.get("unlimited_credits"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         },
         "generation_models": generation_models,
         "remaster_models": remaster_models,
@@ -184,7 +191,7 @@ fn safe_download_credit_packs_value(packs: Option<&[DownloadCreditPack]>) -> Val
 
 type FeatureRow = (String, String, String, String, String);
 
-fn feature_rows(info: &BillingInfo) -> Vec<FeatureRow> {
+fn feature_rows(info: &BillingInfo, session: Option<&SessionInfo>) -> Vec<FeatureRow> {
     let mut features: BTreeMap<String, BTreeSet<&'static str>> = BTreeMap::new();
 
     if let Some(accessible) = &info.accessible_features {
@@ -196,6 +203,33 @@ fn feature_rows(info: &BillingInfo) -> Vec<FeatureRow> {
             .entry(feature.name.clone())
             .or_default()
             .insert("plan.usage_plan_features");
+    }
+
+    for model in &info.models {
+        for feature in &model.features {
+            features
+                .entry(feature.clone())
+                .or_default()
+                .insert("models.features");
+        }
+    }
+    if info.models.iter().any(|model| {
+        model.can_use
+            && (model
+                .extra
+                .get("major_version")
+                .and_then(Value::as_u64)
+                .is_some_and(|version| version >= 6)
+                || matches!(
+                    model.external_key.as_str(),
+                    "chirp-hawk" | "chirp-hawk-wild" | "chirp-goose"
+                ))
+            && model.supports_web_feature("create_control_sliders")
+    }) {
+        features
+            .entry("aug_creativity".into())
+            .or_default()
+            .insert("session.flags");
     }
 
     features
@@ -216,7 +250,75 @@ fn feature_rows(info: &BillingInfo) -> Vec<FeatureRow> {
                         .to_owned(),
                 );
             }
-            let coverage = feature_coverage(&name);
+            let coverage = if name == "aug_creativity" {
+                if session.is_some_and(|session| session.flag_enabled("aug-creativity")) {
+                    FeatureCoverage {
+                        status: "supported",
+                        commands: &["create --variety"],
+                        note: "The current session exposes aug-creativity; explicit Variety and the Web model default are sent only behind this gate.",
+                    }
+                } else {
+                    FeatureCoverage {
+                        status: "unavailable",
+                        commands: &["create --variety"],
+                        note: "The current session does not expose aug-creativity; explicit Variety is rejected and the gated Web default is omitted.",
+                    }
+                }
+            } else if name == "mumble_mode" {
+                let usable_model = info.models.iter().any(|model| {
+                    model.can_use
+                        && model
+                            .features
+                            .iter()
+                            .any(|feature| feature == "mumble_mode")
+                });
+                if usable_model
+                    && session.is_some_and(|session| session.flag_enabled("mumble-mode"))
+                {
+                    FeatureCoverage {
+                        status: "supported",
+                        commands: &["create --mumble"],
+                        note: "Requires both the model mumble_mode feature and the account session flag mumble-mode; both are verified before submission.",
+                    }
+                } else {
+                    FeatureCoverage {
+                        status: "unavailable",
+                        commands: &["create --mumble"],
+                        note: "The model advertises mumble_mode, but this account does not expose session flag mumble-mode, so the CLI refuses submission.",
+                    }
+                }
+            } else if name == "max_mode" {
+                let entitled = info
+                    .accessible_features
+                    .as_ref()
+                    .is_some_and(|features| features.contains("max_mode"))
+                    || info
+                        .plan
+                        .usage_plan_features
+                        .iter()
+                        .any(|feature| feature.name == "max_mode");
+                let usable_model = info.models.iter().any(|model| {
+                    model.can_use && crate::api::generate::model_supports_max_mode(model)
+                });
+                if entitled
+                    && usable_model
+                    && session.is_some_and(|session| session.flag_enabled("max-mode"))
+                {
+                    FeatureCoverage {
+                        status: "supported",
+                        commands: &["create --max-mode"],
+                        note: "Requires the account entitlement, session flag max-mode, and a current Web-supported model; all are verified before submission.",
+                    }
+                } else {
+                    FeatureCoverage {
+                        status: "unavailable",
+                        commands: &["create --max-mode"],
+                        note: "The account advertises max_mode, but does not expose session flag max-mode, so the CLI refuses submission.",
+                    }
+                }
+            } else {
+                feature_coverage(&name)
+            };
             (
                 name,
                 sources.into_iter().collect::<Vec<_>>().join(", "),
@@ -270,8 +372,32 @@ fn feature_coverage(name: &str) -> FeatureCoverage {
         ),
         "create_control_sliders" => (
             "supported",
-            &["create --weirdness", "create --style-influence"],
-            "Sent only for models that advertise the current feature.",
+            &[
+                "create --weirdness",
+                "create --style-influence",
+                "create --variety",
+            ],
+            "Base controls require create_control_sliders; Variety additionally requires a current v6 model.",
+        ),
+        "mumble_mode" => (
+            "supported",
+            &["create --mumble"],
+            "Requires both the model mumble_mode feature and the account session flag mumble-mode; both are verified before submission.",
+        ),
+        "max_mode" => (
+            "supported",
+            &["create --max-mode"],
+            "Requires the account entitlement, session flag max-mode, and a current Web-supported model; charging and final output duration remain server-authoritative.",
+        ),
+        "reuse_styles_lyrics" => (
+            "supported",
+            &["clip reuse"],
+            "Fetches the exact source clip and expands its lyrics/styles client-side; explicit CLI values override source fields and reuse_styles_lyrics is never sent as a generation task.",
+        ),
+        "vox_and_voices" => (
+            "supported",
+            &["create --persona", "voice"],
+            "Voice creation and generation use live model task/condition checks.",
         ),
         "playlist_condition" => (
             "supported",
@@ -292,6 +418,8 @@ fn feature_coverage(name: &str) -> FeatureCoverage {
             "partial",
             &[
                 "clip extend",
+                "clip underpaint",
+                "clip overpaint",
                 "clip crop",
                 "clip fade",
                 "clip speed",
@@ -300,7 +428,7 @@ fn feature_coverage(name: &str) -> FeatureCoverage {
                 "lyrics mashup",
                 "lyrics mashup-status",
             ],
-            "Common non-Studio clip edits plus Lyrics 2.0 selection rewrite (`lyrics-infill`) and lyrics mashup are implemented; Studio/audio underpaint, overpaint, and section replacement are not.",
+            "Common non-Studio clip edits, owned-source Underpaint/Overpaint, Lyrics 2.0 selection rewrite (`lyrics-infill`), and lyrics mashup are implemented; Studio section replacement is not.",
         ),
         "persona" => (
             "partial",
@@ -327,10 +455,10 @@ fn feature_coverage(name: &str) -> FeatureCoverage {
             &[],
             "This is an account entitlement, not a CLI operation.",
         ),
-        "credit_topups" => (
+        "can_buy_credit_top_ups" | "can_buy_download_top_ups" | "credit_topups" => (
             "account_only",
             &["credits"],
-            "The CLI can read credits but does not purchase top-ups.",
+            "The CLI can read credit and download-pack availability but does not purchase top-ups.",
         ),
         "generate_song_image" => (
             "implemented",
@@ -561,7 +689,7 @@ fn is_sensitive_metric_key(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{capability_report, feature_rows, safe_account_limits};
-    use crate::api::types::BillingInfo;
+    use crate::api::types::{BillingInfo, SessionInfo};
 
     fn billing_fixture() -> BillingInfo {
         serde_json::from_value(serde_json::json!({
@@ -647,7 +775,7 @@ mod tests {
 
     #[test]
     fn capability_report_is_account_driven_and_sanitized() {
-        let report = capability_report(&billing_fixture());
+        let report = capability_report(&billing_fixture(), None);
         assert_eq!(report["account"]["plan_key"], "pro");
         assert_eq!(
             report["generation_models"][0]["selectors"][0],
@@ -703,15 +831,43 @@ mod tests {
     }
 
     #[test]
+    fn capability_report_keeps_exact_numeric_and_decimal_string_prices() {
+        let mut fixture = billing_fixture();
+        fixture.download_credit_packs = Some(
+            serde_json::from_str(
+                r#"[
+                    {"id":"fixture-pack-1","amount":1,"price_amount":"2.99000","price_currency_code":"USD","price_usd":0,"customer_token":"must-not-leak"},
+                    {"id":"fixture-pack-2","amount":3,"price_amount":"8.95000","price_currency_code":"USD","price_usd":0},
+                    {"id":"fixture-pack-legacy","amount":100,"price_amount":9007199254740993.000000000001,"price_currency_code":"USD","price_usd":9.990000000001}
+                ]"#,
+            )
+            .expect("decode public pack price shapes"),
+        );
+        let report = capability_report(&fixture, None);
+        let packs = &report["downloads"]["credit_packs"];
+        assert_eq!(packs[0]["price_amount"], "2.99000");
+        assert_eq!(packs[1]["price_amount"], "8.95000");
+        assert_eq!(packs[0]["price_usd"], 0);
+        assert!(packs[2]["price_amount"].is_number());
+        assert_eq!(
+            packs[2]["price_amount"].to_string(),
+            "9007199254740993.000000000001"
+        );
+        assert_eq!(packs[2]["price_usd"].to_string(), "9.990000000001");
+        assert!(!report.to_string().contains("must-not-leak"));
+    }
+
+    #[test]
     fn feature_rows_merge_current_and_plan_sources_without_overclaiming_unknowns() {
         let mut fixture = billing_fixture();
+        fixture.models[0].features = vec!["mumble_mode".into(), "reuse_styles_lyrics".into()];
         fixture.accessible_features = serde_json::from_value(serde_json::json!([
             "remaster",
             "convert_audio",
             {"name": "disabled_future", "enabled": false}
         ]))
         .expect("typed accessible features");
-        let rows = feature_rows(&fixture);
+        let rows = feature_rows(&fixture, None);
         let remaster = rows
             .iter()
             .find(|row| row.0 == "remaster")
@@ -726,6 +882,120 @@ mod tests {
             .expect("future feature row");
         assert_eq!(future.2, "unknown");
         assert!(rows.iter().all(|row| row.0 != "disabled_future"));
+
+        let mumble = rows
+            .iter()
+            .find(|row| row.0 == "mumble_mode")
+            .expect("model-level Mumble feature row");
+        assert_eq!(mumble.1, "models.features");
+        assert_eq!(mumble.2, "unavailable");
+
+        let reuse = rows
+            .iter()
+            .find(|row| row.0 == "reuse_styles_lyrics")
+            .expect("model-level reuse feature row");
+        assert_eq!(reuse.2, "supported");
+    }
+
+    #[test]
+    fn gated_feature_rows_require_a_usable_compatible_model() {
+        let mut fixture = billing_fixture();
+        fixture.models[0].can_use = false;
+        fixture.models[0].features = vec!["mumble_mode".into()];
+        fixture.accessible_features =
+            serde_json::from_value(serde_json::json!(["max_mode"])).expect("accessible features");
+        let session: SessionInfo = serde_json::from_value(serde_json::json!({
+            "flags": {"mumble-mode": true, "max-mode": true}
+        }))
+        .expect("session");
+
+        let rows = feature_rows(&fixture, Some(&session));
+        for name in ["mumble_mode", "max_mode"] {
+            let row = rows.iter().find(|row| row.0 == name).expect("feature row");
+            assert_eq!(row.2, "unavailable", "{name}");
+        }
+    }
+
+    #[test]
+    fn max_mode_requires_a_live_account_entitlement() {
+        let mut fixture = billing_fixture();
+        fixture.accessible_features = None;
+        fixture.models[0].features.push("max_mode".into());
+        fixture
+            .plan
+            .usage_plan_features
+            .retain(|feature| feature.name != "max_mode");
+        let session: SessionInfo = serde_json::from_value(serde_json::json!({
+            "flags": {"max-mode": true}
+        }))
+        .expect("session");
+
+        let rows = feature_rows(&fixture, Some(&session));
+        let max_mode = rows
+            .iter()
+            .find(|row| row.0 == "max_mode")
+            .expect("max mode row");
+        assert_eq!(max_mode.2, "unavailable");
+    }
+
+    #[test]
+    fn gated_create_features_follow_live_session_flags() {
+        let mut fixture = billing_fixture();
+        fixture.models[0].external_key = "chirp-hawk".into();
+        fixture.models[0]
+            .extra
+            .insert("major_version".into(), serde_json::json!(6));
+        fixture.models[0].features = vec!["create_control_sliders".into(), "mumble_mode".into()];
+        fixture.plan.usage_plan_features.push(
+            serde_json::from_value(serde_json::json!({"name": "max_mode"})).expect("plan feature"),
+        );
+        let session: SessionInfo = serde_json::from_value(serde_json::json!({
+            "flags": {"aug-creativity": true, "mumble-mode": true, "max-mode": true},
+            "roles": {}
+        }))
+        .expect("session fixture");
+
+        let rows = feature_rows(&fixture, Some(&session));
+        for name in ["aug_creativity", "mumble_mode", "max_mode"] {
+            let row = rows
+                .iter()
+                .find(|row| row.0 == name)
+                .expect("gated feature");
+            assert_eq!(row.2, "supported");
+        }
+
+        let rows = feature_rows(&fixture, None);
+        for name in ["aug_creativity", "mumble_mode", "max_mode"] {
+            let row = rows
+                .iter()
+                .find(|row| row.0 == name)
+                .expect("gated feature");
+            assert_eq!(row.2, "unavailable");
+        }
+    }
+
+    #[test]
+    fn current_credit_top_up_entitlement_is_reported_as_account_only() {
+        let mut fixture = billing_fixture();
+        fixture.accessible_features = serde_json::from_value(serde_json::json!([
+            "can_buy_credit_top_ups",
+            "can_buy_download_top_ups"
+        ]))
+        .expect("typed accessible features");
+
+        let rows = feature_rows(&fixture, None);
+        let top_ups = rows
+            .iter()
+            .find(|row| row.0 == "can_buy_credit_top_ups")
+            .expect("credit top-up feature row");
+
+        assert_eq!(top_ups.2, "account_only");
+        assert_eq!(top_ups.3, "credits");
+        let download_top_ups = rows
+            .iter()
+            .find(|row| row.0 == "can_buy_download_top_ups")
+            .expect("download top-up feature row");
+        assert_eq!(download_top_ups.2, "account_only");
     }
 
     #[test]
@@ -734,7 +1004,7 @@ mod tests {
         fixture.remaster_model_types[0].name = "vNext".into();
         fixture.remaster_model_types[0].external_key = "chirp-future".into();
 
-        let report = capability_report(&fixture);
+        let report = capability_report(&fixture, None);
         assert_eq!(report["remaster_models"][0]["cli_supported"], false);
         assert_eq!(
             report["remaster_models"][0]["selectors"]
@@ -743,13 +1013,27 @@ mod tests {
             Some(0)
         );
 
-        let rows = feature_rows(&fixture);
+        let rows = feature_rows(&fixture, None);
         let remaster = rows
             .iter()
             .find(|row| row.0 == "remaster")
             .expect("remaster feature row");
         assert_eq!(remaster.2, "unsupported");
         assert!(remaster.4.contains("does not guess"));
+    }
+
+    #[test]
+    fn v6_remaster_model_is_reported_as_supported() {
+        let mut fixture = billing_fixture();
+        fixture.remaster_model_types[0].name = "v6".into();
+        fixture.remaster_model_types[0].external_key = "chirp-halibut".into();
+
+        let report = capability_report(&fixture, None);
+        assert_eq!(report["remaster_models"][0]["cli_supported"], true);
+        assert_eq!(
+            report["remaster_models"][0]["selectors"],
+            serde_json::json!(["v6", "chirp-halibut"])
+        );
     }
 
     #[test]

@@ -19,13 +19,14 @@ pub fn build_tags(tags: Option<&str>, vocal: Option<&VocalGender>) -> Option<Str
     }
 }
 
-/// Build a control_sliders block when --weirdness or --style-influence is set.
-/// Returns None when neither is provided so the optional schema field is omitted.
+/// Build a control_sliders block when a supported Create control is set.
+/// Returns None when none are provided so the optional schema field is omitted.
 pub fn build_control_sliders(
     weirdness: Option<f64>,
     style_influence: Option<f64>,
+    variety: Option<u8>,
 ) -> Result<Option<ControlSliders>, CliError> {
-    if weirdness.is_none() && style_influence.is_none() {
+    if weirdness.is_none() && style_influence.is_none() && variety.is_none() {
         return Ok(None);
     }
     if let Some(weirdness) = weirdness {
@@ -34,12 +35,19 @@ pub fn build_control_sliders(
     if let Some(style_influence) = style_influence {
         ensure_percentage("--style-influence", style_influence)?;
     }
+    if let Some(variety) = variety
+        && variety > 4
+    {
+        return Err(CliError::Config(format!(
+            "--variety must be a whole number between 0 and 4, got {variety}"
+        )));
+    }
     Ok(Some(ControlSliders {
         // Normalize 0-100 to 0.0-1.0.
         weirdness_constraint: weirdness.map(|w| w / 100.0),
         style_weight: style_influence.map(|s| s / 100.0),
         audio_weight: None,
-        aug_creativity: None,
+        aug_creativity: variety.map(f64::from),
     }))
 }
 
@@ -60,15 +68,17 @@ mod tests {
 
     #[test]
     fn build_control_sliders_normalizes_percentages() {
-        let sliders = build_control_sliders(Some(25.0), Some(80.0))
+        let sliders = build_control_sliders(Some(25.0), Some(80.0), Some(3))
             .expect("valid sliders")
             .expect("sliders");
         assert_eq!(sliders.weirdness_constraint, Some(0.25));
         assert_eq!(sliders.style_weight, Some(0.8));
+        assert_eq!(sliders.aug_creativity, Some(3.0));
     }
 
     #[test]
     fn build_control_sliders_rejects_values_outside_the_documented_range() {
-        build_control_sliders(Some(150.0), Some(-10.0)).expect_err("invalid sliders");
+        build_control_sliders(Some(150.0), Some(-10.0), None).expect_err("invalid sliders");
+        build_control_sliders(None, None, Some(5)).expect_err("invalid variety");
     }
 }

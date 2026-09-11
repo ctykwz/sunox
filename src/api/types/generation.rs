@@ -77,6 +77,10 @@ pub struct GenerateRequest {
     pub continued_aligned_prompt: Option<String>,
     pub continue_at: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub underpainting_clip_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overpainting_clip_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub playlist_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub playlist_clip_ids: Option<Vec<String>>,
@@ -129,6 +133,8 @@ impl GenerateRequest {
             continue_clip_id: None,
             continued_aligned_prompt: None,
             continue_at: None,
+            underpainting_clip_id: None,
+            overpainting_clip_id: None,
             playlist_id: None,
             playlist_clip_ids: None,
             stem_type_id: None,

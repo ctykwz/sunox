@@ -19,6 +19,7 @@ pub mod lyrics;
 pub mod lyrics_editor;
 pub mod lyrics_project;
 pub mod metadata;
+pub mod paint;
 pub mod persona;
 pub mod playlist;
 pub mod prompts;

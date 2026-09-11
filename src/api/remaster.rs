@@ -1,7 +1,15 @@
 use super::SunoClient;
-use super::types::{Clip, GenerateResponse, GenerationResult, RemasterVariation};
+use super::types::{
+    Clip, GenerateResponse, GenerationResult, RemasterStyleProfile, RemasterVariation,
+};
 use crate::core::{CliError, MutationAmbiguity};
 use serde::Serialize;
+
+#[derive(Debug, Default)]
+pub struct RemasterOptions {
+    pub variation: Option<RemasterVariation>,
+    pub style_profile: Option<RemasterStyleProfile>,
+}
 
 #[derive(Serialize)]
 struct RemasterRequest<'a> {
@@ -9,19 +17,38 @@ struct RemasterRequest<'a> {
     model_name: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     variation_category: Option<RemasterVariation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    style_profile: Option<RemasterStyleProfile>,
 }
 
 impl SunoClient {
     /// Remaster a clip with a different model version.
     /// Posts to the current web remaster route captured as `/api/generate/upsample`.
+    #[cfg(test)]
     pub async fn remaster(
         &self,
         clip_id: &str,
         remaster_model_key: &str,
         requested_variation: Option<RemasterVariation>,
     ) -> Result<GenerationResult, CliError> {
-        let variation_category =
-            resolve_variation_category(remaster_model_key, requested_variation)?;
+        self.remaster_with_options(
+            clip_id,
+            remaster_model_key,
+            RemasterOptions {
+                variation: requested_variation,
+                ..RemasterOptions::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn remaster_with_options(
+        &self,
+        clip_id: &str,
+        remaster_model_key: &str,
+        options: RemasterOptions,
+    ) -> Result<GenerationResult, CliError> {
+        let variation_category = resolve_variation_category(remaster_model_key, options.variation)?;
         let requested = [clip_id.to_string()];
         let source = self
             .get_clips(&requested)
@@ -35,6 +62,7 @@ impl SunoClient {
             clip_id,
             model_name: remaster_model_key,
             variation_category,
+            style_profile: resolve_style_profile(remaster_model_key, options.style_profile)?,
         };
         let operation_id = uuid::Uuid::new_v4().to_string();
         let request = self
@@ -81,6 +109,19 @@ impl SunoClient {
                 error.to_string(),
             )
         })?;
+        crate::core::operation::record_response("/api/generate/upsample", &raw).map_err(
+            |error| {
+                ambiguous_remaster(
+                    &operation_id,
+                    clip_id,
+                    remaster_model_key,
+                    variation_category,
+                    "checkpoint_persist",
+                    error.error_code(),
+                    error.to_string(),
+                )
+            },
+        )?;
         let result: GenerateResponse = serde_json::from_value(raw.clone()).map_err(|error| {
             ambiguous_remaster(
                 &operation_id,
@@ -119,11 +160,27 @@ fn resolve_variation_category(
             }
             Ok(None)
         }
+        "chirp-halibut" => Ok(Some(requested.unwrap_or_default())),
         "chirp-flounder" | "chirp-carp" => Ok(Some(requested.unwrap_or_default())),
         _ => Err(CliError::Config(format!(
             "unsupported Remaster model `{remaster_model_key}`; refusing to guess its variation_category contract"
         ))),
     }
+}
+
+fn resolve_style_profile(
+    remaster_model_key: &str,
+    requested: Option<RemasterStyleProfile>,
+) -> Result<Option<RemasterStyleProfile>, CliError> {
+    if remaster_model_key == "chirp-halibut" {
+        return Ok(Some(requested.unwrap_or_default()));
+    }
+    if requested.is_some() {
+        return Err(CliError::Config(
+            "--style-profile is supported only by the v6 Remaster model `chirp-halibut`".into(),
+        ));
+    }
+    Ok(None)
 }
 
 fn validate_remaster_source(source: &Clip) -> Result<(), CliError> {
@@ -224,8 +281,8 @@ fn ambiguous_remaster(
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_variation_category, validate_remaster_source};
-    use crate::api::types::{Clip, RemasterVariation};
+    use super::{resolve_style_profile, resolve_variation_category, validate_remaster_source};
+    use crate::api::types::{Clip, RemasterStyleProfile, RemasterVariation};
 
     fn source(overrides: serde_json::Value) -> Clip {
         let mut value = serde_json::json!({
@@ -291,6 +348,15 @@ mod tests {
 
     #[test]
     fn remaster_variation_encoding_is_model_specific() {
+        assert_eq!(
+            resolve_variation_category("chirp-halibut", None).expect("v6 default"),
+            Some(RemasterVariation::Normal)
+        );
+        assert_eq!(
+            resolve_variation_category("chirp-halibut", Some(RemasterVariation::High))
+                .expect("v6 explicit variation"),
+            Some(RemasterVariation::High)
+        );
         assert!(matches!(
             resolve_variation_category("chirp-flounder", None).expect("v5.5 default"),
             Some(RemasterVariation::Normal)
@@ -310,5 +376,21 @@ mod tests {
         let error = resolve_variation_category("chirp-future", None)
             .expect_err("unknown models must not inherit a guessed variation contract");
         assert!(error.to_string().contains("unsupported Remaster model"));
+    }
+
+    #[test]
+    fn v6_style_profile_uses_current_web_values_and_default() {
+        assert_eq!(
+            resolve_style_profile("chirp-halibut", None).expect("v6 default"),
+            Some(RemasterStyleProfile::Boost)
+        );
+        assert_eq!(
+            resolve_style_profile("chirp-halibut", Some(RemasterStyleProfile::Natural),)
+                .expect("explicit v6 style"),
+            Some(RemasterStyleProfile::Natural)
+        );
+        assert!(
+            resolve_style_profile("chirp-flounder", Some(RemasterStyleProfile::Clarity),).is_err()
+        );
     }
 }

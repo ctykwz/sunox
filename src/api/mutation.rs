@@ -65,8 +65,30 @@ impl SunoClient {
         &self,
         request: reqwest::RequestBuilder,
     ) -> Result<reqwest::RequestBuilder, CliError> {
+        self.prepare_mutation_request_with_context(request, &[])
+            .await
+    }
+
+    async fn prepare_mutation_request_with_context(
+        &self,
+        request: reqwest::RequestBuilder,
+        context: &[(&'static str, Value)],
+    ) -> Result<reqwest::RequestBuilder, CliError> {
         self.refresh_mutation_auth_if_stale().await?;
-        Ok(request.headers(self.headers()))
+        let request = request.headers(self.headers());
+        if !crate::core::operation::is_active() {
+            return Ok(request);
+        }
+        let (client, request) = request.build_split();
+        let request = request?;
+        crate::core::operation::record_request(
+            request.method().as_str(),
+            request.url().path(),
+            request.body().and_then(reqwest::Body::as_bytes),
+            Some(self.auth_state_snapshot().account_lock_key()?),
+            context,
+        )?;
+        Ok(reqwest::RequestBuilder::from_parts(client, request))
     }
 
     /// Send a non-idempotent write exactly once. Callers must construct the
@@ -78,7 +100,9 @@ impl SunoClient {
         mut request: reqwest::RequestBuilder,
         spec: &MutationSpec,
     ) -> Result<reqwest::Response, CliError> {
-        request = self.prepare_mutation_request(request).await?;
+        request = self
+            .prepare_mutation_request_with_context(request, &spec.context)
+            .await?;
         let response = request
             .send()
             .await
@@ -104,9 +128,15 @@ impl SunoClient {
         T: DeserializeOwned,
     {
         let response = self.send_mutation_once(request, spec).await?;
-        response
-            .json::<T>()
+        let path = response.url().path().to_string();
+        let value = response
+            .json::<Value>()
             .await
+            .map_err(|error| spec.ambiguous("response_body", "schema_drift", error.to_string()))?;
+        crate::core::operation::record_response(&path, &value).map_err(|error| {
+            spec.ambiguous("checkpoint_persist", error.error_code(), error.to_string())
+        })?;
+        serde_json::from_value(value)
             .map_err(|error| spec.ambiguous("response_body", "schema_drift", error.to_string()))
     }
 
@@ -116,9 +146,16 @@ impl SunoClient {
         spec: &MutationSpec,
     ) -> Result<String, CliError> {
         let response = self.send_mutation_once(request, spec).await?;
-        response
+        let path = response.url().path().to_string();
+        let text = response
             .text()
             .await
-            .map_err(|error| spec.ambiguous("response_body", "http_error", error.to_string()))
+            .map_err(|error| spec.ambiguous("response_body", "http_error", error.to_string()))?;
+        if let Ok(value) = serde_json::from_str::<Value>(&text) {
+            crate::core::operation::record_response(&path, &value).map_err(|error| {
+                spec.ambiguous("checkpoint_persist", error.error_code(), error.to_string())
+            })?;
+        }
+        Ok(text)
     }
 }

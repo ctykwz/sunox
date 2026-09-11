@@ -28,6 +28,25 @@ pub struct BillingInfo {
     pub extra: BTreeMap<String, Value>,
 }
 
+/// Account/session gates used by the Web client in addition to billing model
+/// capabilities. Values remain untyped so a newly shaped unrelated flag does
+/// not make the whole session response unreadable.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SessionInfo {
+    #[serde(default)]
+    pub flags: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub roles: BTreeMap<String, Value>,
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl SessionInfo {
+    pub fn flag_enabled(&self, name: &str) -> bool {
+        self.flags.get(name).and_then(Value::as_bool) == Some(true)
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct DownloadUsage {
     pub current_period_downloads_limit: u64,
@@ -42,13 +61,51 @@ pub struct DownloadCreditPack {
     pub id: String,
     pub amount: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub price_amount: Option<Number>,
+    pub price_amount: Option<PriceAmount>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_currency_code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_usd: Option<Number>,
     #[serde(default, flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+/// Billing returns prices as either JSON numbers or decimal strings. Preserve
+/// their wire type and decimal precision, including trailing zeroes in strings.
+/// JSON numbers use serde_json's arbitrary_precision representation.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum PriceAmount {
+    Number(Number),
+    DecimalString(String),
+}
+
+impl<'de> Deserialize<'de> for PriceAmount {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Value::deserialize(deserializer)? {
+            Value::Number(number) => Ok(Self::Number(number)),
+            Value::String(decimal) if is_decimal_amount(&decimal) => {
+                Ok(Self::DecimalString(decimal))
+            }
+            _ => Err(serde::de::Error::custom(
+                "price amount must be a JSON number or decimal string",
+            )),
+        }
+    }
+}
+
+fn is_decimal_amount(value: &str) -> bool {
+    let unsigned = value.strip_prefix('-').unwrap_or(value);
+    let (integer, fraction) = unsigned
+        .split_once('.')
+        .map_or((unsigned, None), |(integer, fraction)| {
+            (integer, Some(fraction))
+        });
+    let is_digits = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+    is_digits(integer) && fraction.is_none_or(is_digits)
 }
 
 /// Account-scoped feature gates returned by billing info.
@@ -310,7 +367,7 @@ pub struct RemasterModelInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::{BillingInfo, Model};
+    use super::{BillingInfo, DownloadCreditPack, Model};
 
     #[test]
     fn billing_and_model_unknown_fields_round_trip_at_original_level() {
@@ -386,8 +443,9 @@ mod tests {
         assert_eq!(pack.id, "pack-100");
         assert_eq!(pack.amount, 100);
         assert_eq!(
-            pack.price_amount.as_ref().expect("price amount").as_u64(),
-            Some(999)
+            serde_json::to_value(pack.price_amount.as_ref().expect("price amount"))
+                .expect("serialize numeric price"),
+            999
         );
         assert_eq!(pack.price_currency_code.as_deref(), Some("USD"));
         assert_eq!(
@@ -416,6 +474,149 @@ mod tests {
         assert_eq!(output["download_credit_packs"][0]["price_amount"], 999);
         assert_eq!(output["download_credit_packs"][0]["price_usd"], 9.99);
         assert!(output.get("extra").is_none());
+    }
+
+    #[test]
+    fn billing_accepts_current_decimal_string_prices_without_changing_their_scale() {
+        // Only public credit-pack fields from the current billing shape are
+        // represented here; identifiers and account fields are synthetic.
+        let raw = serde_json::json!({
+            "credits": 10,
+            "total_credits_left": 10,
+            "monthly_usage": 0,
+            "monthly_limit": 100,
+            "is_active": true,
+            "plan": {"name": "Fixture", "plan_key": "fixture"},
+            "models": [],
+            "period": "monthly",
+            "download_credit_packs": [
+                {"id": "fixture-pack-1", "amount": 1, "price_amount": "2.99000", "price_currency_code": "USD", "price_usd": 0},
+                {"id": "fixture-pack-2", "amount": 3, "price_amount": "8.95000", "price_currency_code": "USD", "price_usd": 0},
+                {"id": "fixture-pack-3", "amount": 5, "price_amount": "14.95000", "price_currency_code": "USD", "price_usd": 0},
+                {"id": "fixture-pack-4", "amount": 10, "price_amount": "29.90000", "price_currency_code": "USD", "price_usd": 0}
+            ]
+        });
+        let billing: BillingInfo = serde_json::from_slice(
+            &serde_json::to_vec(&raw).expect("serialize sanitized billing fixture"),
+        )
+        .expect("decode current billing price shape");
+        let output = serde_json::to_value(billing).expect("serialize billing");
+        assert_eq!(
+            output["download_credit_packs"],
+            raw["download_credit_packs"]
+        );
+    }
+
+    #[test]
+    fn credit_pack_price_numbers_and_strings_preserve_exact_precision() {
+        fn decimal_parts(value: &str) -> (bool, String, i32) {
+            let (significand, exponent) = value
+                .split_once('e')
+                .or_else(|| value.split_once('E'))
+                .map_or((value, 0), |(significand, exponent)| {
+                    (
+                        significand,
+                        exponent.parse::<i32>().expect("decimal exponent"),
+                    )
+                });
+            let negative = significand.starts_with('-');
+            let unsigned = significand.strip_prefix('-').unwrap_or(significand);
+            let (integer, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+            let mut digits = format!("{integer}{fraction}")
+                .trim_start_matches('0')
+                .to_owned();
+            if digits.is_empty() {
+                return (false, "0".to_owned(), 0);
+            }
+            let significant_len = digits.trim_end_matches('0').len();
+            let trailing_zeroes = digits.len() - significant_len;
+            digits.truncate(significant_len);
+            let scale = exponent - i32::try_from(fraction.len()).expect("fraction length")
+                + i32::try_from(trailing_zeroes).expect("trailing zeroes");
+            (negative, digits, scale)
+        }
+
+        fn assert_exact_price(output: &serde_json::Value, wire: &str) {
+            if wire.starts_with('"') {
+                assert!(output.is_string());
+                assert_eq!(output.to_string(), wire);
+            } else {
+                assert!(output.is_number());
+                // Number -> Value may normalize the exponent spelling. Compare
+                // exact decimal digits and scale, never a floating-point value.
+                assert_eq!(decimal_parts(&output.to_string()), decimal_parts(wire));
+            }
+        }
+
+        for wire_amount in [
+            "999",
+            "9007199254740993",
+            "184467440737095516160000000001",
+            "2.99000",
+            "2.990000000000000000000000000001",
+            "0.000000000000000000000000000009",
+            r#""2.99000""#,
+            r#""184467440737095516160000000001.000000000009""#,
+            r#""-0.00000""#,
+        ] {
+            let raw = format!(r#"{{"id":"fixture-pack","amount":1,"price_amount":{wire_amount}}}"#);
+            let pack: DownloadCreditPack =
+                serde_json::from_str(&raw).expect("decode exact credit-pack price");
+            let output = serde_json::to_value(pack).expect("serialize exact credit-pack price");
+            assert_exact_price(&output["price_amount"], wire_amount);
+            let raw_value = serde_json::from_str(&raw).expect("decode raw pack as Value");
+            let via_value: DownloadCreditPack =
+                serde_json::from_value(raw_value).expect("decode exact pack through Value");
+            assert_exact_price(
+                &serde_json::to_value(via_value).expect("serialize exact pack through Value")["price_amount"],
+                wire_amount,
+            );
+            // The capabilities projection serializes through Value as well.
+            let reparsed: DownloadCreditPack =
+                serde_json::from_value(output).expect("deserialize exact price through Value");
+            assert_exact_price(
+                &serde_json::to_value(reparsed).expect("serialize price again")["price_amount"],
+                wire_amount,
+            );
+        }
+    }
+
+    #[test]
+    fn credit_pack_prices_reject_non_decimal_strings_and_structured_values() {
+        for invalid in [
+            serde_json::json!(""),
+            serde_json::json!("2."),
+            serde_json::json!(".99"),
+            serde_json::json!("2.9.9"),
+            serde_json::json!("+2.99"),
+            serde_json::json!(" 2.99"),
+            serde_json::json!("2.99 "),
+            serde_json::json!("1e2"),
+            serde_json::json!("NaN"),
+            serde_json::json!("Infinity"),
+            serde_json::json!("USD 2.99"),
+            serde_json::json!(true),
+            serde_json::json!([2, 99]),
+            serde_json::json!({"amount": "2.99000"}),
+        ] {
+            let raw = serde_json::json!({
+                "id": "fixture-pack",
+                "amount": 1,
+                "price_amount": invalid,
+            });
+            assert!(
+                serde_json::from_value::<DownloadCreditPack>(raw).is_err(),
+                "unexpectedly accepted price: {invalid}"
+            );
+        }
+        for optional in [
+            serde_json::json!({"id": "fixture-pack", "amount": 1}),
+            serde_json::json!({"id": "fixture-pack", "amount": 1, "price_amount": null}),
+        ] {
+            let pack: DownloadCreditPack =
+                serde_json::from_value(optional).expect("accept optional price");
+            assert!(pack.price_amount.is_none());
+        }
     }
 
     #[test]
