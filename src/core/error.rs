@@ -169,6 +169,13 @@ impl CliError {
         )
     }
 
+    pub(crate) fn stops_account_work(&self) -> bool {
+        self.is_auth_or_rate_limit()
+            || matches!(self, Self::AmbiguousMutation { details, .. }
+                if matches!(details.pointer("/cause/code").and_then(serde_json::Value::as_str),
+                    Some("auth_missing" | "auth_expired" | "auth_changed" | "rate_limited")))
+    }
+
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::Config(_)

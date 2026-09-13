@@ -16,11 +16,60 @@ pub struct ImageUploadResult {
     pub moderation_status: Option<String>,
 }
 
-pub async fn run(client: &SunoClient, file: &Path) -> Result<ImageUploadResult, CliError> {
+// Local memory safety limit, not a claim about Suno's upload allowance.
+const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+
+pub struct PreparedImage {
+    extension: String,
+    filename: String,
+    bytes: Vec<u8>,
+}
+
+pub async fn prepare(file: &Path) -> Result<PreparedImage, CliError> {
+    use tokio::io::AsyncReadExt;
+
     let extension = image_extension(file)?;
     let filename = upload_filename(file)?;
-    let bytes = tokio::fs::read(file).await?;
+    let metadata = tokio::fs::metadata(file).await?;
+    if !metadata.is_file() {
+        return Err(CliError::Config(
+            "image upload path must be a regular file".into(),
+        ));
+    }
+    let mut options = tokio::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NONBLOCK);
+    let source = options.open(file).await?;
+    let metadata = source.metadata().await?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_IMAGE_BYTES {
+        return Err(CliError::Config(format!(
+            "image upload must be a nonempty regular file within the CLI's local {MAX_IMAGE_BYTES}-byte safety limit"
+        )));
+    }
+    let mut bytes = Vec::new();
+    source
+        .take(MAX_IMAGE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .await?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_IMAGE_BYTES {
+        return Err(CliError::Config(format!(
+            "image upload must be nonempty and within the CLI's local {MAX_IMAGE_BYTES}-byte safety limit"
+        )));
+    }
+    Ok(PreparedImage {
+        extension,
+        filename,
+        bytes,
+    })
+}
 
+pub async fn run(client: &SunoClient, image: PreparedImage) -> Result<ImageUploadResult, CliError> {
+    let PreparedImage {
+        extension,
+        filename,
+        bytes,
+    } = image;
     let upload = client
         .create_image_upload(&CreateImageUploadRequest { extension })
         .await?;

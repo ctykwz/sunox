@@ -40,6 +40,10 @@ struct DownloadWarning {
     field: &'static str,
     code: String,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<serde_json::Value>,
+    #[serde(skip)]
+    account_error: Option<CliError>,
 }
 
 struct DownloadFileOptions<'a> {
@@ -125,11 +129,23 @@ async fn download_with_source(
                 credit_deducted: access.credit_deducted,
             });
         }
-        if let Some(warning) = warning {
+        if let Some(mut warning) = warning {
+            let account_error = warning.account_error.take();
             if !ctx.quiet {
                 eprintln!("Warning: {}", warning.message);
             }
             warnings.push(warning);
+            if let Some(error) = account_error {
+                return Err(partial_download_error(
+                    &completed,
+                    &clip.id,
+                    None,
+                    &remaining_clip_ids(&clips[index + 1..]),
+                    &authorized_sources,
+                    &warnings,
+                    error,
+                ));
+            }
         }
         let options = DownloadFileOptions {
             output_dir,
@@ -155,7 +171,9 @@ async fn download_with_source(
             }
         };
 
-        if let Some(warning) = warning {
+        let mut account_error = None;
+        if let Some(mut warning) = warning {
+            account_error = warning.account_error.take();
             if !ctx.quiet {
                 eprintln!("Warning: {}", warning.message);
             }
@@ -170,6 +188,17 @@ async fn download_with_source(
             path: path.clone(),
         });
         paths.push(path);
+        if let Some(error) = account_error {
+            return Err(partial_download_error(
+                &completed,
+                &clip.id,
+                None,
+                &remaining_clip_ids(&clips[index + 1..]),
+                &authorized_sources,
+                &warnings,
+                error,
+            ));
+        }
     }
     match ctx.fmt {
         OutputFormat::Json if warnings.is_empty() => output::json::success(&paths),
@@ -413,10 +442,12 @@ fn billing_readback_warning(
     error.map(|error| DownloadWarning {
         clip_id: source_clip_id.to_owned(),
         field: "download_usage",
+        details: error.details().cloned(),
         code: error.error_code().to_owned(),
         message: format!(
             "download authorization for {source_clip_id} succeeded, but current download usage could not be refreshed: {error}"
         ),
+        account_error: error.stops_account_work().then_some(error),
     })
 }
 
@@ -554,27 +585,44 @@ async fn download_mp3_with_lyrics(
             .existing_aligned_lyrics(&clip.id, configured_polling(ctx))
             .await
     } else {
-        let _mutation_guard = ctx.acquire_mutation_lock_for(&client.auth_state_snapshot())?;
-        client
-            .aligned_lyrics(
-                &clip.id,
-                plain_lyrics,
-                !clip_has_concat_history(clip),
-                configured_polling(ctx),
-            )
-            .await
+        match ctx.acquire_mutation_lock_for(&client.auth_state_snapshot()) {
+            Ok(_mutation_guard) => {
+                client
+                    .aligned_lyrics(
+                        &clip.id,
+                        plain_lyrics,
+                        !clip_has_concat_history(clip),
+                        configured_polling(ctx),
+                    )
+                    .await
+            }
+            Err(error) => Err(error),
+        }
     };
     let (aligned, warning) = match aligned_result {
         Ok(aligned) => (Some(aligned), None),
         Err(error) => {
+            let details = crate::core::operation::preserve_warning_details(&error);
+            let mut message = format!(
+                "downloaded {} but timed lyrics could not be embedded: {error}",
+                clip.id
+            );
+            if let Some(path) = details
+                .as_ref()
+                .and_then(|details| details.pointer("/operation_recovery/checkpoint_path"))
+                .and_then(serde_json::Value::as_str)
+            {
+                message.push_str(&format!(
+                    ". Recovery checkpoint: {path}; inspect the clip before retrying the write"
+                ));
+            }
             let warning = DownloadWarning {
                 clip_id: clip.id.clone(),
                 field: "aligned_lyrics",
+                details,
                 code: error.error_code().to_string(),
-                message: format!(
-                    "downloaded {} but timed lyrics could not be embedded: {error}",
-                    clip.id
-                ),
+                message,
+                account_error: error.stops_account_work().then_some(error),
             };
             (None, Some(warning))
         }
@@ -1707,6 +1755,8 @@ mod tests {
             field: "download_usage",
             code: "api_error".into(),
             message: "billing refresh failed".into(),
+            details: None,
+            account_error: None,
         }];
         let error = partial_download_error(
             &[],

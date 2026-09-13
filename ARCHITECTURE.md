@@ -26,17 +26,25 @@ arguments and renders the domain report. Captcha, doctor, and update code depend
   when the caller has only acquired the account lock. Workflows that spend more than 30 seconds
   preparing, uploading, or polling revalidate before a later write. Every raw
   no-redirect mutation builder must pass through `prepare_mutation_request`; higher-level writes
-  use `send_mutation_once`, which applies the same preparation centrally.
+  use `send_mutation_once`, which applies the same preparation centrally. The local active account
+  is checked before and after auth preflight and before each write; switching accounts or logging
+  out cannot silently move an in-progress request to another account.
 - Multi-stage writes preserve durable IDs and expose read-only inspection or recovery guidance.
 - The CLI scopes each command with `core::operation` recovery state. Mutation preparation saves
   request identities before sending; successful JSON write responses add resource identities before
   the next stage. Failure and Ctrl+C preserve this journal and report possible remote effects;
-  successful commands remove it. The journal stores allowlisted IDs, never request payloads or auth,
+  successful commands remove it only when no unresolved mutation was downgraded to a warning.
+  Such warnings retain their recovery details and journal even when a local download succeeds.
+  The journal stores allowlisted IDs, never request payloads or auth,
   and provides inspection rather than automatic replay. Route-specific adapters preserve known
   response wrappers and request aliases, and distinguish audio from image upload identities.
 - Generation holds its account write lock before prompt enhancement and through submission.
 - Background auth metadata recovery honors the application browser launch policy. Reusable login
   candidates are validated before selection; only explicit credential rejection advances candidates.
+- Batch downloads stop account requests on authentication changes or rate limiting, including
+  causes wrapped by an ambiguous write result, while preserving completed files and recovery evidence.
+- Local image uploads are prepared before authentication and account locking: only nonempty regular
+  files are read, bounded by a 64 MiB local memory safety limit rather than an assumed Suno quota.
 - Downloads validate nonempty content and basic media container structure before atomic commit.
   Opus validation walks every page and packet boundary, including continued comments; WAV
   validation honors finite RIFF/RF64 sizes, extended chunk tables, and PCM frame alignment.

@@ -6462,7 +6462,10 @@ async fn image_upload_workflow_preserves_upload_identity_when_finish_fails() {
     let path = dir.path().join("cover.png");
     std::fs::write(&path, b"image-bytes").expect("write image fixture");
 
-    let error = crate::workflow::image_upload::run(&client, &path)
+    let image = crate::workflow::image_upload::prepare(&path)
+        .await
+        .expect("prepare image");
+    let error = crate::workflow::image_upload::run(&client, image)
         .await
         .expect_err("finish failure must expose the created image upload");
 

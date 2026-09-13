@@ -80,12 +80,16 @@ pub async fn set(args: SetArgs, ctx: &AppContext) -> Result<(), CliError> {
         (_, Some(path)) => Some(std::fs::read_to_string(path)?),
         _ => None,
     };
+    let prepared_cover = match args.image_file.as_deref() {
+        Some(path) => Some(image_upload::prepare(path).await?),
+        None => None,
+    };
     let (client, _mutation_guard) = ctx.mutation_client().await?;
-    let uploaded_cover = if let Some(image_file) = args.image_file.as_deref() {
+    let uploaded_cover = if let Some(image) = prepared_cover {
         if !ctx.quiet {
             eprintln!("Uploading clip cover image...");
         }
-        Some(image_upload::run(&client, image_file).await?)
+        Some(image_upload::run(&client, image).await?)
     } else {
         None
     };

@@ -43,7 +43,7 @@ async fn refresh_state_with_lock(
         return Err(CliError::AuthExpired);
     }
 
-    let _refresh_guard = AuthRefreshLockGuard::acquire(auth)?;
+    let _refresh_guard = AuthRefreshLockGuard::acquire(auth).await?;
     if let Ok(saved_auth) = AuthState::load() {
         if !auth.matches_account_material(&saved_auth) {
             return Err(active_auth_changed_error());

@@ -22,6 +22,7 @@ pub struct SunoClient {
     /// kicks in well before the JWT's own `exp` claim). The lock is only
     /// held briefly to read/clone auth fields; never across awaits.
     pub(crate) auth: Mutex<AuthState>,
+    pub(crate) auth_refresh: tokio::sync::Mutex<()>,
     pub(crate) device_override: Mutex<Option<String>>,
     /// Live clients must validate even when no earlier command preflight ran.
     /// Low-level endpoint fixtures can exercise the transport contract alone.
@@ -44,6 +45,7 @@ impl SunoClient {
             clerk_client,
             base_url: api_base_url(),
             auth: Mutex::new(auth),
+            auth_refresh: tokio::sync::Mutex::new(()),
             device_override: Mutex::new(None),
             requires_initial_mutation_preflight: true,
             mutation_auth_preflight_at: Mutex::new(None),
@@ -61,6 +63,7 @@ impl SunoClient {
             clerk_client: http::clerk_client()?,
             base_url: BASE_URL.to_string(),
             auth: Mutex::new(auth),
+            auth_refresh: tokio::sync::Mutex::new(()),
             device_override: Mutex::new(None),
             requires_initial_mutation_preflight: true,
             mutation_auth_preflight_at: Mutex::new(None),
@@ -76,6 +79,7 @@ impl SunoClient {
             clerk_client: http::clerk_client()?,
             base_url: base_url.trim_end_matches('/').to_string(),
             auth: Mutex::new(auth),
+            auth_refresh: tokio::sync::Mutex::new(()),
             device_override: Mutex::new(None),
             requires_initial_mutation_preflight: false,
             mutation_auth_preflight_at: Mutex::new(None),
@@ -84,6 +88,21 @@ impl SunoClient {
 
     pub(crate) fn auth_state_snapshot(&self) -> AuthState {
         self.auth.lock().expect("auth mutex poisoned").clone()
+    }
+
+    pub(crate) fn ensure_active_account(&self) -> Result<(), CliError> {
+        #[cfg(test)]
+        if !self.requires_initial_mutation_preflight {
+            return Ok(());
+        }
+        let saved = AuthState::load().map_err(|error| match error {
+            CliError::AuthMissing => CliError::AuthChanged,
+            error => error,
+        })?;
+        if !self.auth_state_snapshot().matches_account_material(&saved) {
+            return Err(CliError::AuthChanged);
+        }
+        Ok(())
     }
 
     pub(crate) fn authenticated_user_id(&self) -> Option<String> {

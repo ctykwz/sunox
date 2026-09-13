@@ -11,6 +11,21 @@ backward-compatible features, upstream protocol adaptations, and fixes.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-09-13
+
+### Fixed
+
+- Prevent concurrent credential refreshes from deadlocking, while keeping cross-process refresh
+  coordination cancellable and bounded.
+- Revalidate the active local account before authenticated mutations so an account switch or logout
+  while waiting for a lock cannot send a write with stale credentials.
+- Propagate authentication and rate-limit failures from optional capability checks, stop batch media
+  work after account-fatal failures, and retain completed downloads plus recovery checkpoints.
+- Preserve full warning details and unresolved mutation evidence instead of clearing checkpoints after
+  a workflow completes with warnings.
+- Validate Persona generation against the selected model limits, and validate image inputs with
+  bounded reads before acquiring authentication or mutation locks.
+
 ## [0.3.2] - 2026-09-11
 
 ### Added
