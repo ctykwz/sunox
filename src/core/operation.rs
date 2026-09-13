@@ -34,6 +34,7 @@ struct RecoveryIdentity {
 struct RecoveryState {
     directory: Option<PathBuf>,
     checkpoint: Checkpoint,
+    retain_on_success: bool,
 }
 
 #[derive(Serialize)]
@@ -66,6 +67,7 @@ impl OperationRecovery {
         Self(
             Arc::new(Mutex::new(RecoveryState {
                 directory,
+                retain_on_success: false,
                 checkpoint: Checkpoint {
                     version: 1,
                     operation_id: operation_id.clone(),
@@ -149,11 +151,15 @@ impl OperationRecovery {
         Some(details)
     }
 
-    /// Completed commands do not accumulate an operation history. Failed cleanup is non-fatal.
+    /// Unresolved optional writes outlive successful commands; reconciled writes do not.
     pub(crate) fn finish(&self) -> Result<(), CliError> {
         let mut state = self.0.lock().expect("operation recovery mutex");
         if state.checkpoint.writes.is_empty() {
             return Ok(());
+        }
+        if state.retain_on_success {
+            state.checkpoint.state = "completed_with_warnings";
+            return state.persist();
         }
         state.checkpoint.state = "completed";
         state.persist()?;
@@ -264,6 +270,25 @@ impl RecoveryState {
             "inspection_commands": inspection,
         })
     }
+}
+
+pub(crate) fn preserve_warning_details(error: &CliError) -> Option<Value> {
+    if !matches!(
+        error,
+        CliError::AmbiguousMutation { .. } | CliError::PartialMutation { .. }
+    ) {
+        return error.details().cloned();
+    }
+    CURRENT
+        .try_with(|current| {
+            current
+                .0
+                .lock()
+                .expect("operation recovery mutex")
+                .retain_on_success = true;
+            current.error_details(error)
+        })
+        .unwrap_or_else(|_| error.details().cloned())
 }
 
 pub(crate) fn is_active() -> bool {
@@ -531,6 +556,71 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn unresolved_warning_survives_later_successful_writes_and_finish() {
+        for received in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let recovery = OperationRecovery::with_directory(Some(directory.path().to_path_buf()));
+            let details = recovery
+                .scope(async {
+                    record_request(
+                        "POST",
+                        "/api/gen/clip-first/aligned_lyrics/v3",
+                        None,
+                        None,
+                        &[],
+                    )
+                    .unwrap();
+                    if received {
+                        record_acknowledgement("/api/gen/clip-first/aligned_lyrics/v3").unwrap();
+                    }
+                    let details = preserve_warning_details(&CliError::AmbiguousMutation {
+                        message: "response lost".into(),
+                        details: json!({"operation_id":"first-write"}),
+                    })
+                    .unwrap();
+                    record_request(
+                        "POST",
+                        "/api/gen/clip-next/aligned_lyrics/v3",
+                        None,
+                        None,
+                        &[],
+                    )
+                    .unwrap();
+                    record_response(
+                        "/api/gen/clip-next/aligned_lyrics/v3",
+                        &json!({"alignment":[]}),
+                    )
+                    .unwrap();
+                    details
+                })
+                .await;
+            recovery.finish().unwrap();
+            let path = details["operation_recovery"]["checkpoint_path"]
+                .as_str()
+                .unwrap();
+            let checkpoint: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            assert_eq!(checkpoint["state"], "completed_with_warnings");
+            assert_eq!(checkpoint["writes"].as_array().unwrap().len(), 2);
+            assert_eq!(details["operation_id"], "first-write");
+        }
+    }
+
+    #[tokio::test]
+    async fn read_only_warning_does_not_retain_successful_mutation_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let recovery = OperationRecovery::with_directory(Some(directory.path().to_path_buf()));
+        recovery
+            .scope(async {
+                record_request("POST", "/api/download/authorize", None, None, &[]).unwrap();
+                record_response("/api/download/authorize", &json!({"ok":true})).unwrap();
+                assert!(preserve_warning_details(&CliError::RateLimited).is_none());
+            })
+            .await;
+        recovery.finish().unwrap();
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]

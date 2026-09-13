@@ -10,7 +10,9 @@ impl SunoClient {
     /// This read may refresh a server-stale JWT through `with_auth_retry`, so
     /// the subsequent write can remain strictly single-shot.
     pub(crate) async fn prepare_mutation_auth(&self) -> Result<(), CliError> {
+        self.ensure_active_account()?;
         self.billing_info().await?;
+        self.ensure_active_account()?;
         *self
             .mutation_auth_preflight_at
             .lock()

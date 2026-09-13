@@ -20,6 +20,11 @@ enum Scenario {
     RejectedInitialAuth,
     RejectedWrite,
     LongGeneration,
+    SessionRejected(u16),
+    SessionAccountChanged,
+    PersonaLengthLimit,
+    ConcurrentAuthFailure,
+    AuthChangedBeforeWrite { logout: bool, after_write: bool },
 }
 
 #[derive(Debug)]
@@ -144,11 +149,19 @@ fn response_for(path: &str) -> Value {
             "period":"month","renews_on":null
         }),
         "/api/session/" => json!({"flags":{"aug-creativity":true},"roles":{}}),
+        "/api/persona/get-persona/test-persona/" => json!({
+            "id":"test-persona","name":"Voice","is_vox_persona":true,
+            "is_trashed":false,"is_hidden":false
+        }),
         "/api/personalization/settings" => json!({"styles_augmentation":true}),
         "/api/prompts/upsample" => {
             json!({"upsampled":"enhanced ambient piano","request_id":"enhancement-auth"})
         }
         "/api/c/check" => json!({"required":false}),
+        "/api/clip/source-clip" => {
+            json!({"id":"source-clip","title":"Source","status":"complete","model_name":"chirp-hawk","created_at":"2026-09-13T00:00:00Z"})
+        }
+        "/api/gen/first/set_visibility/" | "/api/gen/second/set_visibility/" => json!({}),
         "/api/generate/v2-web/" => json!({"clips":[clip]}),
         "/api/clips/reverse-clip/" | "/api/clips/adjust-speed/" | "/api/clip/edited-clip" => clip,
         "/api/edit/crop/source-clip/" | "/api/edit/fade/source-clip/" => {
@@ -165,6 +178,11 @@ fn run_case(args: &[&str], mutation_path: &str, scenario: Scenario) -> (Output, 
     std::fs::create_dir_all(&config).expect("config directory");
     let auth_path = config.join("auth.json");
     write_auth(&auth_path, "initial");
+    if matches!(scenario, Scenario::SessionRejected(401)) {
+        let mut auth: Value = serde_json::from_slice(&std::fs::read(&auth_path).unwrap()).unwrap();
+        auth["clerk_client_cookie"] = Value::Null;
+        std::fs::write(&auth_path, auth.to_string()).unwrap();
+    }
     let account_hash = Sha256::digest(format!("jwt-sub:{SUBJECT}").as_bytes())
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -172,6 +190,26 @@ fn run_case(args: &[&str], mutation_path: &str, scenario: Scenario) -> (Output, 
     let lock_path = config
         .join("locks")
         .join(format!("mutation-account-{account_hash}.lock"));
+    let mut held_lock = if matches!(
+        scenario,
+        Scenario::AuthChangedBeforeWrite {
+            after_write: false,
+            ..
+        }
+    ) {
+        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        let file = File::options()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        file.lock_exclusive().unwrap();
+        Some(file)
+    } else {
+        None
+    };
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback server");
     listener.set_nonblocking(true).expect("nonblocking server");
     let address = listener.local_addr().expect("server address");
@@ -182,7 +220,11 @@ fn run_case(args: &[&str], mutation_path: &str, scenario: Scenario) -> (Output, 
         let start = Instant::now();
         let deadline = start + Duration::from_secs(50);
         let mut requests = Vec::new();
-        let mut rotated = !matches!(scenario, Scenario::LongGeneration);
+        let mut pending_auth_failures = Vec::new();
+        let mut rotated = matches!(
+            scenario,
+            Scenario::RejectedInitialAuth | Scenario::RejectedWrite
+        );
         while !server_stopped.load(Ordering::SeqCst) && Instant::now() < deadline {
             let (mut stream, _) = match listener.accept() {
                 Ok(connection) => connection,
@@ -193,10 +235,63 @@ fn run_case(args: &[&str], mutation_path: &str, scenario: Scenario) -> (Output, 
                 Err(error) => panic!("mock accept: {error}"),
             };
             let request = read_request(&mut stream, start, &lock_path);
+            if let Scenario::AuthChangedBeforeWrite {
+                logout,
+                after_write,
+            } = scenario
+                && request.path
+                    == if after_write {
+                        "/api/gen/first/set_visibility/"
+                    } else {
+                        "/api/clip/source-clip"
+                    }
+            {
+                if logout {
+                    std::fs::remove_file(&auth_path).unwrap();
+                } else {
+                    let mut changed: Value =
+                        serde_json::from_slice(&std::fs::read(&auth_path).unwrap()).unwrap();
+                    let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+                        json!({"sub":"different-account","exp":4102444800_u64}).to_string(),
+                    );
+                    changed["jwt"] = json!(format!("e30.{claims}.c2ln"));
+                    std::fs::write(&auth_path, changed.to_string()).unwrap();
+                }
+                if let Some(file) = held_lock.take() {
+                    FileExt::unlock(&file).unwrap();
+                }
+            }
             let initial_auth = request.authorization == format!("Bearer {}", token("initial"));
             let rejected_write =
                 matches!(scenario, Scenario::RejectedWrite) && request.path == mutation_path;
-            let (status, body) = if rotated && initial_auth {
+            let session_failure = request.path == "/api/session/";
+            let (status, body) = if matches!(scenario, Scenario::ConcurrentAuthFailure) {
+                (
+                    "401 Unauthorized",
+                    json!({"detail":"Token validation failed."}),
+                )
+            } else if session_failure && matches!(scenario, Scenario::SessionAccountChanged) {
+                let mut changed: Value =
+                    serde_json::from_slice(&std::fs::read(&auth_path).unwrap()).unwrap();
+                let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(json!({"sub":"other-account","exp":4102444800_u64}).to_string());
+                changed["jwt"] = json!(format!("e30.{claims}.c2ln"));
+                std::fs::write(&auth_path, changed.to_string()).unwrap();
+                (
+                    "401 Unauthorized",
+                    json!({"detail":"Token validation failed."}),
+                )
+            } else if session_failure && matches!(scenario, Scenario::SessionRejected(_)) {
+                let Scenario::SessionRejected(status) = scenario else {
+                    unreachable!()
+                };
+                let status = match status {
+                    401 => "401 Unauthorized",
+                    429 => "429 Too Many Requests",
+                    _ => "503 Service Unavailable",
+                };
+                (status, json!({"detail":"session unavailable"}))
+            } else if rotated && initial_auth {
                 // A concurrent process refreshed this same account. Only the read may retry.
                 write_auth(&auth_path, "fresh");
                 (
@@ -226,13 +321,60 @@ fn run_case(args: &[&str], mutation_path: &str, scenario: Scenario) -> (Output, 
                         rotated = true;
                     }
                 }
-                ("200 OK", response_for(&request.path))
+                let mut body = response_for(&request.path);
+                if matches!(scenario, Scenario::PersonaLengthLimit)
+                    && request.path == "/api/billing/info/"
+                {
+                    body["models"][0]["max_lengths"] = json!({"prompt":4,"tags":4,"title":4,"negative_tags":4,"gpt_description_prompt":4});
+                }
+                ("200 OK", body)
             };
             requests.push(request);
             let body = body.to_string();
-            write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).expect("response");
+            let wire = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            if matches!(scenario, Scenario::ConcurrentAuthFailure) {
+                pending_auth_failures.push((stream, wire));
+                if pending_auth_failures.len() == 2 {
+                    for (mut stream, wire) in pending_auth_failures.drain(..) {
+                        stream
+                            .write_all(wire.as_bytes())
+                            .expect("concurrent response");
+                    }
+                }
+            } else {
+                stream.write_all(wire.as_bytes()).expect("response");
+            }
         }
         requests
+    });
+    let proxy = TcpListener::bind("127.0.0.1:0").expect("local rejecting proxy");
+    proxy.set_nonblocking(true).unwrap();
+    let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+    let proxy_stopped = Arc::clone(&stopped);
+    let proxy_server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(50);
+        while !proxy_stopped.load(Ordering::SeqCst) && Instant::now() < deadline {
+            match proxy.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(1)))
+                        .unwrap();
+                    let mut buffer = [0; 4096];
+                    if stream.read(&mut buffer).is_ok() {
+                        std::thread::sleep(Duration::from_millis(100));
+                        let _ = stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5))
+                }
+                Err(error) => panic!("proxy accept: {error}"),
+            }
+        }
     });
     let mut command = Command::cargo_bin("sunox").expect("binary");
     for (key, _) in std::env::vars().filter(|(key, _)| key.starts_with("SUNOX_")) {
@@ -246,12 +388,25 @@ fn run_case(args: &[&str], mutation_path: &str, scenario: Scenario) -> (Output, 
         .env("SUNOX_TEST_API_BASE_URL", format!("http://{address}"))
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost")
+        .env("HTTPS_PROXY", &proxy_url)
+        .env("https_proxy", &proxy_url)
+        .env("HTTP_PROXY", &proxy_url)
+        .env("http_proxy", &proxy_url)
+        .env("ALL_PROXY", &proxy_url)
+        .env("all_proxy", &proxy_url)
         .args(["-c", "challenge_browser=existing"])
         .args(args)
         .arg("--json")
-        .timeout(Duration::from_secs(45));
+        .timeout(Duration::from_secs(
+            if matches!(scenario, Scenario::ConcurrentAuthFailure) {
+                5
+            } else {
+                45
+            },
+        ));
     let output = command.assert().get_output().clone();
     stopped.store(true, Ordering::SeqCst);
+    proxy_server.join().expect("local proxy");
     (output, server.join().expect("mock server"))
 }
 
@@ -361,6 +516,133 @@ fn an_auth_rejection_of_the_write_is_never_replayed_after_preflight() {
         error["error"]["details"]["operation_recovery"].is_null(),
         "a definite auth rejection must not claim that the write was possibly accepted"
     );
+}
+
+#[test]
+fn account_changes_stop_waiting_and_subsequent_mutations() {
+    for logout in [false, true] {
+        for after_write in [false, true] {
+            let args: &[&str] = if after_write {
+                &["clip", "publish", "first", "second", "--private"]
+            } else {
+                &["clip", "speed", "source-clip", "--multiplier", "1.2"]
+            };
+            let (output, requests) = run_case(
+                args,
+                "",
+                Scenario::AuthChangedBeforeWrite {
+                    logout,
+                    after_write,
+                },
+            );
+            assert_eq!(
+                output.status.code(),
+                Some(if after_write { 1 } else { 3 }),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                requests.iter().filter(|r| r.method == "POST").count(),
+                usize::from(after_write),
+                "{requests:?}"
+            );
+            assert!(String::from_utf8_lossy(&output.stderr).contains("auth_changed"));
+        }
+    }
+}
+
+#[test]
+fn concurrent_capabilities_auth_failures_return_without_deadlock() {
+    let (output, requests) = run_case(&["capabilities"], "", Scenario::ConcurrentAuthFailure);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(requests.len(), 2);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("http_error"));
+}
+
+#[test]
+fn session_auth_and_rate_limit_errors_stop_optional_and_explicit_generation() {
+    for (scenario, exit_code, code) in [
+        (Scenario::SessionRejected(401), 3, "auth_expired"),
+        (Scenario::SessionRejected(429), 4, "rate_limited"),
+        (Scenario::SessionAccountChanged, 3, "auth_changed"),
+    ] {
+        for explicit in [false, true] {
+            let mut args = vec!["create", "--instrumental", "--quiet", "--no-captcha"];
+            if explicit {
+                args.extend(["--variety", "2"]);
+            }
+            let (output, requests) = run_case(&args, "", scenario);
+            assert_eq!(
+                output.status.code(),
+                Some(exit_code),
+                "{code}, explicit={explicit}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let error: Value = serde_json::from_slice(&output.stderr).expect("JSON error");
+            assert_eq!(error["error"]["code"], code);
+            assert!(
+                requests.iter().all(|request| request.method == "GET"),
+                "{requests:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn optional_session_outage_omits_variety_but_explicit_variety_fails_closed() {
+    for explicit in [false, true] {
+        let mut args = vec!["create", "--instrumental", "--quiet", "--no-captcha"];
+        if explicit {
+            args.extend(["--variety", "2"]);
+        }
+        let (output, requests) = run_case(&args, "", Scenario::SessionRejected(503));
+        assert_eq!(output.status.code(), Some(if explicit { 2 } else { 0 }));
+        let submissions: Vec<_> = requests
+            .iter()
+            .filter(|r| r.path == "/api/generate/v2-web/")
+            .collect();
+        assert_eq!(submissions.len(), usize::from(!explicit));
+        if let Some(request) = submissions.first() {
+            assert!(request.body["metadata"]["control_sliders"]["aug_creativity"].is_null());
+        }
+    }
+}
+
+#[test]
+fn persona_and_plain_create_enforce_the_same_model_text_limits() {
+    for persona in [false, true] {
+        for enhance in [false, true] {
+            let mut args = vec![
+                "create",
+                "--lyrics",
+                "longer than four",
+                "--quiet",
+                "--no-captcha",
+            ];
+            if persona {
+                args.extend(["--persona", "test-persona"]);
+            }
+            if enhance {
+                args.push("--enhance-tags");
+            }
+            let (output, requests) = run_case(&args, "", Scenario::PersonaLengthLimit);
+            assert_eq!(
+                output.status.code(),
+                Some(2),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                requests.iter().all(|request| request.method == "GET"),
+                "{requests:?}"
+            );
+        }
+    }
 }
 
 #[test]

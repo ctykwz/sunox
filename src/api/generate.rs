@@ -276,6 +276,7 @@ impl SunoClient {
         let session = if requires_session_gate || wants_default_variety {
             match self.session_info().await {
                 Ok(session) => Some(session),
+                Err(error) if error.is_auth_or_rate_limit() => return Err(error),
                 Err(error) if requires_session_gate => {
                     return Err(CliError::Config(format!(
                         "could not verify the current account's Web feature gates; refusing to submit the gated Create request: {error}"
@@ -337,8 +338,10 @@ impl SunoClient {
             }
         }
         validate_generation_duration(req, model)?;
-        let uses_account_generation_limits =
-            matches!(req.task.as_deref(), None | Some("playlist_condition"));
+        let uses_account_generation_limits = matches!(
+            req.task.as_deref(),
+            None | Some("playlist_condition" | "vox" | "artist_consistency")
+        );
         if uses_account_generation_limits {
             validate_generation_lengths(req, model)?;
         }

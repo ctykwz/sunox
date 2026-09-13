@@ -17,6 +17,7 @@ impl SunoClient {
         &self,
         failed_jwt: Option<String>,
     ) -> Result<(), CliError> {
+        let _refresh_guard = self.auth_refresh.lock().await;
         let mut auth = {
             let auth = self.auth.lock().expect("auth mutex poisoned");
             if !should_refresh_after_auth_failure(auth.jwt.as_deref(), failed_jwt.as_deref()) {
@@ -24,8 +25,7 @@ impl SunoClient {
             }
             auth.clone()
         };
-        // Cross-process serialization is handled inside `refresh_state_for_retry`
-        // so this retry path does not hold the in-process mutex across await.
+        // Recheck the failed JWT after acquiring the async guard so waiters reuse a completed refresh.
         auth::refresh_state_for_retry(&self.clerk_client, &mut auth).await?;
         if let Some(device_id) = self
             .device_override

@@ -74,7 +74,9 @@ impl SunoClient {
         request: reqwest::RequestBuilder,
         context: &[(&'static str, Value)],
     ) -> Result<reqwest::RequestBuilder, CliError> {
+        self.ensure_active_account()?;
         self.refresh_mutation_auth_if_stale().await?;
+        self.ensure_active_account()?;
         let request = request.headers(self.headers());
         if !crate::core::operation::is_active() {
             return Ok(request);
