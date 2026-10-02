@@ -78,6 +78,7 @@ async fn download_with_source(
             "--video cannot be combined with --format".into(),
         ));
     }
+    audio_download_format(args.format).validate_available()?;
     ensure_clip_ids(&args.ids)?;
     let ids = deduplicate_clip_ids(&args.ids);
     let client = ctx.client().await?;
@@ -363,6 +364,16 @@ async fn reconcile_download_authorization(
     error: CliError,
 ) -> Result<(DownloadAccess, Option<DownloadWarning>), CliError> {
     let clip_result = exact_download_unlock_state(client, source_clip_id).await;
+    if clip_result
+        .as_ref()
+        .is_err_and(|error| error.is_auth_or_rate_limit())
+    {
+        return Err(attach_download_authorization_readback(
+            error,
+            clip_result,
+            None,
+        ));
+    }
     let billing_result = client.billing_info().await;
     if matches!(&clip_result, Ok(Some(true))) {
         return Ok((
@@ -377,14 +388,14 @@ async fn reconcile_download_authorization(
     Err(attach_download_authorization_readback(
         error,
         clip_result,
-        billing_result,
+        Some(billing_result),
     ))
 }
 
 fn attach_download_authorization_readback(
     error: CliError,
     clip_result: Result<Option<bool>, CliError>,
-    billing_result: Result<crate::api::types::BillingInfo, CliError>,
+    billing_result: Option<Result<crate::api::types::BillingInfo, CliError>>,
 ) -> CliError {
     let CliError::AmbiguousMutation {
         message,
@@ -400,7 +411,9 @@ fn attach_download_authorization_readback(
         "readback".into(),
         serde_json::json!({
             "is_download_unlocked": result_evidence(clip_result),
-            "billing": billing_readback_evidence(billing_result),
+            "billing": billing_result.map(billing_readback_evidence).unwrap_or_else(||
+                serde_json::json!({"skipped": true, "reason": "clip_readback_auth_or_rate_limit"})
+            ),
         }),
     );
     CliError::AmbiguousMutation { message, details }
@@ -1146,7 +1159,7 @@ mod tests {
         assert!(!DownloadFormat::Mp3.requires_mutation_lock());
         assert!(!DownloadFormat::M4a.requires_mutation_lock());
         assert!(DownloadFormat::Wav.requires_mutation_lock());
-        assert!(DownloadFormat::Opus.requires_mutation_lock());
+        assert!(!DownloadFormat::Opus.requires_mutation_lock());
     }
 
     #[test]
@@ -1197,7 +1210,7 @@ mod tests {
     async fn video_prefers_the_prepared_mp4_route() {
         let server = SequenceServer::start(vec![(
             200,
-            r#"{"status":"complete","download_url":"https://cdn.example/video.mp4"}"#.into(),
+            r#"{"ok":true,"status":"ready","download_url":"https://cdn.example/video.mp4"}"#.into(),
         )])
         .await;
         let client = server.client();
@@ -1226,7 +1239,10 @@ mod tests {
     #[tokio::test]
     async fn wav_uses_legacy_get_only_after_prepared_is_explicitly_unavailable() {
         let server = SequenceServer::start(vec![
-            (200, r#"{"status":"complete","download_url":null}"#.into()),
+            (
+                404,
+                r#"{"error_type":"not_found","detail":"Not found"}"#.into(),
+            ),
             (
                 200,
                 r#"{"wav_file_url":"https://cdn.example/legacy.wav"}"#.into(),
@@ -1518,6 +1534,30 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn authorization_readback_stops_after_rate_limit() {
+        let server = SequenceServer::start(vec![
+            (200, source_clip_json(Some(false))),
+            (200, source_clip_json(Some(false))),
+            (200, "{}".into()),
+            (429, r#"{"detail":"slow down"}"#.into()),
+        ])
+        .await;
+        let error = ensure_download_access("source-1", Some(false), &context(), &server.client())
+            .await
+            .expect_err("unresolved authorization after limit");
+        assert_eq!(error.error_code(), "ambiguous_mutation");
+        let details = error.details().unwrap();
+        assert_eq!(
+            details["readback"]["is_download_unlocked"]["code"],
+            "rate_limited"
+        );
+        assert_eq!(details["readback"]["billing"]["skipped"], true);
+        let requests = server.captured().await;
+        assert_eq!(requests.len(), 4);
+        assert!(requests.iter().all(|r| r.path != "/api/billing/info/"));
     }
 
     #[tokio::test]

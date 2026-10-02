@@ -13,6 +13,7 @@ pub enum DownloadFormat {
     Mp3,
     M4a,
     Wav,
+    #[value(hide = true)]
     Opus,
 }
 
@@ -45,25 +46,75 @@ impl DownloadFormat {
         }
     }
 
+    pub fn validate_available(self) -> Result<(), CliError> {
+        if self == Self::Opus {
+            return Err(CliError::Api {
+                code: "unsupported_download_format",
+                message: "Suno has retired OPUS conversion (HTTP 410). Choose mp3, m4a, or wav; no download authorization was requested.".into(),
+            });
+        }
+        Ok(())
+    }
+
     pub fn requires_mutation_lock(self) -> bool {
-        matches!(self, Self::Wav | Self::Opus)
+        matches!(self, Self::Wav)
     }
 }
 
 #[derive(Deserialize)]
 struct PreparedDownload {
+    ok: Option<bool>,
     download_url: Option<String>,
-    status: Option<String>,
+    status: Option<PreparedDownloadStatus>,
+    reason: Option<String>,
+    detail: Option<String>,
+    message: Option<String>,
+}
+
+#[derive(Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum PreparedDownloadStatus {
+    Processing,
+    Ready,
+    Error,
 }
 
 #[derive(Deserialize)]
-struct WavFile {
-    wav_file_url: Option<String>,
+#[serde(untagged)]
+enum WavFile {
+    File {
+        #[serde(deserialize_with = "deserialize_existing_download_url")]
+        wav_file_url: Option<String>,
+    },
+    Empty(EmptyWavFile),
 }
 
 #[derive(Deserialize)]
-struct OpusFile {
-    opus_file_url: Option<String>,
+#[serde(deny_unknown_fields)]
+struct EmptyWavFile {}
+
+impl WavFile {
+    fn url(self) -> Option<String> {
+        match self {
+            Self::File { wav_file_url } => wav_file_url,
+            Self::Empty(_) => None,
+        }
+    }
+}
+
+// Null and the observed exact empty WAV object mean no file exists.
+// Unknown nonempty objects must never authorize a conversion.
+fn deserialize_existing_download_url<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let url = Option::<String>::deserialize(deserializer)?;
+    if url.as_ref().is_some_and(|url| url.trim().is_empty()) {
+        return Err(serde::de::Error::custom(
+            "download URL must be nonblank or null",
+        ));
+    }
+    Ok(url)
 }
 
 impl SunoClient {
@@ -179,6 +230,7 @@ impl SunoClient {
         polling: PollingOptions,
         allow_conversion: bool,
     ) -> Result<String, CliError> {
+        format.validate_available()?;
         let deadline = polling.deadline()?;
         match format {
             DownloadFormat::Mp3 | DownloadFormat::M4a => {
@@ -199,24 +251,12 @@ impl SunoClient {
                 )
                 .await
             }
-            DownloadFormat::Opus => {
-                self.generated_or_existing_opus_url(
-                    clip_id,
-                    deadline,
-                    polling.interval,
-                    allow_conversion,
-                )
-                .await
-            }
+            DownloadFormat::Opus => unreachable!("retired format rejected before requests"),
         }
     }
 
-    async fn opus_url_if_ready(&self, clip_id: &str) -> Result<Option<String>, CliError> {
-        Ok(self.opus_file(clip_id).await?.opus_file_url)
-    }
-
     async fn wav_url_if_ready(&self, clip_id: &str) -> Result<Option<String>, CliError> {
-        Ok(self.wav_file(clip_id).await?.wav_file_url)
+        Ok(self.wav_file(clip_id).await?.url())
     }
 
     async fn poll_prepared_download_url(
@@ -238,11 +278,35 @@ impl SunoClient {
                 download_timeout(format, clip_id),
             )
             .await?;
-            if let Some(url) = prepared.download_url.filter(|url| !url.trim().is_empty()) {
-                return Ok(url);
-            }
-            if prepared.status.as_deref() != Some("processing") {
-                return Err(prepared_download_unavailable(format, clip_id));
+            if prepared.reason.as_deref() != Some("rate_limited") {
+                if prepared.ok != Some(true)
+                    || prepared.status == Some(PreparedDownloadStatus::Error)
+                {
+                    return Err(CliError::Download(
+                        prepared
+                            .detail
+                            .or(prepared.message)
+                            .unwrap_or_else(|| "Suno download preparation failed".into()),
+                    ));
+                }
+                match prepared.status {
+                    Some(PreparedDownloadStatus::Ready) => {
+                        return prepared
+                            .download_url
+                            .filter(|url| !url.trim().is_empty())
+                            .ok_or_else(|| CliError::Api {
+                                code: "schema_drift",
+                                message: "ready download response omitted a usable URL".into(),
+                            });
+                    }
+                    Some(PreparedDownloadStatus::Processing) => {}
+                    _ => {
+                        return Err(CliError::Api {
+                            code: "schema_drift",
+                            message: "prepared download omitted a recognized status".into(),
+                        });
+                    }
+                }
             }
             if !sleep_before_deadline(deadline, poll_interval).await {
                 return Err(CliError::Download(format!(
@@ -310,7 +374,7 @@ impl SunoClient {
                     error,
                 )
             })?;
-            if let Some(url) = file.wav_file_url {
+            if let Some(url) = file.url() {
                 return Ok(url);
             }
             if !sleep_before_deadline(deadline, poll_interval).await {
@@ -323,108 +387,6 @@ impl SunoClient {
                 ));
             }
         }
-    }
-
-    async fn generated_opus_url(
-        &self,
-        clip_id: &str,
-        deadline: Instant,
-        poll_interval: Duration,
-    ) -> Result<String, CliError> {
-        let path = format!("/api/gen/{clip_id}/convert_opus");
-        let operation_id = uuid::Uuid::new_v4().to_string();
-        run_before_deadline(
-            deadline,
-            async {
-                let request = self.post_without_redirect(&path);
-                let resp = self
-                    .prepare_mutation_request(request)
-                    .await?
-                    .send()
-                    .await
-                    .map_err(|error| {
-                        ambiguous_conversion(&operation_id, clip_id, "opus", "request_send", error)
-                    })?;
-                if resp.status().is_redirection() || resp.status().is_server_error() {
-                    let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
-                    return Err(ambiguous_conversion_details(
-                        &operation_id,
-                        clip_id,
-                        "opus",
-                        "response_status",
-                        "http_error",
-                        format!("HTTP {status}: {body}"),
-                    ));
-                }
-                self.check_response(resp).await?;
-                Ok(())
-            },
-            download_timeout("OPUS file", clip_id),
-        )
-        .await
-        .map_err(|error| {
-            ambiguous_conversion_submit_outcome(
-                &operation_id,
-                clip_id,
-                "opus",
-                "submit_wait",
-                error,
-            )
-        })?;
-
-        loop {
-            let file = run_before_deadline(
-                deadline,
-                self.opus_file(clip_id),
-                download_timeout("OPUS file", clip_id),
-            )
-            .await
-            .map_err(|error| {
-                ambiguous_conversion_from_cli_error(
-                    &operation_id,
-                    clip_id,
-                    "opus",
-                    "file_poll",
-                    error,
-                )
-            })?;
-            if let Some(url) = file.opus_file_url {
-                return Ok(url);
-            }
-            if !sleep_before_deadline(deadline, poll_interval).await {
-                return Err(ambiguous_conversion_from_cli_error(
-                    &operation_id,
-                    clip_id,
-                    "opus",
-                    "file_poll",
-                    download_timeout("OPUS file", clip_id),
-                ));
-            }
-        }
-    }
-
-    async fn generated_or_existing_opus_url(
-        &self,
-        clip_id: &str,
-        deadline: Instant,
-        poll_interval: Duration,
-        allow_conversion: bool,
-    ) -> Result<String, CliError> {
-        let existing = run_before_deadline(
-            deadline,
-            self.opus_url_if_ready(clip_id),
-            download_timeout("OPUS file", clip_id),
-        )
-        .await?;
-        if let Some(url) = existing {
-            return Ok(url);
-        }
-        if !allow_conversion {
-            return Err(conversion_disabled("OPUS", clip_id));
-        }
-        self.generated_opus_url(clip_id, deadline, poll_interval)
-            .await
     }
 
     async fn generated_or_existing_wav_url(
@@ -452,16 +414,6 @@ impl SunoClient {
 
     async fn wav_file(&self, clip_id: &str) -> Result<WavFile, CliError> {
         let path = format!("/api/gen/{clip_id}/wav_file/");
-        self.with_auth_retry(|| async {
-            let resp = self.get(&path).send().await?;
-            let resp = self.check_response(resp).await?;
-            Ok(resp.json().await?)
-        })
-        .await
-    }
-
-    async fn opus_file(&self, clip_id: &str) -> Result<OpusFile, CliError> {
-        let path = format!("/api/gen/{clip_id}/opus_file/");
         self.with_auth_retry(|| async {
             let resp = self.get(&path).send().await?;
             let resp = self.check_response(resp).await?;
@@ -554,18 +506,6 @@ fn download_timeout(format: &str, clip_id: &str) -> CliError {
     CliError::Download(format!(
         "timed out waiting for {format} download URL for clip {clip_id}"
     ))
-}
-
-fn prepared_download_unavailable(format: &str, clip_id: &str) -> CliError {
-    CliError::Diagnostic {
-        code: "prepared_download_unavailable",
-        message: format!("no prepared {format} download URL is available for clip {clip_id}"),
-        details: serde_json::json!({
-            "clip_id": clip_id,
-            "format": format,
-            "download_started": false,
-        }),
-    }
 }
 
 fn ambiguous_download_authorization_from_cli_error(

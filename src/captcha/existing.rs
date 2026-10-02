@@ -353,6 +353,12 @@ pub(super) async fn try_solve(provider: ChallengeProvider) -> Result<Option<Stri
 
     match result {
         Some(Ok(BridgeResult::Token(token))) => Ok(Some(token)),
+        Some(Ok(BridgeResult::Error(error)))
+            if provider == ChallengeProvider::Turnstile
+                && super::policy::bridge_provider_failed(&error) =>
+        {
+            Err(super::policy::provider_failure())
+        }
         Some(Ok(BridgeResult::Error(error))) => Err(CliError::Config(format!(
             "Browser Bridge challenge failed: {error}"
         ))),

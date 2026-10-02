@@ -3,8 +3,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use super::types::{
-    LyricsMashupRequest, LyricsMashupStatus, LyricsMashupSubmission, LyricsRewriteRequest,
-    LyricsRewriteResponse,
+    LyricsMashupRequest, LyricsMashupStatus, LyricsMashupSubmission, LyricsRewriteResponse,
 };
 use super::{PollingOptions, SunoClient};
 use crate::core::{CliError, MutationAmbiguity, run_before_deadline, sleep_before_deadline};
@@ -18,7 +17,6 @@ pub struct LyricsRewriteOptions<'a> {
     pub edit: &'a str,
     pub suffix: &'a str,
     pub title: &'a str,
-    pub create_session_token: &'a str,
 }
 
 pub struct LyricsMashupOptions<'a> {
@@ -56,17 +54,24 @@ impl SunoClient {
             ));
         }
         let operation_id = uuid::Uuid::new_v4().to_string();
-        let request = LyricsRewriteRequest {
-            prompt: options.prompt,
-            context_lyrics_prefix: options.prefix,
-            context_lyrics_edit: options.edit,
-            context_lyrics_suffix: options.suffix,
-            create_session_token: options.create_session_token,
-            title: options.title,
-        };
+        let request = serde_json::json!({
+            "selected": options.edit,
+            "context_before": options.prefix,
+            "context_after": options.suffix,
+            "instruction": options.prompt,
+            "title": options.title.chars().take(100).collect::<String>(),
+            "style": "",
+            "mode": "apply_user_request",
+            "references": [],
+            "num_variants": null,
+            "lyricist_id": null,
+            "metadata": {"lyrics_model": "default", "enable_thinking": false},
+            "create_session_token": null,
+            "lyrics_project_id": null
+        });
         let submit = async {
             let mutation = self
-                .post_without_redirect("/api/generate/lyrics-infill/")
+                .post_without_redirect("/api/generate/cowrite-lyrics/")
                 .json(&request);
             let response = self
                 .prepare_mutation_request(mutation)
@@ -111,8 +116,8 @@ impl SunoClient {
             })?;
             let lyrics_request_id = response_handle(&raw, "lyrics_request_id");
             let lyrics_id = response_handle(&raw, "lyrics_id");
-            crate::core::operation::record_response("/api/generate/lyrics-infill/", &raw).map_err(
-                |error| {
+            crate::core::operation::record_response("/api/generate/cowrite-lyrics/", &raw)
+                .map_err(|error| {
                     ambiguous_rewrite(
                         &operation_id,
                         "checkpoint_persist",
@@ -121,8 +126,7 @@ impl SunoClient {
                         lyrics_request_id.as_deref(),
                         lyrics_id.as_deref(),
                     )
-                },
-            )?;
+                })?;
             serde_json::from_value(raw).map_err(|error| {
                 ambiguous_rewrite(
                     &operation_id,
@@ -322,7 +326,6 @@ fn map_mashup_observation_error(
 
 fn validate_rewrite_options(options: &LyricsRewriteOptions<'_>) -> Result<(), CliError> {
     require_nonempty("lyrics rewrite prompt", options.prompt)?;
-    require_nonempty("create session token", options.create_session_token)?;
     Ok(())
 }
 

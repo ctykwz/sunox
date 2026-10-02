@@ -18,7 +18,6 @@ pub async fn rewrite(args: LyricsRewriteArgs, ctx: &AppContext) -> Result<(), Cl
     let prefix = text_or_file("prefix", args.prefix, args.prefix_file, false)?;
     let edit = text_or_file("edit", args.edit, args.edit_file, false)?;
     let suffix = text_or_file("suffix", args.suffix, args.suffix_file, false)?;
-    let session_token = create_session_token(args.session_token)?;
 
     let (client, _mutation_guard) = ctx.mutation_client().await?;
     let response = client
@@ -28,7 +27,6 @@ pub async fn rewrite(args: LyricsRewriteArgs, ctx: &AppContext) -> Result<(), Cl
             edit: &edit,
             suffix: &suffix,
             title: &args.title,
-            create_session_token: &session_token,
         })
         .await?;
     render_rewrite(

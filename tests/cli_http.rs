@@ -227,3 +227,167 @@ fn clip_visibility_dispatches_auth_preflight_and_one_write_from_public_cli() {
     );
     assert!(requests.recv_timeout(Duration::from_millis(100)).is_err());
 }
+
+#[test]
+fn playlist_add_partial_failure_is_nonzero_and_preserves_recovery_journal() {
+    let test_home = isolated_test_home("sunox-playlist-add-partial");
+    write_auth(&test_home);
+    let (base_url, requests) = serve_json_sequence(vec![billing_fixture(),
+        serde_json::json!({"successes":["clip-a"],"failures":[{"id":"clip-b","code":"not_allowed"}]}).to_string()]);
+    let assertion = isolated_command(&test_home, &base_url)
+        .args([
+            "--json",
+            "playlist",
+            "add",
+            "playlist-a",
+            "clip-a",
+            "clip-b",
+        ])
+        .assert()
+        .failure();
+    let error: serde_json::Value = serde_json::from_slice(&assertion.get_output().stderr).unwrap();
+    assert_eq!(error["error"]["code"], "partial_mutation");
+    assert_eq!(
+        error["error"]["details"]["succeeded_clip_ids"],
+        serde_json::json!(["clip-a"])
+    );
+    assert_eq!(error["error"]["details"]["failed"][0]["clip_id"], "clip-b");
+    let operations = test_home.join(".config/sunox/operations");
+    assert_eq!(std::fs::read_dir(operations).unwrap().count(), 1);
+    let captured: Vec<_> = requests.iter().collect();
+    assert_eq!(captured.len(), 2);
+    assert_eq!(captured[1].path, "/api/playlist/v2/playlist-a/tracks/add");
+}
+
+#[test]
+fn reuse_mumble_checks_the_session_gate_before_any_generation() {
+    let test_home = isolated_test_home("sunox-reuse-mumble-gate");
+    write_auth(&test_home);
+    let mut billing: serde_json::Value = serde_json::from_str(&billing_fixture()).unwrap();
+    billing["models"] = serde_json::json!([{
+        "name":"v6","external_key":"chirp-hawk","can_use":true,"is_default_model":true,
+        "description":"fixture",
+        "capabilities":["all"],"features":["reuse_styles_lyrics","mumble_mode","create_control_sliders"],
+        "max_lengths":{},"badges":["pro"]
+    }]);
+    let source = serde_json::json!({"id":"mumble-source","title":"Mumble","status":"complete",
+        "model_name":"chirp-hawk","created_at":"2026-09-30T00:00:00Z",
+        "metadata":{"prompt":"","tags":"ambient","is_mumble":true,"make_instrumental":false}});
+    let (base_url, requests) = serve_json_sequence(vec![
+        billing.to_string(),
+        source.to_string(),
+        billing.to_string(),
+        serde_json::json!({"flags":{"aug-creativity":true}}).to_string(),
+    ]);
+    let assertion = isolated_command(&test_home, &base_url)
+        .args([
+            "--json",
+            "--quiet",
+            "clip",
+            "reuse",
+            "mumble-source",
+            "--no-captcha",
+        ])
+        .assert()
+        .failure();
+    let error: serde_json::Value = serde_json::from_slice(&assertion.get_output().stderr).unwrap();
+    assert_eq!(error["error"]["code"], "config_error", "{error}");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("mumble-mode")
+    );
+    let captured: Vec<_> = requests.iter().collect();
+    assert_eq!(captured.len(), 4);
+    assert!(captured.iter().all(|r| r.method == "GET"));
+}
+
+#[test]
+fn retired_opus_download_rejects_before_account_or_authorization_requests() {
+    let test_home = isolated_test_home("sunox-retired-opus");
+    write_auth(&test_home);
+    let mut command = isolated_command(&test_home, "http://127.0.0.1:1");
+    let output = command
+        .args(["--json", "clip", "download", "clip-a", "--format", "opus"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported_download_format"));
+    std::fs::remove_dir_all(test_home).unwrap();
+}
+
+#[test]
+fn external_hcaptcha_token_survives_turnstile_preflight_in_real_cli_submission() {
+    let test_home = isolated_test_home("sunox-external-provider");
+    write_auth(&test_home);
+    let mut billing: serde_json::Value = serde_json::from_str(&billing_fixture()).unwrap();
+    billing["models"] = serde_json::json!([{
+        "name":"v6","external_key":"chirp-hawk","can_use":true,"is_default_model":true,
+        "description":"fixture","capabilities":["all"],"features":[],
+        "max_lengths":{},"badges":["pro"]
+    }]);
+    let generated = serde_json::json!({"clips":[{
+        "id":"created-fixture","status":"submitted","title":"test",
+        "model_name":"chirp-hawk","created_at":"2026-10-02T00:00:00Z"
+    }]});
+    let (base_url, requests) = serve_json_sequence(vec![
+        billing.to_string(),
+        billing.to_string(),
+        serde_json::json!({"required":true,"captcha_version":2}).to_string(),
+        generated.to_string(),
+    ]);
+    isolated_command(&test_home, &base_url)
+        .args([
+            "--json",
+            "--quiet",
+            "create",
+            "short piano piece",
+            "--token",
+            "external-hcaptcha-fixture",
+            "--token-provider",
+            "hcaptcha",
+        ])
+        .assert()
+        .success();
+    let captured: Vec<_> = requests.iter().collect();
+    assert_eq!(captured.len(), 4);
+    assert_eq!(captured[2].path, "/api/c/check");
+    assert_eq!(captured[3].method, "POST");
+    assert_eq!(captured[3].path, "/api/generate/v2-web/");
+    let body: serde_json::Value = serde_json::from_str(&captured[3].body).unwrap();
+    assert_eq!(body["token_provider"], 1);
+    assert_eq!(body["token"], "external-hcaptcha-fixture");
+}
+
+#[test]
+fn ambiguous_external_token_never_reaches_generation_post() {
+    let test_home = isolated_test_home("sunox-ambiguous-provider");
+    write_auth(&test_home);
+    let mut billing: serde_json::Value = serde_json::from_str(&billing_fixture()).unwrap();
+    billing["models"] = serde_json::json!([{
+        "name":"v6","external_key":"chirp-hawk","can_use":true,"is_default_model":true,
+        "description":"fixture","capabilities":["all"],"features":[],"max_lengths":{},"badges":["pro"]
+    }]);
+    let (base_url, requests) = serve_json_sequence(vec![
+        billing.to_string(),
+        billing.to_string(),
+        serde_json::json!({"required":true,"captcha_version":2}).to_string(),
+    ]);
+    let assertion = isolated_command(&test_home, &base_url)
+        .args([
+            "--json",
+            "--quiet",
+            "create",
+            "short piano piece",
+            "--token",
+            "ambiguous-fixture",
+        ])
+        .assert()
+        .failure();
+    let error: serde_json::Value = serde_json::from_slice(&assertion.get_output().stderr).unwrap();
+    assert_eq!(error["error"]["code"], "config_error");
+    let captured: Vec<_> = requests.iter().collect();
+    assert_eq!(captured.len(), 3);
+    assert!(captured.iter().all(|r| r.path != "/api/generate/v2-web/"));
+}

@@ -81,6 +81,7 @@ async fn dispatch_command(
                     enhance_tags: false,
                     instrumental: false,
                     token: None,
+                    token_provider: None,
                     captcha: false,
                     no_captcha: false,
                     persona: None,

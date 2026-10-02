@@ -32,21 +32,29 @@ struct ChallengeSolution {
     provider: ChallengeProvider,
 }
 
-async fn resolve_generation_challenge<Check, CheckFuture, Solve, SolveFuture>(
+async fn resolve_generation_challenge<Check, CheckFuture, Solve, SolveFuture, Gate, GateFuture>(
     explicit_token: Option<String>,
+    explicit_provider: Option<ChallengeProvider>,
     mode: ChallengeMode,
     check: Check,
-    solve: Solve,
+    mut solve: Solve,
+    fallback_allowed: Gate,
 ) -> Result<Option<ChallengeSolution>, CliError>
 where
     Check: FnOnce() -> CheckFuture,
     CheckFuture: Future<Output = Result<GenerationChallenge, CliError>>,
-    Solve: FnOnce(ChallengeProvider) -> SolveFuture,
+    Solve: FnMut(ChallengeProvider) -> SolveFuture,
     SolveFuture: Future<Output = Result<String, CliError>>,
+    Gate: FnOnce() -> GateFuture,
+    GateFuture: Future<Output = Result<bool, CliError>>,
 {
+    validate_explicit_provider(&explicit_token, explicit_provider)?;
     let challenge = match check().await {
         Ok(challenge) => challenge,
         Err(error) if explicit_token.is_some() && !error.is_auth_or_rate_limit() => {
+            if explicit_provider.is_none() {
+                return Err(CliError::Config("Challenge preflight is unavailable; supply --token-provider hcaptcha|turnstile with --token so its provider is not guessed".into()));
+            }
             GenerationChallenge {
                 required: true,
                 captcha_version: Some(1),
@@ -57,9 +65,14 @@ where
     let provider = challenge.provider();
 
     if let Some(token) = explicit_token {
-        return Ok(Some(ChallengeSolution { token, provider }));
+        if explicit_provider.is_none() && provider == ChallengeProvider::Turnstile {
+            return Err(CliError::Config("The web client can switch from Turnstile to hCaptcha; supply --token-provider hcaptcha|turnstile for this external --token".into()));
+        }
+        return Ok(Some(ChallengeSolution {
+            token,
+            provider: explicit_provider.unwrap_or(provider),
+        }));
     }
-
     if !challenge.required && mode != ChallengeMode::Force {
         return Ok(None);
     }
@@ -67,20 +80,68 @@ where
         return Err(challenge_required_error(&challenge, None));
     }
 
-    let token = solve(provider).await.map_err(|error| {
+    let first = solve(provider).await;
+    let (result, actual_provider) = match first {
+        Err(error)
+            if provider == ChallengeProvider::Turnstile
+                && error.error_code() == "challenge_provider_failed" =>
+        {
+            match fallback_allowed().await {
+                Ok(true) => (
+                    solve(ChallengeProvider::HCaptcha).await,
+                    ChallengeProvider::HCaptcha,
+                ),
+                Ok(false) => (Err(error), provider),
+                Err(gate_error) => {
+                    return Err(challenge_required_error(
+                        &challenge,
+                        Some(format!(
+                            "Turnstile failed; could not verify Suno's hCaptcha fallback gate: {gate_error}"
+                        )),
+                    ));
+                }
+            }
+        }
+        other => (other, provider),
+    };
+    let token = result.map_err(|error| {
         challenge_required_error(
             &challenge,
             Some(format!(
                 "Automatic {} verification failed: {error}",
-                provider.label()
+                actual_provider.label()
             )),
         )
     })?;
-    Ok(Some(ChallengeSolution { token, provider }))
+    if token.trim().is_empty() {
+        return Err(challenge_required_error(
+            &challenge,
+            Some("The verification provider returned an empty token".into()),
+        ));
+    }
+    Ok(Some(ChallengeSolution {
+        token,
+        provider: actual_provider,
+    }))
+}
+
+fn validate_explicit_provider(
+    token: &Option<String>,
+    provider: Option<ChallengeProvider>,
+) -> Result<(), CliError> {
+    if (provider.is_some() && token.is_none())
+        || token.as_ref().is_some_and(|token| token.trim().is_empty())
+    {
+        return Err(CliError::Config(
+            "--token-provider requires a nonempty --token".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub(super) async fn execute_generation_submission<Prepare, PrepareFuture>(
     token: Option<String>,
+    token_provider: Option<ChallengeProvider>,
     challenge_mode: ChallengeMode,
     ctx: &AppContext,
     prepare: Prepare,
@@ -91,6 +152,7 @@ where
         Output = Result<(crate::api::SunoClient, crate::api::types::GenerateRequest), CliError>,
     >,
 {
+    validate_explicit_provider(&token, token_provider)?;
     let (client, _guard) = ctx.mutation_client().await?;
     // Preparation can enhance tags through a remote POST. Keep that first
     // write under the same account guard as challenge resolution and submit,
@@ -98,6 +160,7 @@ where
     let (client, mut request) = prepare(client).await?;
     let solution = resolve_generation_challenge(
         token,
+        token_provider,
         challenge_mode,
         || client.generation_challenge_with_refresh(),
         |provider| {
@@ -114,6 +177,10 @@ where
                 let refreshed_auth = client.auth_state_snapshot();
                 captcha::solve(&refreshed_auth, provider, ctx.config.challenge_browser).await
             }
+        },
+        || async {
+            client.try_refresh_jwt_for_challenge_recheck().await?;
+            captcha::hcaptcha_fallback_allowed(&client.auth_state_snapshot()).await
         },
     )
     .await?;
@@ -134,7 +201,7 @@ fn challenge_required_error(challenge: &GenerationChallenge, detail: Option<Stri
         .map(|detail| format!(" {detail}."))
         .unwrap_or_default();
     CliError::ChallengeRequired(format!(
-        "Suno requires a generation challenge (captcha_version={version}).{detail} Keep a supported local Chrome, Edge, Brave, Arc, or Chromium installation available and ensure --no-captcha is not set, or provide a valid challenge token with --token <token>."
+        "Suno requires a generation challenge (captcha_version={version}).{detail} Keep a supported local Chrome, Edge, Brave, Arc, or Chromium installation available and ensure --no-captcha is not set, or provide a valid challenge token with --token <token> --token-provider <hcaptcha|turnstile>."
     ))
 }
 
@@ -172,6 +239,7 @@ mod tests {
     async fn automatic_mode_solves_detected_turnstile_challenge() {
         let result = resolve_generation_challenge(
             None,
+            None,
             ChallengeMode::Auto,
             || async {
                 Ok(GenerationChallenge {
@@ -183,6 +251,7 @@ mod tests {
                 assert_eq!(provider, ChallengeProvider::Turnstile);
                 Ok("turnstile-token".to_string())
             },
+            || async { panic!("fallback gate must not run") },
         )
         .await
         .expect("challenge solution")
@@ -196,6 +265,7 @@ mod tests {
     async fn automatic_mode_skips_solver_when_challenge_is_not_required() {
         let result = resolve_generation_challenge(
             None,
+            None,
             ChallengeMode::Auto,
             || async {
                 Ok(GenerationChallenge {
@@ -204,6 +274,7 @@ mod tests {
                 })
             },
             |_| async { panic!("solver must not run") },
+            || async { panic!("fallback gate must not run") },
         )
         .await
         .expect("challenge decision");
@@ -215,6 +286,7 @@ mod tests {
     async fn disabled_mode_surfaces_required_challenge_without_solver() {
         let error = resolve_generation_challenge(
             None,
+            None,
             ChallengeMode::Disabled,
             || async {
                 Ok(GenerationChallenge {
@@ -223,6 +295,7 @@ mod tests {
                 })
             },
             |_| async { panic!("solver must not run") },
+            || async { panic!("fallback gate must not run") },
         )
         .await
         .expect_err("challenge must surface");
@@ -231,9 +304,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_token_uses_detected_provider_without_running_solver() {
+    async fn external_token_without_provider_is_rejected_when_preflight_is_ambiguous() {
         let result = resolve_generation_challenge(
             Some("external-token".to_string()),
+            None,
             ChallengeMode::Auto,
             || async {
                 Ok(GenerationChallenge {
@@ -242,18 +316,18 @@ mod tests {
                 })
             },
             |_| async { panic!("solver must not run") },
+            || async { panic!("gate must not run") },
         )
-        .await
-        .expect("challenge solution")
-        .expect("token");
-
-        assert_eq!(result.token, "external-token");
-        assert_eq!(result.provider, ChallengeProvider::Turnstile);
+        .await;
+        assert!(
+            matches!(result, Err(CliError::Config(message)) if message.contains("--token-provider"))
+        );
     }
 
     #[tokio::test]
     async fn force_mode_solves_even_when_preflight_does_not_require_a_challenge() {
         let result = resolve_generation_challenge(
+            None,
             None,
             ChallengeMode::Force,
             || async {
@@ -266,6 +340,7 @@ mod tests {
                 assert_eq!(provider, ChallengeProvider::HCaptcha);
                 Ok("forced-token".to_string())
             },
+            || async { panic!("fallback gate must not run") },
         )
         .await
         .expect("challenge solution")
@@ -278,6 +353,7 @@ mod tests {
     async fn automatic_solver_failure_remains_a_challenge_error() {
         let error = resolve_generation_challenge(
             None,
+            None,
             ChallengeMode::Auto,
             || async {
                 Ok(GenerationChallenge {
@@ -286,6 +362,7 @@ mod tests {
                 })
             },
             |_| async { Err(CliError::Config("no supported browser".into())) },
+            || async { panic!("fallback gate must not run") },
         )
         .await
         .expect_err("solver failure");
@@ -296,18 +373,189 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_token_falls_back_to_hcaptcha_when_optional_preflight_fails() {
+    async fn explicit_provider_is_preserved_when_optional_preflight_fails() {
         let result = resolve_generation_challenge(
             Some("external-token".to_string()),
+            Some(ChallengeProvider::HCaptcha),
             ChallengeMode::Auto,
             || async { Err(CliError::Config("preflight unavailable".into())) },
             |_| async { panic!("solver must not run") },
+            || async { panic!("fallback gate must not run") },
         )
         .await
         .expect("challenge solution")
         .expect("token");
 
         assert_eq!(result.provider, ChallengeProvider::HCaptcha);
+    }
+
+    #[tokio::test]
+    async fn web_fallback_updates_the_submitted_provider_and_runs_once() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let result = resolve_generation_challenge(
+            None,
+            None,
+            ChallengeMode::Auto,
+            || async {
+                Ok(GenerationChallenge {
+                    required: true,
+                    captcha_version: Some(2),
+                })
+            },
+            |provider| {
+                calls.borrow_mut().push(provider);
+                async move {
+                    match provider {
+                        ChallengeProvider::Turnstile => {
+                            Err(crate::captcha::policy::provider_failure())
+                        }
+                        ChallengeProvider::HCaptcha => Ok("fresh-hcaptcha-token".into()),
+                    }
+                }
+            },
+            || async { Ok(true) },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            *calls.borrow(),
+            vec![ChallengeProvider::Turnstile, ChallengeProvider::HCaptcha]
+        );
+        let mut request = crate::api::types::GenerateRequest::new("chirp-hawk", "custom");
+        request.set_challenge_token_with_provider(Some(result.token), result.provider);
+        let body = serde_json::to_value(request).unwrap();
+        assert_eq!(body["token_provider"], 1);
+        assert_eq!(body["token"], "fresh-hcaptcha-token");
+    }
+
+    #[tokio::test]
+    async fn missing_or_disabled_gate_prevents_a_second_solver() {
+        for gate in [Ok(false), Err(CliError::Config("unavailable seed".into()))] {
+            let calls = std::cell::Cell::new(0);
+            let result = resolve_generation_challenge(
+                None,
+                None,
+                ChallengeMode::Auto,
+                || async {
+                    Ok(GenerationChallenge {
+                        required: true,
+                        captcha_version: Some(2),
+                    })
+                },
+                |_| {
+                    calls.set(calls.get() + 1);
+                    async { Err(crate::captcha::policy::provider_failure()) }
+                },
+                || async { gate },
+            )
+            .await;
+            assert!(result.is_err());
+            assert_eq!(calls.get(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn bridge_transport_auth_and_unknown_errors_never_trigger_provider_fallback() {
+        for error in [
+            CliError::AuthChanged,
+            CliError::RateLimited,
+            CliError::Config("bridge unavailable".into()),
+            CliError::Api {
+                code: "unknown_error",
+                message: "unknown".into(),
+            },
+        ] {
+            let mut error = Some(error);
+            let result = resolve_generation_challenge(
+                None,
+                None,
+                ChallengeMode::Auto,
+                || async {
+                    Ok(GenerationChallenge {
+                        required: true,
+                        captcha_version: Some(2),
+                    })
+                },
+                |_| std::future::ready(Err(error.take().expect("only one attempt"))),
+                || async { panic!("must not fetch fallback gate") },
+            )
+            .await;
+            assert!(result.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_hcaptcha_fallback_never_repeats_or_returns_a_submission_token() {
+        let calls = std::cell::Cell::new(0);
+        let result = resolve_generation_challenge(
+            None,
+            None,
+            ChallengeMode::Auto,
+            || async {
+                Ok(GenerationChallenge {
+                    required: true,
+                    captcha_version: Some(2),
+                })
+            },
+            |_| {
+                calls.set(calls.get() + 1);
+                async { Err(crate::captcha::policy::provider_failure()) }
+            },
+            || async { Ok(true) },
+        )
+        .await;
+        assert!(matches!(result, Err(CliError::ChallengeRequired(_))));
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[tokio::test]
+    async fn external_hcaptcha_provider_overrides_turnstile_preflight() {
+        let result = resolve_generation_challenge(
+            Some("external-hcaptcha-token".into()),
+            Some(ChallengeProvider::HCaptcha),
+            ChallengeMode::Auto,
+            || async {
+                Ok(GenerationChallenge {
+                    required: true,
+                    captcha_version: Some(2),
+                })
+            },
+            |_| async { panic!("external token must not invoke solver") },
+            || async { panic!("external token must not invoke gate") },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.provider, ChallengeProvider::HCaptcha);
+    }
+
+    #[tokio::test]
+    async fn external_provider_cannot_override_authentication_failure() {
+        let result = resolve_generation_challenge(
+            Some("external-token".into()),
+            Some(ChallengeProvider::HCaptcha),
+            ChallengeMode::Auto,
+            || async { Err(CliError::AuthExpired) },
+            |_| async { panic!("no solver") },
+            || async { panic!("no gate") },
+        )
+        .await;
+        assert!(matches!(result, Err(CliError::AuthExpired)));
+    }
+
+    #[tokio::test]
+    async fn provider_without_token_fails_before_any_preflight() {
+        let result = resolve_generation_challenge(
+            None,
+            Some(ChallengeProvider::HCaptcha),
+            ChallengeMode::Auto,
+            || async { panic!("no preflight") },
+            |_| async { panic!("no solver") },
+            || async { panic!("no gate") },
+        )
+        .await;
+        assert!(matches!(result, Err(CliError::Config(_))));
     }
 
     #[test]

@@ -6,6 +6,9 @@ mod browser;
 mod cdp;
 mod cookies;
 mod existing;
+pub(crate) mod policy;
+
+pub(crate) use policy::hcaptcha_fallback_allowed;
 
 use crate::api::challenge::ChallengeProvider;
 use crate::auth::AuthState;
@@ -93,8 +96,8 @@ pub async fn solve(
     .await;
     let cleanup = browser.shutdown().await;
     match (result, cleanup) {
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
+        (_, Err(error)) => Err(error),
+        (Err(error), Ok(())) => Err(error),
         (Ok(token), Ok(())) => Ok(token),
     }
 }

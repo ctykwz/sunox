@@ -104,18 +104,23 @@ async fn execute_with_session(
         .await?;
     ensure_managed_suno_page(session, &managed_page_url).await?;
 
-    let token = result
+    let value = result
         .get("result")
         .and_then(|result| result.get("value"))
-        .and_then(|value| value.as_str())
-        .unwrap_or("")
-        .to_string();
+        .and_then(|value| value.as_str());
+    if provider == ChallengeProvider::Turnstile && value == Some("") {
+        return Err(crate::captcha::policy::provider_failure());
+    }
+    let token = value.unwrap_or("").to_string();
 
     if token.is_empty() {
         return Err(CliError::Config(format!(
             "{} returned an empty token",
             provider.label()
         )));
+    }
+    if provider == ChallengeProvider::Turnstile && turnstile_provider_failure(&token) {
+        return Err(crate::captcha::policy::provider_failure());
     }
     if token.starts_with("ERR:") {
         return Err(CliError::Config(format!(
@@ -124,6 +129,24 @@ async fn execute_with_session(
         )));
     }
     Ok(token)
+}
+
+fn turnstile_provider_failure(result: &str) -> bool {
+    matches!(
+        result,
+        "ERR:Turnstile produced no callback within 15 seconds"
+            | "ERR:Turnstile token expired"
+            | "ERR:Turnstile unsupported in this browser"
+            | "ERR:Turnstile interactive challenge was abandoned"
+            | "ERR:Turnstile produced no token after interactive challenge completed"
+    ) || result
+        .strip_prefix("ERR:Turnstile did not recover after error ")
+        .is_some_and(|code| {
+            code == "unknown"
+                || (!code.is_empty()
+                    && code.len() <= 10
+                    && code.bytes().all(|b| b.is_ascii_digit()))
+        })
 }
 
 async fn current_clean_suno_page(session: &mut CdpSession) -> Result<Option<String>, CliError> {
@@ -246,6 +269,10 @@ async fn wait_for_provider(
     }
 
     let page_state = page_state_excerpt(session).await?;
+    if provider == ChallengeProvider::Turnstile {
+        ensure_managed_suno_page(session, managed_page_url).await?;
+        return Err(crate::captcha::policy::provider_failure());
+    }
     Err(CliError::Config(format!(
         "{} never finished loading on the resolved Suno page ({page_state})",
         provider.label()
@@ -409,6 +436,26 @@ mod tests {
         SUNO_TURNSTILE_IDLE_TIMEOUT_MS, SUNO_TURNSTILE_INTERACTIVE_TIMEOUT_MS,
         SUNO_TURNSTILE_SCRIPT_URL, SUNO_TURNSTILE_SITEKEY,
     };
+
+    #[test]
+    fn only_known_turnstile_outcomes_allow_provider_fallback() {
+        assert!(super::turnstile_provider_failure(
+            "ERR:Turnstile token expired"
+        ));
+        assert!(super::turnstile_provider_failure(
+            "ERR:Turnstile did not recover after error 300030"
+        ));
+        assert!(super::turnstile_provider_failure(
+            "ERR:Turnstile produced no callback within 15 seconds"
+        ));
+        for result in [
+            "valid-token",
+            "ERR:TypeError: SDK changed",
+            "ERR:Turnstile did not recover after error secret-arbitrary-text",
+        ] {
+            assert!(!super::turnstile_provider_failure(result));
+        }
+    }
 
     #[test]
     fn solver_script_matches_challenge_provider() {

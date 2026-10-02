@@ -36,8 +36,8 @@ pub struct LyricsRewriteArgs {
     #[arg(long, default_value = "")]
     pub title: String,
 
-    /// Reuse a Create session token; defaults to a fresh UUID for this command
-    #[arg(long)]
+    /// Legacy option accepted for compatibility; Cowrite always sends a null session token
+    #[arg(long, hide = true)]
     pub session_token: Option<String>,
 }
 

@@ -111,6 +111,7 @@ impl<'de> Deserialize<'de> for PlaylistInfo {
                 .unwrap_or_default(),
             description: raw
                 .description
+                .or_else(|| string_field(raw.extra.get("bio"), "description"))
                 .or_else(|| string_field(metadata.as_ref(), "description")),
             image_url,
             cover_url,

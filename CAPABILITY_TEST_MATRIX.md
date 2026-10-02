@@ -37,6 +37,21 @@ are the authority for that account at execution time.
 | v6 Remaster | typed variation/profile values and defaults | `chirp-halibut` high + clarity completed with both fields preserved | supported; variation defaults normal and profile defaults boost |
 | Credits semantics | response decoding only | observed total balance 2502 -> 2500 after generation -> 2502 after later completion | operation-specific settlement is authoritative; unlimited role is not interpreted as no accounting |
 
+## September 30 regression coverage
+
+September 30 protocol-review regressions are covered without real-account writes:
+
+- Download responses with missing URL fields or unknown status stop before conversion;
+  an authorization readback rate limit preserves the unresolved operation and skips billing.
+- Reuse preserves Mumble vocals and applies the session gate; explicit lyrics override the
+  inherited mode.
+- Voice WAV validation checks format, frame alignment, and byte-rate consistency before
+  calculating duration from sample frames, including extensible PCM/float headers.
+- Playlist add validates every requested result, treats `already_in_playlist` as membership
+  success, and reports business failures with a nonzero CLI exit and recovery journal.
+- Video start-image duration falls back only when the image-specific list is absent/null;
+  image models declaring `image=not_supported` reject reference images before cost/submit.
+
 ## Evidence index
 
 - Exact Suno HTTP contracts: `src/api/endpoint_tests.rs`; test names state the operation and
@@ -61,8 +76,9 @@ are the authority for that account at execution time.
   config repair, precedence, and diagnostic exit codes.
 - Media acceptance: `src/media/download.rs::tests` uses synthetic media fixtures under
   `tests/fixtures/download`, rejects empty/error/truncated payloads, and preserves existing files.
-  `tests/cli_media_integrity.rs` checks Opus page/comment truncation and RF64 declared-length
-  mismatches through the public CLI with `--force`, alongside complete-file controls.
+  `tests/cli_media_integrity.rs` checks RF64 declared-length mismatches through the public CLI
+  with `--force`, alongside complete-file controls. Retired OPUS is rejected before requests;
+  its container parser still has unit coverage.
 - Browser Bridge Rust state/permission/installer coverage: `src/browser_bridge/mod.rs::tests` and
   `src/browser_bridge/permissions.rs::tests`; browser-runtime fixtures:
   `tests/browser_extension.test.mjs` in the CI `check` job.
@@ -70,3 +86,28 @@ are the authority for that account at execution time.
   workflow, and platform jobs in `.github/workflows/ci.yml`.
 - Suite-wide enforcement: the CI `check`, `coverage`, `platform-tests`, `security`, and
   `release-linux-smoke` jobs. The `coverage` job rejects line coverage below 72%.
+
+## 2026-09-30 supported-interface protocol fixes
+
+- Prepared download: current `ok` + `ready/processing/error`, rate-limit polling,
+  missing processing URL, and fail-closed failed/unknown/invalid-ready responses.
+- Legacy WAV: exact `{}` is a known missing-file response; unknown nonempty objects
+  cannot trigger conversion. Read-only/no-convert still forbids conversion.
+- OPUS: retired format rejected before account lookup/authorization, including CLI
+  and stem exports. Old OPUS conversion requests removed.
+- Stems: both Auto and named Split use `chirp-v3-5-b`.
+- Playlist v2: read nonempty and cleared `bio.description`, preserving raw `bio`.
+- Lyrics rewrite: Cowrite selection payload, null session token, Unicode title limit,
+  edited_lyrics normalization and existing stable CLI output field names.
+- Persona visibility: partial edit-persona JSON, existing identity/state checks,
+  and one-shot mutation semantics.
+
+The audit snapshot is `SUPPORTED_API_PROTOCOL_AUDIT_2026-09-30.md`. Real paid
+submissions remain outside these regression tests; they use isolated HTTP fixtures.
+
+
+## October 2 live acceptance
+
+Authorized account execution confirms managed-Bridge Turnstile plus v6 creation (two complete clips), Cowrite rewrite, Persona private visibility and metadata set, prepared WAV, and Split from Mix (four complete clips across two result banks). Live testing exposed and repaired an absent-action ownership fallback in Stems and a Persona artwork URL incorrectly replayed as an upload ID. Explicit server restrictions remain binding.
+
+The hCaptcha automatic fallback did not naturally trigger after the fix; its automated coverage must not be described as live acceptance. Auto Split, newly visible Advanced Split, legacy WAV conversion, and other unexercised writes remain separate boundaries. The detailed account-specific outputs are retained locally and excluded from release source.

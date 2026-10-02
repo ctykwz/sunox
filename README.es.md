@@ -21,7 +21,7 @@ subir archivos.
 
 - Crear una canción a partir de una descripción, letras propias, estilos, una persona de voz o una
   indicación instrumental.
-- Esperar a que termine la generación y descargar MP3, M4A, WAV, Opus o vídeo.
+- Esperar a que termine la generación y descargar MP3, M4A, WAV o vídeo.
 - Consultar, buscar, editar, publicar, eliminar y restaurar canciones.
 - Crear un cover, extender, unir, remasterizar, invertir, recortar, aplicar fades, cambiar la
   velocidad o generar stems.
@@ -113,7 +113,7 @@ sunox download <clip_id_1> <clip_id_2> --output ./songs
 ```
 
 Sin indicar un formato, Sunox descarga el MP3 ya disponible en el CDN e incorpora las letras
-normales y sincronizadas en las etiquetas ID3 cuando existen. Usa `--format mp3|m4a|wav|opus`
+normales y sincronizadas en las etiquetas ID3 cuando existen. Usa `--format mp3|m4a|wav`
 solo si necesitas la conversión de Suno, o `--video` para descargar un vídeo disponible.
 
 ## Comandos habituales

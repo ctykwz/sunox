@@ -11,6 +11,38 @@ backward-compatible features, upstream protocol adaptations, and fixes.
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-10-02
+
+### Fixed
+
+- Match Suno's current prepared-download `ok` and `ready`/`processing` contract, reject
+  unknown or failed responses, and recognize the exact empty legacy WAV response without
+  turning unexpected responses into conversion requests.
+- Reject retired OPUS exports before account lookup or download authorization. MP3, M4A,
+  and WAV remain available according to the account's current entitlement.
+- Allow one Turnstile-to-hCaptcha fallback only after a known provider failure and an explicit
+  current Suno fallback gate. Preserve the actual token provider and never replay generation
+  submissions or fall back after Bridge transport, pairing, provenance, or cleanup failures.
+- Add `--token-provider hcaptcha|turnstile` for externally supplied challenge tokens. Require
+  an explicit provider when Turnstile preflight or unavailable preflight makes it ambiguous.
+- Update lyrics rewriting to the current Cowrite endpoint and response, and Persona visibility
+  to the current edit endpoint. Do not resend an existing Persona artwork URL as an upload ID.
+- Use the current hidden model for stem extraction and match Web ownership eligibility when
+  the server omits the Get Stems action, while preserving explicit restrictions and plan checks.
+- Preserve playlist descriptions from `bio.description` and report partial playlist-add failures
+  instead of treating every HTTP success as complete membership success.
+- Preserve Mumble mode and its availability gate during reuse, validate voice WAV headers
+  before duration checks, and honor image-specific video durations and reference-image support.
+- Stop download reconciliation on authentication or rate-limit failures and keep ambiguous
+  authorization evidence for recovery.
+
+### Validation
+
+- Real-account acceptance covered v6 creation through Browser Bridge Turnstile, Cowrite rewrite,
+  Persona private updates, Split from Mix and result readback, and prepared MP3/M4A/WAV downloads.
+- Post-fix automatic hCaptcha fallback did not naturally trigger during live acceptance; it has
+  automated regression coverage. Other unexercised write flows are not claimed as live-verified.
+
 ## [0.3.3] - 2026-09-13
 
 ### Fixed

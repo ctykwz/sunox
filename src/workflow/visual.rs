@@ -53,6 +53,12 @@ pub async fn generate_cover_art_image_batch(
     validate_visual_source(client, clip_id, IMAGE_FEATURE, Some(IMAGE_ACTION)).await?;
     let configs = client.cover_art_model_configs().await?;
     let model = select_cover_art_model(&configs.image_model_categories, requested_model, "image")?;
+    if prompt_image.is_some() && model.image.as_deref() == Some("not_supported") {
+        return Err(CliError::Config(format!(
+            "cover-art image model `{}` does not support a reference image",
+            model.category
+        )));
+    }
     let cost = client.cover_art_image_cost(&model.category).await?;
     ensure_remaining_cover_art_generations(&cost, "image")?;
     let request = CoverArtImageGenerateRequest {
@@ -94,7 +100,10 @@ pub async fn generate_cover_art_video_batch(
         )));
     }
     let allowed = if start_image.is_some() {
-        &model.allowed_durations_with_image
+        model
+            .allowed_durations_with_image
+            .as_deref()
+            .unwrap_or(&model.allowed_durations)
     } else {
         &model.allowed_durations
     };

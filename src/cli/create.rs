@@ -77,6 +77,10 @@ pub struct CreateArgs {
     #[arg(long)]
     pub token: Option<String>,
 
+    /// Provider that issued --token; overrides the preflight provider after a web fallback.
+    #[arg(long, requires = "token")]
+    pub token_provider: Option<crate::api::challenge::ChallengeProvider>,
+
     /// Force browser challenge verification even when preflight says it is unnecessary.
     #[arg(long, conflicts_with = "no_captcha")]
     pub captcha: bool,
@@ -162,6 +166,10 @@ pub struct GenerateArgs {
     #[arg(long)]
     pub token: Option<String>,
 
+    /// Provider that issued --token; overrides the preflight provider after a web fallback.
+    #[arg(long, requires = "token")]
+    pub token_provider: Option<crate::api::challenge::ChallengeProvider>,
+
     /// Force browser challenge verification even when preflight says it is unnecessary.
     #[arg(long, conflicts_with = "no_captcha")]
     pub captcha: bool,
@@ -224,6 +232,10 @@ pub struct DescribeArgs {
     /// Challenge token (overrides the built-in solver)
     #[arg(long)]
     pub token: Option<String>,
+
+    /// Provider that issued --token; overrides the preflight provider after a web fallback.
+    #[arg(long, requires = "token")]
+    pub token_provider: Option<crate::api::challenge::ChallengeProvider>,
 
     /// Force browser challenge verification even when preflight says it is unnecessary.
     #[arg(long, conflicts_with = "no_captcha")]
@@ -293,6 +305,10 @@ pub struct ExtendArgs {
     #[arg(long)]
     pub token: Option<String>,
 
+    /// Provider that issued --token; overrides the preflight provider after a web fallback.
+    #[arg(long, requires = "token")]
+    pub token_provider: Option<crate::api::challenge::ChallengeProvider>,
+
     /// Force browser challenge verification even when preflight says it is unnecessary.
     #[arg(long, conflicts_with = "no_captcha")]
     pub captcha: bool,
@@ -324,6 +340,10 @@ pub struct CoverArgs {
     /// Challenge token (overrides the built-in solver)
     #[arg(long)]
     pub token: Option<String>,
+
+    /// Provider that issued --token; overrides the preflight provider after a web fallback.
+    #[arg(long, requires = "token")]
+    pub token_provider: Option<crate::api::challenge::ChallengeProvider>,
 
     /// Force browser challenge verification even when preflight says it is unnecessary.
     #[arg(long, conflicts_with = "no_captcha")]
@@ -366,6 +386,10 @@ pub struct PaintArgs {
     /// Challenge token (overrides the built-in solver)
     #[arg(long)]
     pub token: Option<String>,
+
+    /// Provider that issued --token; overrides the preflight provider after a web fallback.
+    #[arg(long, requires = "token")]
+    pub token_provider: Option<crate::api::challenge::ChallengeProvider>,
 
     /// Force browser challenge verification even when preflight says it is unnecessary.
     #[arg(long, conflicts_with = "no_captcha")]
@@ -429,6 +453,10 @@ pub struct ReuseArgs {
     #[arg(long)]
     pub token: Option<String>,
 
+    /// Provider that issued --token; overrides the preflight provider after a web fallback.
+    #[arg(long, requires = "token")]
+    pub token_provider: Option<crate::api::challenge::ChallengeProvider>,
+
     /// Force browser challenge verification even when preflight says it is unnecessary.
     #[arg(long, conflicts_with = "no_captcha")]
     pub captcha: bool,
@@ -483,6 +511,10 @@ pub struct InspireArgs {
     #[arg(long)]
     pub token: Option<String>,
 
+    /// Provider that issued --token; overrides the preflight provider after a web fallback.
+    #[arg(long, requires = "token")]
+    pub token_provider: Option<crate::api::challenge::ChallengeProvider>,
+
     /// Force browser challenge verification even when preflight says it is unnecessary
     #[arg(long, conflicts_with = "no_captcha")]
     pub captcha: bool,
@@ -526,6 +558,10 @@ pub struct StemsArgs {
     /// Challenge token (overrides the built-in solver)
     #[arg(long)]
     pub token: Option<String>,
+
+    /// Provider that issued --token; overrides the preflight provider after a web fallback.
+    #[arg(long, requires = "token")]
+    pub token_provider: Option<crate::api::challenge::ChallengeProvider>,
 
     /// Force browser challenge verification even when preflight says it is unnecessary.
     #[arg(long, conflicts_with = "no_captcha")]

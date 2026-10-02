@@ -1,4 +1,5 @@
 use serde_json::Value;
+use std::collections::BTreeSet;
 
 use super::SunoClient;
 use super::mutation::MutationSpec;
@@ -10,6 +11,19 @@ use super::types::{
     TrashPlaylistRequest,
 };
 use crate::core::CliError;
+
+#[derive(serde::Deserialize)]
+struct PlaylistAddResponse {
+    successes: Vec<String>,
+    failures: Vec<PlaylistAddFailure>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PlaylistAddFailure {
+    id: String,
+    code: String,
+    message: Option<String>,
+}
 
 impl SunoClient {
     /// List the authenticated user's playlists.
@@ -179,8 +193,86 @@ impl SunoClient {
         playlist_id: &str,
         clip_ids: &[String],
     ) -> Result<(), CliError> {
-        self.update_playlist_tracks(playlist_id, "add", clip_ids)
-            .await
+        let requested: BTreeSet<_> = clip_ids.iter().collect();
+        if clip_ids.is_empty()
+            || requested.len() != clip_ids.len()
+            || clip_ids.iter().any(|id| id.trim().is_empty())
+        {
+            return Err(CliError::Config(
+                "playlist add requires distinct, nonblank clip IDs".into(),
+            ));
+        }
+        let spec = playlist_mutation_spec("playlist_add_tracks", Some(playlist_id))
+            .with_context("clip_ids", serde_json::json!(clip_ids));
+        let result: PlaylistAddResponse = self
+            .mutation_json_once(
+                self.post_without_redirect(&format!("/api/playlist/v2/{playlist_id}/tracks/add"))
+                    .json(&PlaylistTracksRequest {
+                        clip_ids: clip_ids.to_vec(),
+                    }),
+                &spec,
+            )
+            .await?;
+        let mut seen = BTreeSet::new();
+        for id in result
+            .successes
+            .iter()
+            .chain(result.failures.iter().map(|failure| &failure.id))
+        {
+            if !requested.contains(id) || !seen.insert(id) {
+                return Err(spec.ambiguous(
+                    "response_schema",
+                    "schema_drift",
+                    "playlist add returned an unexpected or duplicate clip ID".into(),
+                ));
+            }
+        }
+        if seen.len() != requested.len()
+            || result
+                .failures
+                .iter()
+                .any(|failure| failure.code.trim().is_empty())
+        {
+            return Err(spec.ambiguous(
+                "response_schema",
+                "schema_drift",
+                "playlist add omitted a requested result or failure code".into(),
+            ));
+        }
+        let mut succeeded = result.successes;
+        let mut failed = Vec::new();
+        for failure in result.failures {
+            // Web treats this code as an idempotent membership success.
+            if failure.code == "already_in_playlist" {
+                succeeded.push(failure.id);
+            } else {
+                failed.push(PlaylistTrackMutationFailure {
+                    details: Some(serde_json::to_value(&failure)?),
+                    message: failure.message.unwrap_or_else(|| failure.code.clone()),
+                    error_code: failure.code,
+                    clip_id: failure.id,
+                });
+            }
+        }
+        if !failed.is_empty() {
+            let report = PlaylistTrackMutationReport::new(
+                playlist_id,
+                "add",
+                clip_ids,
+                succeeded,
+                failed,
+                Vec::new(),
+            );
+            return Err(CliError::PartialMutation {
+                message: format!(
+                    "playlist add succeeded for {} clip(s) and failed for {} clip(s)",
+                    report.succeeded_clip_ids.len(),
+                    report.failed.len()
+                ),
+                details: serde_json::to_value(report)?,
+            });
+        }
+        Ok(())
     }
 
     /// Remove clips from a playlist.

@@ -42,8 +42,8 @@ pub use generation::{
 };
 pub use lyrics::{AlignedWord, CowriteLyricsModel, CowriteLyricsResponse};
 pub use lyrics_editor::{
-    LyricsMashupRequest, LyricsMashupStatus, LyricsMashupSubmission, LyricsRewriteRequest,
-    LyricsRewriteResponse, LyricsRewriteResult,
+    LyricsMashupRequest, LyricsMashupStatus, LyricsMashupSubmission, LyricsRewriteResponse,
+    LyricsRewriteResult,
 };
 pub use lyrics_project::{
     FlushLyricsProjectRequest, FlushLyricsProjectResponse, LyricsProject,

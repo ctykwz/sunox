@@ -154,7 +154,7 @@ fn capability_report(info: &BillingInfo, session: Option<&SessionInfo>) -> Value
             "model_selection": "Generation selectors are resolved against current billing data by display name, external key, or account model id; unusable and ambiguous matches fail closed.",
             "remaster": "The plan feature, selected remaster model, source clip state, and source action_config are checked before submission.",
             "downloads": "Only is_download_unlocked=true skips the one-shot authorization POST. MP3/M4A/WAV/mp4 are prepared-first; Stems authorize their parent once. Authorization and download may be plan-metered.",
-            "audio_conversion": "Prepared WAV is attempted first. Legacy WAV/OPUS conversion is a separate POST after source unlock and can be forbidden with --no-convert.",
+            "audio_conversion": "Prepared WAV is attempted first. Legacy WAV conversion is a separate POST after source unlock and can be forbidden with --no-convert.",
             "ambiguous_writes": "A lost or unusable response after download authorization, generation, Remaster, conversion, Voice creation, Custom Model training/archive, a lyrics-project write, visual generation, or another submitted edit is reported with recovery evidence; it must not be blindly retried.",
         }
     })
@@ -411,8 +411,8 @@ fn feature_coverage(name: &str) -> FeatureCoverage {
         ),
         "convert_audio" => (
             "supported",
-            &["download --format wav", "download --format opus"],
-            "Prepared WAV is preferred; legacy WAV/OPUS conversion requires an unlocked source, and --no-convert prevents starting it.",
+            &["download --format wav"],
+            "Prepared WAV is preferred; legacy WAV conversion requires an unlocked source, and --no-convert prevents starting it.",
         ),
         "edit_mode" => (
             "partial",
@@ -428,7 +428,7 @@ fn feature_coverage(name: &str) -> FeatureCoverage {
                 "lyrics mashup",
                 "lyrics mashup-status",
             ],
-            "Common non-Studio clip edits, owned-source Underpaint/Overpaint, Lyrics 2.0 selection rewrite (`lyrics-infill`), and lyrics mashup are implemented; Studio section replacement is not.",
+            "Common non-Studio clip edits, owned-source Underpaint/Overpaint, Lyrics 2.0 selection rewrite (`cowrite-lyrics`), and lyrics mashup are implemented; Studio section replacement is not.",
         ),
         "persona" => (
             "partial",

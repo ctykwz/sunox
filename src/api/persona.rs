@@ -166,7 +166,7 @@ impl SunoClient {
     }
 
     /// Set persona public/private visibility.
-    /// PUT /api/persona/set_visibility/{persona_id}/?is_public={true|false}
+    /// PUT /api/persona/edit-persona/{persona_id}/ with a visibility-only patch
     pub async fn set_persona_visibility(
         &self,
         persona_id: &str,
@@ -176,8 +176,8 @@ impl SunoClient {
             .with_context("is_public", serde_json::json!(is_public));
         let body = self
             .mutation_json_once(
-                self.put_without_redirect(&format!("/api/persona/set_visibility/{persona_id}/"))
-                    .query(&[("is_public", is_public.to_string())]),
+                self.put_without_redirect(&format!("/api/persona/edit-persona/{persona_id}/"))
+                    .json(&serde_json::json!({"persona_id": persona_id, "is_public": is_public})),
                 &spec,
             )
             .await?;
