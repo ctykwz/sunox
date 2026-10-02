@@ -13,6 +13,12 @@ backward-compatible features, upstream protocol adaptations, and fixes.
 
 ## [0.3.4] - 2026-10-02
 
+### Security
+
+- Update Rustls to 0.23.45 and its required TLS dependencies to address
+  [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285), which affected
+  TLS 1.3 handshake encryption-level validation.
+
 ### Fixed
 
 - Match Suno's current prepared-download `ok` and `ready`/`processing` contract, reject
