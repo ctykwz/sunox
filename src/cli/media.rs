@@ -53,11 +53,11 @@ pub struct DownloadArgs {
     #[arg(long)]
     pub video: bool,
 
-    /// Audio format; MP3/M4A/WAV are prepared-first and OPUS is legacy compatibility
+    /// Audio format; MP3/M4A/WAV are prepared-first and OPUS has been retired and is rejected before authorization
     #[arg(long, value_enum)]
     pub format: Option<DownloadFormat>,
 
-    /// Refuse legacy server-side WAV/OPUS conversion when no converted file exists
+    /// Refuse legacy server-side WAV conversion when no converted file exists
     #[arg(long, conflicts_with = "video")]
     pub no_convert: bool,
 

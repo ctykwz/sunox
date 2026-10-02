@@ -18,7 +18,7 @@
 ## 能做什么
 
 - 根据一句描述、自定义歌词、风格标签、Persona 或纯音乐要求创建歌曲。
-- 等待异步任务完成，并下载 MP3、M4A、WAV、Opus 或视频。
+- 等待异步任务完成，并下载 MP3、M4A、WAV 或视频。
 - 查询、搜索、编辑、公开、删除、恢复和下载歌曲。
 - 对已有歌曲做翻唱、续写、拼接、重制、变速、反转、裁剪、淡入淡出或 Pro 分轨。
 - 读取/下载已有分轨结果，管理歌词项目和 Custom Model，并从本地录音创建私有验证 Voice。
@@ -110,8 +110,7 @@ sunox download <clip_id_1> <clip_id_2> --output ./songs
 ```
 
 不指定格式时，Sunox 会通过 Suno 官方 prepared-download 接口下载 MP3，并把普通歌词和
-时间轴歌词写入 ID3。用 `--format mp3|m4a|wav|opus` 选择其他格式；WAV/OPUS 会先读取已有
-转换结果，缺失时才发起服务端转换。传 `--no-convert` 可禁止这个 POST；下载视频使用
+时间轴歌词写入 ID3。用 `--format mp3|m4a|wav` 选择其他格式；WAV 优先走 prepared，明确不可用时才读取旧转换结果，缺失时可发起服务端转换。Suno 已停用 OPUS，`--format opus` 会在账户请求前拒绝。传 `--no-convert` 可禁止这个 POST；下载视频使用
 `--video`。prepared download 即使是 GET，也可能计入套餐下载额度。
 
 下载内容必须非空且通过基本媒体容器检查，才会替换目标文件。HTTP 200 错误页或截断的文件头
@@ -206,7 +205,7 @@ sunox update                       更新到最新 GitHub Release
 `clip stems` 会启动计费的 `gen_stem` 任务；`clip get-stems` 只读取已有结果页，只有显式
 `--download` 才下载。Pro 支持 Auto Split 和 12 个规范目标的 Split from Mix；Premier 专属的
 任意 Advanced Split 乐器仍然不开放，避免按未确认映射扣费。只要分页结果中有任何 stem ID 无法
-补全，下载就会 fail-closed。MP3 分轨下载不会额外请求时间轴歌词；WAV/OPUS 在未传 `--no-convert`
+补全，下载就会 fail-closed。MP3 分轨下载不会额外请求时间轴歌词；WAV 在未传 `--no-convert`
 且非全局 `--read-only` 时仍可能发起转换，prepared download 也可能消耗套餐下载额度。
 
 创建 Voice 前先用 `voice phrase` 获取动态短语。把演唱样本和该短语录音准备成 WAV 后，使用
@@ -368,7 +367,10 @@ Windows 上自动选择当前用户的应用配置目录；Chrome 使用这个�
 --captcha          即使预检不要求，也强制执行浏览器验证
 --no-captcha       禁止自动调用浏览器验证
 --token <token>    使用外部已经解出的 Challenge Token
+--token-provider hcaptcha|turnstile    显式指定外部 Token 的实际提供方
 ```
+
+官网服务端开关允许时，已确认的 Turnstile 验证失败会触发一次 hCaptcha 回退，并按实际成功的提供方提交 Token。配对、传输、鉴权及未知错误不会触发回退。通过官网回退得到的外部 Token 请配合 `--token-provider hcaptcha`；预检返回 Turnstile 或预检不可用时，必须显式指定提供方，避免误标；明确的 hCaptcha 预检仍可省略该参数。每次 CLI 调用独立检查当前开关，不跨命令保存网页的临时选择。
 
 `challenge_browser` 支持 `auto`（默认）、`existing`（必须使用 Bridge，绝不启动独立浏览器）
 和 `isolated`（始终使用临时浏览器）。单次命令可使用 `-c challenge_browser=existing`。
@@ -443,7 +445,7 @@ sunox config set challenge_browser auto
 命令成功后会删除对应的操作检查点。
 
 全局 `--read-only` 会在第一次写请求前拒绝账号写操作。它仍允许账号读取和 prepared download
-（后者可能计入下载额度），并禁止时间轴歌词补生成及缺失 WAV/OPUS 的服务端转换；若结果已存在，
+（后者可能计入下载额度），并禁止时间轴歌词补生成及缺失 WAV 的服务端转换；若结果已存在，
 仍可只读返回。
 
 部分命令会消耗 Credits 或修改远端资源。新建的歌曲、歌单和 Persona 默认保持私有，只有

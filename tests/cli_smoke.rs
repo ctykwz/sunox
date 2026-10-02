@@ -1375,7 +1375,13 @@ fn agent_info_reports_current_download_authorization_contract() {
     assert!(authorization.contains("POST /api/download/authorize"));
     assert!(authorization.contains("never blindly replayed"));
     assert!(route.contains("format=mp3|m4a|wav|mp4"));
-    assert!(route.contains("OPUS"));
+    assert!(!route.contains("OPUS GET/convert"));
+    assert!(
+        download["constraints"]
+            .as_str()
+            .unwrap()
+            .contains("OPUS is retired and rejected before authorization")
+    );
     assert!(billing.contains("current_period_downloads_limit"));
     assert!(billing.contains("download_credit_packs"));
     assert!(billing.contains("never hard-codes quota"));

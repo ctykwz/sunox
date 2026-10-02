@@ -306,7 +306,9 @@ fn build_edit_persona_request(
         persona_id: args.id,
         name: args.name.or(Some(current.name)),
         description: args.description.or(current.description),
-        image_s3_id: args.image_s3_id.or(current.image_s3_id),
+        // Read responses can contain a CDN URL here, while edits require a
+        // newly uploaded image ID. Omit unchanged artwork instead of replaying it.
+        image_s3_id: args.image_s3_id,
         is_public: args.public.or(current.is_public),
         persona_type: args.persona_type.or(current.persona_type),
         user_input_styles: args.user_input_styles.or(current.user_input_styles),
@@ -350,7 +352,7 @@ mod tests {
             id: "persona-1".into(),
             name: "Lead Voice".into(),
             description: Some("Warm".into()),
-            image_s3_id: Some("image-1".into()),
+            image_s3_id: Some("https://cdn1.suno.ai/existing.jpeg".into()),
             user_display_name: None,
             user_handle: None,
             user_image_url: None,
@@ -390,7 +392,7 @@ mod tests {
 
         assert_eq!(req.name.as_deref(), Some("Renamed"));
         assert_eq!(req.description.as_deref(), Some("Warm"));
-        assert_eq!(req.image_s3_id.as_deref(), Some("image-1"));
+        assert_eq!(req.image_s3_id, None);
         assert_eq!(req.is_public, Some(true));
         assert_eq!(req.persona_type.as_deref(), Some("vox"));
         assert_eq!(req.user_input_styles.as_deref(), Some("soul"));

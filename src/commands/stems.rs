@@ -8,9 +8,14 @@ use crate::output::{self, OutputFormat};
 
 /// Read or export stem clips that Suno has already produced for a source.
 /// This lookup never starts a paid extraction. A requested export can authorize
-/// the parent source once, and legacy WAV/OPUS conversion remains subject to
+/// the parent source once, and legacy WAV conversion remains subject to
 /// its own mutation guard.
 pub async fn get(args: GetStemsArgs, ctx: &AppContext) -> Result<(), CliError> {
+    if args.download {
+        args.format
+            .unwrap_or(crate::api::download::DownloadFormat::Mp3)
+            .validate_available()?;
+    }
     let client = ctx.client().await?;
     let pages = client.stem_result_pages(&args.clip_id).await?;
     let results = if let Some(page) = args.page {
@@ -34,7 +39,7 @@ pub async fn get(args: GetStemsArgs, ctx: &AppContext) -> Result<(), CliError> {
         ensure_complete_hydration(&results)?;
         if !ctx.quiet {
             eprintln!(
-                "Downloading existing stems (the parent source is authorized at most once; stem MP3s skip aligned-lyrics generation, prepared WAV is preferred, and missing legacy WAV/OPUS files may start conversion unless --no-convert or --read-only is set)..."
+                "Downloading existing stems (the parent source is authorized at most once; stem MP3s skip aligned-lyrics generation, prepared WAV is preferred, and missing legacy WAV files may start conversion unless --no-convert or --read-only is set)..."
             );
         }
         let mut seen = HashSet::new();

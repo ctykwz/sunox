@@ -63,6 +63,7 @@ fn build_describe_args_from_create(args: CreateArgs) -> Result<DescribeArgs, Cli
         enhance_tags: args.enhance_tags,
         instrumental: args.instrumental,
         token: args.token,
+        token_provider: args.token_provider,
         captcha: args.captcha,
         no_captcha: args.no_captcha,
         persona: args.persona,
@@ -94,6 +95,7 @@ pub(crate) fn build_generate_args_from_create(args: CreateArgs) -> GenerateArgs 
         enhance_tags: args.enhance_tags,
         instrumental: args.instrumental,
         token: args.token,
+        token_provider: args.token_provider,
         captcha: args.captcha,
         no_captcha: args.no_captcha,
         persona: args.persona,
@@ -134,6 +136,7 @@ async fn generate(args: GenerateArgs, ctx: &AppContext) -> Result<(), CliError> 
     let mut req = build_generate_request(&args, &ctx.config)?;
     let challenge_mode = ChallengeMode::from_flags(args.captcha, args.no_captcha);
     let token = args.token.clone();
+    let token_provider = args.token_provider;
     let should_enhance_tags = args.enhance_tags;
     let instrumental = args.instrumental;
 
@@ -148,8 +151,12 @@ async fn generate(args: GenerateArgs, ctx: &AppContext) -> Result<(), CliError> 
             model_label(args.model.as_ref(), &ctx.config)
         );
     }
-    let clips =
-        execute_generation_submission(token, challenge_mode, ctx, move |client| async move {
+    let clips = execute_generation_submission(
+        token,
+        token_provider,
+        challenge_mode,
+        ctx,
+        move |client| async move {
             validate_lyrics_project_reference(&req, &client).await?;
             resolve_persona_reference(&mut req, &client).await?;
             if should_enhance_tags {
@@ -162,8 +169,9 @@ async fn generate(args: GenerateArgs, ctx: &AppContext) -> Result<(), CliError> 
                 client.prepare_generation_request(&mut req).await?;
             }
             Ok((client, req))
-        })
-        .await?;
+        },
+    )
+    .await?;
     output_generation(&clips, ctx);
     Ok(())
 }
@@ -228,6 +236,7 @@ fn apply_reuse_source(
 
     if !explicit_lyrics {
         req.prompt = source.metadata.prompt.unwrap_or_default();
+        req.metadata.is_mumble = source.metadata.is_mumble;
     }
     if !explicit_tags {
         req.tags = Some(source.metadata.tags.unwrap_or_default());
@@ -238,10 +247,12 @@ fn apply_reuse_source(
     if !explicit_title {
         req.title = Some(source.title);
     }
-    // Reuse has no separate instrumental flag. The resolved prompt is the
-    // source of truth, including when the caller explicitly supplies blank
-    // lyrics instead of inheriting the source lyrics.
-    req.make_instrumental = req.prompt.trim().is_empty();
+    // Mumble has empty lyrics but still requests vocals. Explicit lyrics
+    // override the inherited mode, including an explicitly blank instrumental.
+    if explicit_lyrics {
+        req.metadata.is_mumble = None;
+    }
+    req.make_instrumental = req.prompt.trim().is_empty() && req.metadata.is_mumble != Some(true);
     Ok(())
 }
 
@@ -414,6 +425,7 @@ async fn describe(args: DescribeArgs, ctx: &AppContext) -> Result<(), CliError> 
     let mut req = build_describe_request(&args, &ctx.config)?;
     let challenge_mode = ChallengeMode::from_flags(args.captcha, args.no_captcha);
     let token = args.token.clone();
+    let token_provider = args.token_provider;
     let should_enhance_tags = args.enhance_tags;
     let instrumental = args.instrumental;
 
@@ -423,8 +435,12 @@ async fn describe(args: DescribeArgs, ctx: &AppContext) -> Result<(), CliError> 
             model_label(args.model.as_ref(), &ctx.config)
         );
     }
-    let clips =
-        execute_generation_submission(token, challenge_mode, ctx, move |client| async move {
+    let clips = execute_generation_submission(
+        token,
+        token_provider,
+        challenge_mode,
+        ctx,
+        move |client| async move {
             resolve_persona_reference(&mut req, &client).await?;
             if should_enhance_tags {
                 let limits = client
@@ -436,8 +452,9 @@ async fn describe(args: DescribeArgs, ctx: &AppContext) -> Result<(), CliError> 
                 client.prepare_generation_request(&mut req).await?;
             }
             Ok((client, req))
-        })
-        .await?;
+        },
+    )
+    .await?;
     output_generation(&clips, ctx);
     Ok(())
 }
@@ -540,6 +557,7 @@ pub async fn extend(args: ExtendArgs, ctx: &AppContext) -> Result<(), CliError> 
     crate::core::ensure_non_negative_finite("--at", args.at)?;
     let challenge_mode = ChallengeMode::from_flags(args.captcha, args.no_captcha);
     let token = args.token.clone();
+    let token_provider = args.token_provider;
     let instrumental = if args.instrumental {
         Some(true)
     } else if args.no_instrumental {
@@ -547,8 +565,12 @@ pub async fn extend(args: ExtendArgs, ctx: &AppContext) -> Result<(), CliError> 
     } else {
         None
     };
-    let clips =
-        execute_generation_submission(token, challenge_mode, ctx, move |client| async move {
+    let clips = execute_generation_submission(
+        token,
+        token_provider,
+        challenge_mode,
+        ctx,
+        move |client| async move {
             let mut req = client
                 .prepare_extend_request(ExtendClipOptions {
                     clip_id: &args.clip_id,
@@ -564,8 +586,9 @@ pub async fn extend(args: ExtendArgs, ctx: &AppContext) -> Result<(), CliError> 
                 .await?;
             client.prepare_generation_request(&mut req).await?;
             Ok((client, req))
-        })
-        .await?;
+        },
+    )
+    .await?;
     output_generation(&clips, ctx);
     Ok(())
 }
@@ -662,6 +685,24 @@ mod tests {
     }
 
     #[test]
+    fn reuse_preserves_mumble_unless_lyrics_are_explicitly_overridden() {
+        let mut source = reuse_source();
+        source.metadata.prompt = Some(String::new());
+        source.metadata.is_mumble = Some(true);
+        let mut request = GenerateRequest::new("chirp-hawk", "custom");
+        apply_reuse_source(&mut request, source.clone(), false, false, false, false).unwrap();
+        assert_eq!(request.metadata.is_mumble, Some(true));
+        assert!(!request.make_instrumental);
+        for lyrics in ["", "new lyrics"] {
+            let mut request = GenerateRequest::new("chirp-hawk", "custom");
+            request.prompt = lyrics.into();
+            apply_reuse_source(&mut request, source.clone(), false, false, false, true).unwrap();
+            assert_eq!(request.metadata.is_mumble, None);
+            assert_eq!(request.make_instrumental, lyrics.is_empty());
+        }
+    }
+
+    #[test]
     fn reuse_source_fails_closed_when_nothing_can_be_reused() {
         let mut source = reuse_source();
         source.metadata.prompt = None;
@@ -688,6 +729,7 @@ mod tests {
             enhance_tags: false,
             instrumental: false,
             token: None,
+            token_provider: None,
             captcha: false,
             no_captcha: false,
             persona: None,
@@ -803,6 +845,7 @@ mod tests {
             enhance_tags: true,
             instrumental: false,
             token: Some("captcha-token".into()),
+            token_provider: Some(crate::api::challenge::ChallengeProvider::HCaptcha),
             captcha: true,
             no_captcha: false,
             persona: None,
@@ -811,6 +854,10 @@ mod tests {
         let describe_args = build_describe_args_from_create(args).expect("describe args");
 
         assert_eq!(describe_args.token.as_deref(), Some("captcha-token"));
+        assert_eq!(
+            describe_args.token_provider,
+            Some(crate::api::challenge::ChallengeProvider::HCaptcha)
+        );
         assert!(describe_args.captcha);
         assert!(!describe_args.no_captcha);
         assert!(describe_args.enhance_tags);
@@ -838,6 +885,7 @@ mod tests {
             enhance_tags: false,
             instrumental: false,
             token: None,
+            token_provider: None,
             captcha: false,
             no_captcha: false,
             persona: None,
@@ -871,6 +919,7 @@ mod tests {
             enhance_tags: false,
             instrumental: false,
             token: None,
+            token_provider: None,
             captcha: false,
             no_captcha: false,
             persona: None,
@@ -901,6 +950,7 @@ mod tests {
             enhance_tags: false,
             instrumental: false,
             token: None,
+            token_provider: None,
             captcha: false,
             no_captcha: false,
             persona: None,
@@ -948,6 +998,7 @@ mod tests {
             enhance_tags: false,
             instrumental: false,
             token: None,
+            token_provider: None,
             captcha: false,
             no_captcha: false,
             persona: None,
@@ -981,6 +1032,7 @@ mod tests {
             enhance_tags: false,
             instrumental: false,
             token: None,
+            token_provider: None,
             captcha: false,
             no_captcha: false,
             persona: None,
@@ -1021,6 +1073,7 @@ mod tests {
             enhance_tags: false,
             instrumental: false,
             token: None,
+            token_provider: None,
             captcha: false,
             no_captcha: false,
             persona: None,
@@ -1054,6 +1107,7 @@ mod tests {
             enhance_tags: false,
             instrumental: false,
             token: None,
+            token_provider: None,
             captcha: false,
             no_captcha: false,
             persona: None,
@@ -1088,6 +1142,7 @@ mod tests {
             enhance_tags: false,
             instrumental: false,
             token: None,
+            token_provider: None,
             captcha: false,
             no_captcha: false,
             persona: Some("persona-1".into()),
@@ -1204,6 +1259,7 @@ mod tests {
             enhance_tags: false,
             instrumental: true,
             token: None,
+            token_provider: None,
             captcha: false,
             no_captcha: false,
             persona: None,
@@ -1240,6 +1296,7 @@ mod tests {
             enhance_tags: false,
             instrumental: false,
             token: None,
+            token_provider: None,
             captcha: false,
             no_captcha: false,
             persona: None,
@@ -1280,6 +1337,7 @@ mod tests {
             enhance_tags: true,
             instrumental: true,
             token: None,
+            token_provider: None,
             captcha: false,
             no_captcha: true,
             persona: None,

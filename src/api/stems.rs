@@ -45,7 +45,7 @@ struct RawStemBank {
 
 impl SunoClient {
     /// Prepare the fixed hidden transport model used by current Web Get Stems.
-    /// `chirp-v3-0` is not a user-selectable generation model here, so its
+    /// `chirp-v3-5-b` is not a user-selectable generation model here, so its
     /// absence from billing.models must not block an otherwise entitled Pro
     /// account.
     pub(crate) async fn prepare_stem_generation_request(
@@ -53,7 +53,7 @@ impl SunoClient {
         req: &mut GenerateRequest,
     ) -> Result<(), CliError> {
         if req.task.as_deref() != Some("gen_stem")
-            || req.mv != "chirp-v3-0"
+            || req.mv != "chirp-v3-5-b"
             || req.stem_type_id != Some(91)
         {
             return Err(CliError::Config(
@@ -108,9 +108,9 @@ impl SunoClient {
             .into_iter()
             .find(|clip| clip.id == clip_id)
             .ok_or_else(|| CliError::NotFound(format!("clip: {clip_id}")))?;
-        validate_stem_source(&source)?;
+        validate_stem_source(&source, self.authenticated_user_id().as_deref())?;
 
-        let mut req = GenerateRequest::new("chirp-v3-0", "custom");
+        let mut req = GenerateRequest::new("chirp-v3-5-b", "custom");
         req.task = Some("gen_stem".into());
         req.title = Some(source.title);
         req.tags = Some(String::new());
@@ -257,7 +257,10 @@ fn hydrate_stem_bank_from_map(
     }
 }
 
-fn validate_stem_source(source: &Clip) -> Result<(), CliError> {
+fn validate_stem_source(
+    source: &Clip,
+    authenticated_user_id: Option<&str>,
+) -> Result<(), CliError> {
     if source.status != "complete" {
         return Err(CliError::Config(format!(
             "source clip `{}` must be complete before stem extraction",
@@ -297,9 +300,20 @@ fn validate_stem_source(source: &Clip) -> Result<(), CliError> {
         .action_config
         .as_ref()
         .and_then(|config| config.action("get_stems"));
-    if !get_stems
-        .is_some_and(|action| action.visible == Some(true) && action.disabled == Some(false))
-    {
+    // Current Web fills absent action rows from its local ownership rules.
+    // An explicit server restriction still wins; absence alone is not a denial.
+    let allowed = match get_stems {
+        Some(action) => action.visible == Some(true) && action.disabled == Some(false),
+        None => authenticated_user_id.is_some_and(|user_id| {
+            !user_id.is_empty()
+                && source
+                    .extra
+                    .get("user_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(user_id)
+        }),
+    };
+    if !allowed {
         return Err(CliError::Config(format!(
             "source clip `{}` does not expose an enabled Get Stems action for this account",
             source.id
@@ -332,14 +346,34 @@ mod tests {
 
     #[test]
     fn stem_extraction_requires_the_current_enabled_source_action() {
-        validate_stem_source(&source("get_stems", true, false)).expect("eligible source");
+        validate_stem_source(&source("get_stems", true, false), None).expect("eligible source");
         for clip in [
             source("get_stems", false, false),
             source("get_stems", true, true),
             source("remaster", true, false),
         ] {
-            let error = validate_stem_source(&clip).expect_err("source action must gate stems");
+            let error =
+                validate_stem_source(&clip, None).expect_err("source action must gate stems");
             assert!(error.to_string().contains("Get Stems action"));
+        }
+    }
+
+    #[test]
+    fn missing_stems_action_uses_verified_ownership_but_explicit_denial_wins() {
+        let mut clip = source("download_song", true, false);
+        clip.extra
+            .insert("user_id".into(), serde_json::json!("owner"));
+        assert!(validate_stem_source(&clip, Some("owner")).is_ok());
+        assert!(validate_stem_source(&clip, Some("other")).is_err());
+        assert!(validate_stem_source(&clip, None).is_err());
+        for mut denied in [
+            source("get_stems", false, false),
+            source("get_stems", true, true),
+        ] {
+            denied
+                .extra
+                .insert("user_id".into(), serde_json::json!("owner"));
+            assert!(validate_stem_source(&denied, Some("owner")).is_err());
         }
     }
 
@@ -347,15 +381,15 @@ mod tests {
     fn stem_extraction_requires_complete_non_trashed_source_state() {
         let mut incomplete = source("get_stems", true, false);
         incomplete.status = "processing".into();
-        assert!(validate_stem_source(&incomplete).is_err());
+        assert!(validate_stem_source(&incomplete, None).is_err());
 
         let mut trashed = source("get_stems", true, false);
         trashed.is_trashed = Some(true);
-        assert!(validate_stem_source(&trashed).is_err());
+        assert!(validate_stem_source(&trashed, None).is_err());
 
         let mut unknown = source("get_stems", true, false);
         unknown.is_trashed = None;
-        assert!(validate_stem_source(&unknown).is_err());
+        assert!(validate_stem_source(&unknown, None).is_err());
     }
 
     #[test]
@@ -366,7 +400,8 @@ mod tests {
             serde_json::Value::String("rights_restricted".into()),
         );
 
-        let error = validate_stem_source(&disabled).expect_err("rights gate must fail closed");
+        let error =
+            validate_stem_source(&disabled, None).expect_err("rights gate must fail closed");
         assert!(error.to_string().contains("download_disabled_reason"));
     }
 }

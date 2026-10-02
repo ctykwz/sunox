@@ -127,12 +127,7 @@ fn check_download_with_alignment(
                 .into_bytes(),
                 "/api/download/clip/clip-review?format=wav"
                 | "/api/download/clip/clip-review?format=mp3" => json!({
-                    "download_url":format!("http://{address}/media"),"status":"complete"
-                })
-                .to_string()
-                .into_bytes(),
-                "/api/gen/clip-review/opus_file/" => json!({
-                    "opus_file_url":format!("http://{address}/media")
+                    "download_url":format!("http://{address}/media"),"ok":true,"status":"ready"
                 })
                 .to_string()
                 .into_bytes(),
@@ -323,7 +318,7 @@ fn batch_download_stops_on_direct_and_wrapped_account_errors() {
                 let body = match path.as_str() {
                     "/api/feed/v3" => json!({"clips": (["clip-first","clip-second"].map(|id| json!({"id":id,"title":id,"status":"complete","model_name":"chirp-hawk","created_at":"2026-09-13T00:00:00Z","is_download_unlocked":true,"metadata":{"prompt":"test lyrics"}})))}).to_string().into_bytes(),
                     "/api/billing/info/" => json!({"credits":100,"total_credits_left":100,"monthly_usage":0,"monthly_limit":100,"is_active":true,"plan":{"name":"Pro","plan_key":"pro"},"models":[],"period":"month"}).to_string().into_bytes(),
-                    path if path.starts_with("/api/download/clip/") => json!({"download_url":format!("http://{address}/media"),"status":"complete"}).to_string().into_bytes(),
+                    path if path.starts_with("/api/download/clip/") => json!({"download_url":format!("http://{address}/media"),"ok":true,"status":"ready"}).to_string().into_bytes(),
                     "/media" => include_bytes!("fixtures/download/silence.mp3").to_vec(),
                     "/api/gen/clip-first/aligned_lyrics/v3" => {
                         align_reads += 1;
@@ -520,31 +515,12 @@ fn optional_alignment_preserves_only_unresolved_mutation_checkpoints() {
 }
 
 #[test]
-fn truncated_opus_and_rf64_never_replace_existing_files() {
-    let opus = include_bytes!("fixtures/download/silence.opus");
-    let large = include_bytes!("fixtures/download/silence-large-tags.opus");
+fn truncated_rf64_never_replaces_existing_files() {
     let rf64 = include_bytes!("fixtures/download/silence-rf64.wav");
-    // Exact byte cuts from the real-file CLI reproductions: Opus headers
-    // end at 136; the large comment's first page ends at 65354; RF64 data
-    // starts at 114. None of these cuts contains a complete audio packet.
-    for (case, format, body, valid) in [
-        ("Opus headers only", "opus", opus[..136].to_vec(), false),
-        (
-            "Opus incomplete audio page header",
-            "opus",
-            opus[..140].to_vec(),
-            false,
-        ),
-        (
-            "Opus incomplete comment packet",
-            "opus",
-            large[..65354].to_vec(),
-            false,
-        ),
-        ("RF64 one data byte", "wav", rf64[..115].to_vec(), false),
-        ("complete Opus", "opus", opus.to_vec(), true),
-        ("complete RF64", "wav", rf64.to_vec(), true),
+    for (case, body, valid) in [
+        ("RF64 one data byte", rf64[..115].to_vec(), false),
+        ("complete RF64", rf64.to_vec(), true),
     ] {
-        check_download(case, format, body, valid);
+        check_download(case, "wav", body, valid);
     }
 }

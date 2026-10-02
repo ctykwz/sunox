@@ -183,7 +183,7 @@ fn inspect_pcm_wave(path: &Path) -> Result<f64, CliError> {
         return Err(invalid_wave(path, "declared RIFF size exceeds the file"));
     }
 
-    let mut byte_rate = None;
+    let mut wave_format = None;
     let mut data_size = None;
     loop {
         let mut chunk_header = [0_u8; 8];
@@ -209,44 +209,87 @@ fn inspect_pcm_wave(path: &Path) -> Result<f64, CliError> {
 
         match &chunk_header[..4] {
             b"fmt " => {
+                if wave_format.is_some() {
+                    return Err(invalid_wave(path, "duplicate fmt chunk"));
+                }
                 if chunk_size < 16 {
                     return Err(invalid_wave(path, "fmt chunk is shorter than 16 bytes"));
                 }
                 let mut format = [0_u8; 16];
                 file.read_exact(&mut format)?;
-                let audio_format = u16::from_le_bytes(format[0..2].try_into().expect("format"));
+                let mut audio_format = u16::from_le_bytes(format[0..2].try_into().expect("format"));
                 let channels = u16::from_le_bytes(format[2..4].try_into().expect("channels"));
                 let sample_rate = u32::from_le_bytes(format[4..8].try_into().expect("sample rate"));
                 let rate = u32::from_le_bytes(format[8..12].try_into().expect("byte rate"));
                 let block_align =
                     u16::from_le_bytes(format[12..14].try_into().expect("block align"));
-                if !matches!(audio_format, 1 | 3 | 0xfffe)
+                let bits = u16::from_le_bytes(format[14..16].try_into().expect("bits per sample"));
+                if audio_format == 0xfffe {
+                    if chunk_size < 40 {
+                        return Err(invalid_wave(path, "truncated extensible fmt chunk"));
+                    }
+                    let mut extension = [0_u8; 24];
+                    file.read_exact(&mut extension)?;
+                    let size =
+                        u16::from_le_bytes(extension[0..2].try_into().expect("extension size"));
+                    let valid_bits =
+                        u16::from_le_bytes(extension[2..4].try_into().expect("valid bits"));
+                    let subformat =
+                        u32::from_le_bytes(extension[8..12].try_into().expect("subformat"));
+                    if size < 22
+                        || u64::from(size) + 18 > chunk_size
+                        || valid_bits == 0
+                        || valid_bits > bits
+                        || !matches!(subformat, 1 | 3)
+                        || extension[12..24] != [0, 0, 16, 0, 128, 0, 0, 170, 0, 56, 155, 113]
+                        || (subformat == 3 && valid_bits != bits)
+                    {
+                        return Err(invalid_wave(path, "invalid extensible PCM/float format"));
+                    }
+                    audio_format = subformat as u16;
+                }
+                let supported_bits = match audio_format {
+                    1 => matches!(bits, 8 | 16 | 24 | 32 | 64),
+                    3 => matches!(bits, 32 | 64),
+                    _ => false,
+                };
+                if !supported_bits
                     || channels == 0
                     || sample_rate == 0
-                    || rate == 0
                     || block_align == 0
+                    || u32::from(block_align) != u32::from(channels) * u32::from(bits / 8)
+                    || sample_rate.checked_mul(u32::from(block_align)) != Some(rate)
                 {
                     return Err(invalid_wave(
                         path,
                         "fmt chunk does not describe supported PCM/float audio",
                     ));
                 }
-                byte_rate = Some(rate);
+                wave_format = Some((sample_rate, block_align));
             }
             b"data" => {
                 if chunk_size == 0 {
                     return Err(invalid_wave(path, "data chunk is empty"));
                 }
-                data_size.get_or_insert(chunk_size);
+                if data_size.replace(chunk_size).is_some() {
+                    return Err(invalid_wave(path, "multiple data chunks are not supported"));
+                }
             }
             _ => {}
         }
         file.seek(SeekFrom::Start(chunk_end))?;
     }
 
-    let rate = byte_rate.ok_or_else(|| invalid_wave(path, "missing fmt chunk"))?;
+    let (sample_rate, block_align) =
+        wave_format.ok_or_else(|| invalid_wave(path, "missing fmt chunk"))?;
     let data = data_size.ok_or_else(|| invalid_wave(path, "missing data chunk"))?;
-    let duration = data as f64 / f64::from(rate);
+    if data % u64::from(block_align) != 0 {
+        return Err(invalid_wave(
+            path,
+            "data contains an incomplete sample frame",
+        ));
+    }
+    let duration = (data / u64::from(block_align)) as f64 / f64::from(sample_rate);
     if !duration.is_finite() || duration <= 0.0 {
         return Err(invalid_wave(path, "audio duration is not positive"));
     }
@@ -1256,6 +1299,73 @@ mod tests {
             .expect_err("selection cannot exceed actual audio");
         assert!(error.to_string().contains("must be between"));
         assert_eq!(inspect_pcm_wave(&verification).expect("duration"), 15.0);
+    }
+
+    #[test]
+    fn wave_duration_rejects_inconsistent_format_and_partial_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sample.wav");
+        write_pcm_wav(&path, 20);
+        let original = std::fs::read(&path).unwrap();
+        for (offset, value) in [
+            (28, 16_000_u32.to_le_bytes().to_vec()),
+            (32, 2_u16.to_le_bytes().to_vec()),
+            (34, 16_u16.to_le_bytes().to_vec()),
+        ] {
+            let mut bytes = original.clone();
+            bytes[offset..offset + value.len()].copy_from_slice(&value);
+            std::fs::write(&path, &bytes).unwrap();
+            assert!(
+                inspect_pcm_wave(&path).is_err(),
+                "inconsistent field at {offset}"
+            );
+        }
+        let mut pcm16 = original;
+        pcm16[28..32].copy_from_slice(&16_000_u32.to_le_bytes());
+        pcm16[32..34].copy_from_slice(&2_u16.to_le_bytes());
+        pcm16[34..36].copy_from_slice(&16_u16.to_le_bytes());
+        std::fs::write(&path, &pcm16).unwrap();
+        assert_eq!(inspect_pcm_wave(&path).unwrap(), 10.0);
+        let data_len = (pcm16.len() - 45) as u32;
+        pcm16[40..44].copy_from_slice(&data_len.to_le_bytes());
+        std::fs::write(&path, &pcm16).unwrap();
+        assert!(
+            inspect_pcm_wave(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("incomplete sample frame")
+        );
+    }
+
+    #[test]
+    fn wave_duration_validates_extensible_pcm_and_float_subformats() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sample.wav");
+        write_pcm_wav(&path, 20);
+        let original = std::fs::read(&path).unwrap();
+        for (format, bits, expected) in [(1_u32, 16_u16, 10.0), (3, 32, 5.0)] {
+            let mut bytes = original[..36].to_vec();
+            bytes[4..8].copy_from_slice(&((original.len() + 24 - 8) as u32).to_le_bytes());
+            bytes[16..20].copy_from_slice(&40_u32.to_le_bytes());
+            bytes[20..22].copy_from_slice(&0xfffe_u16.to_le_bytes());
+            bytes[28..32].copy_from_slice(&(8_000 * u32::from(bits / 8)).to_le_bytes());
+            bytes[32..34].copy_from_slice(&(bits / 8).to_le_bytes());
+            bytes[34..36].copy_from_slice(&bits.to_le_bytes());
+            bytes.extend_from_slice(&22_u16.to_le_bytes());
+            bytes.extend_from_slice(&bits.to_le_bytes());
+            bytes.extend_from_slice(&0_u32.to_le_bytes());
+            bytes.extend_from_slice(&format.to_le_bytes());
+            bytes.extend_from_slice(&[0, 0, 16, 0, 128, 0, 0, 170, 0, 56, 155, 113]);
+            bytes.extend_from_slice(&original[36..]);
+            std::fs::write(&path, &bytes).unwrap();
+            assert_eq!(inspect_pcm_wave(&path).unwrap(), expected);
+            bytes[44] = 2;
+            std::fs::write(&path, &bytes).unwrap();
+            assert!(
+                inspect_pcm_wave(&path).is_err(),
+                "unsupported extensible codec"
+            );
+        }
     }
 
     #[test]

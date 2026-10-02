@@ -3668,9 +3668,10 @@ async fn fade_waits_for_action_status_before_loading_clip() {
 
 #[tokio::test]
 async fn official_download_resolves_mp3_download_url() {
-    let server =
-        MockServer::json(r#"{"status":"complete","download_url":"https://cdn.example/song.mp3"}"#)
-            .await;
+    let server = MockServer::json(
+        r#"{"ok":true,"status":"ready","download_url":"https://cdn.example/song.mp3"}"#,
+    )
+    .await;
     let client = server.client();
 
     let url = client
@@ -3703,7 +3704,8 @@ async fn prepared_download_supports_the_current_format_route_matrix() {
     ] {
         let expected_url = format!("https://cdn.example/song.{extension}");
         let response = serde_json::json!({
-            "status": "complete",
+            "ok": true,
+            "status": "ready",
             "download_url": expected_url
         })
         .to_string();
@@ -3733,8 +3735,8 @@ async fn prepared_download_supports_the_current_format_route_matrix() {
 }
 
 #[tokio::test]
-async fn prepared_download_without_a_url_returns_a_typed_unavailable_error() {
-    let server = MockServer::json(r#"{"status":"complete","download_url":null}"#).await;
+async fn prepared_download_ready_without_a_url_fails_closed() {
+    let server = MockServer::json(r#"{"ok":true,"status":"ready","download_url":null}"#).await;
 
     let error = server
         .client()
@@ -3749,17 +3751,13 @@ async fn prepared_download_without_a_url_returns_a_typed_unavailable_error() {
         .await
         .expect_err("a terminal prepared response without a URL is unavailable");
 
-    assert_eq!(error.error_code(), "prepared_download_unavailable");
-    let details = error.details().expect("prepared unavailable details");
-    assert_eq!(details["clip_id"], "clip-a");
-    assert_eq!(details["format"], "wav");
-    assert_eq!(details["download_started"], false);
+    assert_eq!(error.error_code(), "schema_drift");
     assert_eq!(server.captured_all().await.len(), 1);
 }
 
 #[tokio::test]
-async fn prepared_download_rejects_a_blank_url_as_unavailable() {
-    let server = MockServer::json(r#"{"status":"complete","download_url":"  "}"#).await;
+async fn prepared_download_rejects_a_blank_ready_url() {
+    let server = MockServer::json(r#"{"ok":true,"status":"ready","download_url":"  "}"#).await;
 
     let error = server
         .client()
@@ -3774,8 +3772,7 @@ async fn prepared_download_rejects_a_blank_url_as_unavailable() {
         .await
         .expect_err("a blank prepared URL is not a usable file location");
 
-    assert_eq!(error.error_code(), "prepared_download_unavailable");
-    assert_eq!(error.details().expect("details")["format"], "mp4");
+    assert_eq!(error.error_code(), "schema_drift");
     assert_eq!(server.captured_all().await.len(), 1);
 }
 
@@ -4028,7 +4025,7 @@ async fn download_authorize_send_reset_is_ambiguous_and_not_replayed() {
 
 #[tokio::test]
 async fn official_download_rejects_a_zero_poll_timeout() {
-    let server = MockServer::json(r#"{"status":"processing","download_url":null}"#).await;
+    let server = MockServer::json(r#"{"ok":true,"status":"processing","download_url":null}"#).await;
     let client = server.client();
 
     let error = client
@@ -4048,8 +4045,11 @@ async fn official_download_rejects_a_zero_poll_timeout() {
 
 #[tokio::test]
 async fn official_download_does_not_request_again_after_its_deadline() {
-    let server =
-        MockServer::json_until_idle(r#"{"status":"processing","download_url":null}"#, 4).await;
+    let server = MockServer::json_until_idle(
+        r#"{"ok":true,"status":"processing","download_url":null}"#,
+        4,
+    )
+    .await;
     let client = server.client();
 
     let error = client
@@ -4072,7 +4072,7 @@ async fn official_download_does_not_request_again_after_its_deadline() {
 #[tokio::test]
 async fn official_download_deadline_bounds_an_in_flight_request() {
     let server = MockServer::delayed_json(
-        r#"{"status":"processing","download_url":null}"#,
+        r#"{"ok":true,"status":"processing","download_url":null}"#,
         Duration::from_millis(200),
     )
     .await;
@@ -4099,8 +4099,8 @@ async fn official_download_deadline_bounds_an_in_flight_request() {
 #[tokio::test]
 async fn official_download_polls_m4a_download_url() {
     let server = MockServer::json_sequence(&[
-        r#"{"status":"processing","download_url":null}"#,
-        r#"{"status":"complete","download_url":"https://cdn.example/song.m4a"}"#,
+        r#"{"ok":true,"status":"processing","download_url":null}"#,
+        r#"{"ok":true,"status":"ready","download_url":"https://cdn.example/song.m4a"}"#,
     ])
     .await;
     let client = server.client();
@@ -4182,57 +4182,25 @@ async fn wav_download_posts_convert_when_file_url_is_missing() {
 }
 
 #[tokio::test]
-async fn opus_download_uses_existing_file_url_without_conversion() {
-    let server = MockServer::json(r#"{"opus_file_url":"https://cdn.example/song.opus"}"#).await;
-    let client = server.client();
-
-    let url = client
-        .download_url(
-            "clip-a",
-            super::download::DownloadFormat::Opus,
-            super::PollingOptions {
-                timeout: Duration::from_secs(1),
-                interval: Duration::from_millis(1),
-            },
-        )
-        .await
-        .expect("opus url");
-
-    assert_eq!(url, "https://cdn.example/song.opus");
-    let request = server.captured().await;
-    assert_eq!(request.method, "GET");
-    assert_eq!(request.path, "/api/gen/clip-a/opus_file/");
-}
-
-#[tokio::test]
-async fn opus_download_posts_convert_when_file_url_is_missing() {
-    let server = MockServer::json_sequence(&[
-        r#"{"opus_file_url":null}"#,
-        r#"{"ok":true}"#,
-        r#"{"opus_file_url":"https://cdn.example/song.opus"}"#,
-    ])
-    .await;
-    let client = server.client();
-
-    let url = client
-        .download_url(
-            "clip-a",
-            super::download::DownloadFormat::Opus,
-            super::PollingOptions {
-                timeout: Duration::from_secs(1),
-                interval: Duration::from_millis(1),
-            },
-        )
-        .await
-        .expect("opus url");
-
-    assert_eq!(url, "https://cdn.example/song.opus");
-    let requests = server.captured_all().await;
-    assert_eq!(requests[0].method, "GET");
-    assert_eq!(requests[0].path, "/api/gen/clip-a/opus_file/");
-    assert_eq!(requests[1].method, "POST");
-    assert_eq!(requests[1].path, "/api/gen/clip-a/convert_opus");
-    assert_eq!(requests[2].path, "/api/gen/clip-a/opus_file/");
+async fn opus_is_rejected_before_any_network_request() {
+    for allow_conversion in [true, false] {
+        let server = MockServer::json("{}").await;
+        let error = server
+            .client()
+            .download_url_with_conversion_policy(
+                "clip-a",
+                super::download::DownloadFormat::Opus,
+                super::PollingOptions {
+                    timeout: Duration::from_secs(1),
+                    interval: Duration::from_millis(1),
+                },
+                allow_conversion,
+            )
+            .await
+            .expect_err("retired format");
+        assert_eq!(error.error_code(), "unsupported_download_format");
+        assert!(server.captured_all().await.is_empty());
+    }
 }
 
 #[tokio::test]
@@ -4269,7 +4237,7 @@ async fn stems_posts_current_web_contract() {
     assert!(body["token"].is_null());
     assert!(body["token_provider"].is_null());
     assert_eq!(body["task"], "gen_stem");
-    assert_eq!(body["mv"], "chirp-v3-0");
+    assert_eq!(body["mv"], "chirp-v3-5-b");
     assert_eq!(body["title"], "Source Song");
     assert_eq!(body["tags"], "");
     assert_eq!(body["prompt"], "");
@@ -5246,7 +5214,7 @@ async fn set_playlist_external_image_url_uses_legacy_compatibility_contract() {
 
 #[tokio::test]
 async fn add_clips_to_playlist_posts_v2_tracks_add_contract() {
-    let server = MockServer::json("{}").await;
+    let server = MockServer::json(r#"{"successes":["clip-a","clip-b"],"failures":[]}"#).await;
     let client = server.client();
 
     client
@@ -6026,11 +5994,11 @@ async fn set_persona_visibility_puts_current_web_contract() {
     assert_eq!(persona.is_public, Some(true));
     let request = server.captured().await;
     assert_eq!(request.method, "PUT");
+    assert_eq!(request.path, "/api/persona/edit-persona/persona-1/");
     assert_eq!(
-        request.path,
-        "/api/persona/set_visibility/persona-1/?is_public=true"
+        serde_json::from_str::<serde_json::Value>(&request.body).unwrap(),
+        serde_json::json!({"persona_id":"persona-1","is_public":true})
     );
-    assert_eq!(request.body, "");
 }
 
 #[tokio::test]
@@ -6927,30 +6895,6 @@ async fn wav_no_convert_fails_closed_after_reading_the_existing_url() {
     let request = server.captured().await;
     assert_eq!(request.method, "GET");
     assert_eq!(request.path, "/api/gen/clip-a/wav_file/");
-}
-
-#[tokio::test]
-async fn opus_no_convert_fails_closed_after_reading_the_existing_url() {
-    let server = MockServer::json(r#"{"opus_file_url":null}"#).await;
-    let client = server.client();
-
-    let error = client
-        .download_url_with_conversion_policy(
-            "clip-a",
-            super::download::DownloadFormat::Opus,
-            super::PollingOptions {
-                timeout: Duration::from_secs(1),
-                interval: Duration::from_millis(1),
-            },
-            false,
-        )
-        .await
-        .expect_err("no-convert must refuse a conversion POST");
-
-    assert!(matches!(error, CliError::Download(message) if message.contains("refused")));
-    let request = server.captured().await;
-    assert_eq!(request.method, "GET");
-    assert_eq!(request.path, "/api/gen/clip-a/opus_file/");
 }
 
 #[tokio::test]
@@ -8902,7 +8846,7 @@ async fn new_mutation_submit_does_not_retry_an_explicit_401() {
 #[tokio::test]
 async fn lyrics_rewrite_posts_the_current_selection_body_once() {
     let server = MockServer::json(
-        r#"{"generated_lyrics":"new chorus","lyrics_request_id":"request-1","lyrics_id":"lyrics-1","variant":"current"}"#,
+        r#"{"edited_lyrics":"new chorus","lyrics_request_id":"request-1","lyrics_id":"lyrics-1","variant":"current"}"#,
     )
     .await;
     let client = server.client();
@@ -8914,7 +8858,6 @@ async fn lyrics_rewrite_posts_the_current_selection_body_once() {
             edit: "old chorus",
             suffix: "\noutro",
             title: "Draft",
-            create_session_token: "session-1",
         })
         .await
         .expect("lyrics rewrite");
@@ -8924,16 +8867,19 @@ async fn lyrics_rewrite_posts_the_current_selection_body_once() {
     assert_eq!(result.lyrics_id.as_deref(), Some("lyrics-1"));
     let request = server.captured().await;
     assert_eq!(request.method, "POST");
-    assert_eq!(request.path, "/api/generate/lyrics-infill/");
+    assert_eq!(request.path, "/api/generate/cowrite-lyrics/");
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&request.body).expect("rewrite request JSON"),
         serde_json::json!({
-            "prompt": "make it brighter",
-            "context_lyrics_prefix": "verse\n",
-            "context_lyrics_edit": "old chorus",
-            "context_lyrics_suffix": "\noutro",
-            "create_session_token": "session-1",
-            "title": "Draft"
+            "instruction": "make it brighter",
+            "context_before": "verse\n",
+            "selected": "old chorus",
+            "context_after": "\noutro",
+            "create_session_token": null,
+            "title": "Draft", "style": "", "mode": "apply_user_request",
+            "references": [], "num_variants": null, "lyricist_id": null,
+            "metadata": {"lyrics_model": "default", "enable_thinking": false},
+            "lyrics_project_id": null
         })
     );
 }
@@ -8948,7 +8894,7 @@ async fn lyrics_rewrite_has_a_fixed_thirty_second_bound_and_never_auth_replays()
     let server = MockServer::response_sequence_with_idle_timeout(
         vec![
             (401, String::new()),
-            (200, r#"{"generated_lyrics":"duplicate"}"#.into()),
+            (200, r#"{"edited_lyrics":"duplicate"}"#.into()),
         ],
         Duration::from_millis(50),
     )
@@ -8961,7 +8907,6 @@ async fn lyrics_rewrite_has_a_fixed_thirty_second_bound_and_never_auth_replays()
             edit: "old",
             suffix: "",
             title: "",
-            create_session_token: "session-1",
         })
         .await
         .expect_err("mutation must return explicit auth rejection");
@@ -8981,7 +8926,6 @@ async fn lyrics_editor_submits_treat_server_errors_as_ambiguous_without_replay()
             edit: "old",
             suffix: "",
             title: "",
-            create_session_token: "session-1",
         })
         .await
         .expect_err("rewrite 5xx is ambiguous");
@@ -9111,4 +9055,306 @@ async fn read_only_lyrics_mashup_wait_keeps_poll_errors_explicit() {
 
     assert_eq!(error.error_code(), "api_error");
     assert_eq!(server.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
+async fn unknown_download_shapes_never_start_conversion() {
+    for body in [
+        "{}",
+        r#"{"status":"future","download_url":null}"#,
+        r#"{"status":"complete"}"#,
+        r#"{"download_url":null}"#,
+    ] {
+        let server = MockServer::json(body).await;
+        let error = server
+            .client()
+            .prepared_download_url(
+                "clip-a",
+                super::download::PreparedDownloadFormat::Wav,
+                super::PollingOptions {
+                    timeout: Duration::from_secs(1),
+                    interval: Duration::from_millis(1),
+                },
+            )
+            .await
+            .expect_err("unknown prepared schema");
+        assert_ne!(error.error_code(), "prepared_download_unavailable");
+        assert_eq!(server.captured_all().await.len(), 1);
+    }
+    for format in [super::download::DownloadFormat::Wav] {
+        let server = MockServer::json(r#"{"future_field":true}"#).await;
+        server
+            .client()
+            .download_url(
+                "clip-a",
+                format,
+                super::PollingOptions {
+                    timeout: Duration::from_secs(1),
+                    interval: Duration::from_millis(1),
+                },
+            )
+            .await
+            .expect_err("missing legacy field must not start conversion");
+        let requests = server.captured_all().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "GET");
+    }
+}
+
+#[tokio::test]
+async fn playlist_add_reports_business_failures_and_accepts_existing_membership() {
+    for successes in [serde_json::json!([]), serde_json::json!(["clip-a"])] {
+        let mut failures =
+            vec![serde_json::json!({"id":"clip-b","code":"forbidden","message":"Not allowed"})];
+        if successes.as_array().unwrap().is_empty() {
+            failures.push(serde_json::json!({"id":"clip-a","code":"forbidden"}));
+        }
+        let body = serde_json::json!({"successes":successes,"failures":failures}).to_string();
+        let server = MockServer::json(&body).await;
+        let error = server
+            .client()
+            .add_clips_to_playlist("playlist-1", &["clip-a".into(), "clip-b".into()])
+            .await
+            .expect_err("HTTP 200 does not imply every item succeeded");
+        assert_eq!(error.error_code(), "partial_mutation");
+        assert_eq!(error.details().unwrap()["succeeded_clip_ids"], successes);
+        assert_eq!(error.details().unwrap()["failed"][0]["clip_id"], "clip-b");
+        assert_eq!(server.captured_all().await.len(), 1);
+    }
+    let server = MockServer::json(
+        r#"{"successes":[],"failures":[{"id":"clip-a","code":"already_in_playlist"}]}"#,
+    )
+    .await;
+    server
+        .client()
+        .add_clips_to_playlist("playlist-1", &["clip-a".into()])
+        .await
+        .unwrap();
+    assert_eq!(server.captured_all().await.len(), 1);
+}
+
+#[tokio::test]
+async fn playlist_add_rejects_missing_duplicate_and_foreign_results_without_replay() {
+    for body in [
+        "{}",
+        r#"{"successes":[],"failures":[]}"#,
+        r#"{"successes":["other"],"failures":[]}"#,
+        r#"{"successes":["clip-a"],"failures":[{"id":"clip-a","code":"forbidden"}]}"#,
+    ] {
+        let server = MockServer::json(body).await;
+        let error = server
+            .client()
+            .add_clips_to_playlist("playlist-1", &["clip-a".into()])
+            .await
+            .expect_err("inconsistent per-item report");
+        assert_eq!(error.error_code(), "ambiguous_mutation");
+        assert_eq!(server.captured_all().await.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn cover_art_image_rejects_unsupported_reference_before_cost_or_submit() {
+    let billing = billing_with_features(&["generate_song_image"]);
+    let source = complete_clip_fixture("clip-1", Some("generate_cover_art"), None);
+    let configs = r#"{"image_model_categories":[{"category":"advanced","image":"not_supported"}],"video_model_categories":[]}"#;
+    let server = MockServer::json_sequence(&[&billing, &source, configs]).await;
+    let error = crate::workflow::visual::generate_cover_art_image_batch(
+        &server.client(),
+        "clip-1",
+        "test",
+        Some("advanced"),
+        Some(crate::api::types::CoverArtPromptImage::uploaded("image-1")),
+        None,
+    )
+    .await
+    .expect_err("unsupported input");
+    assert!(
+        error
+            .to_string()
+            .contains("does not support a reference image")
+    );
+    let requests = server.captured_all().await;
+    assert_eq!(requests.len(), 3);
+    assert!(requests.iter().all(|r| r.method == "GET"));
+}
+
+#[tokio::test]
+async fn cover_art_video_uses_general_durations_only_when_image_durations_are_absent() {
+    let billing = billing_with_features(&["generate_song_video"]);
+    let source = complete_clip_fixture("clip-1", Some("generate_cover_art"), None);
+    for image_durations in [
+        None,
+        Some(serde_json::Value::Null),
+        Some(serde_json::json!([])),
+        Some(serde_json::json!([10])),
+    ] {
+        let mut model =
+            serde_json::json!({"category":"basic","image":"optional","allowed_durations":[5,10]});
+        if let Some(value) = image_durations.as_ref() {
+            model["allowed_durations_with_image"] = value.clone();
+        }
+        let configs =
+            serde_json::json!({"image_model_categories":[],"video_model_categories":[model]})
+                .to_string();
+        let fallback = image_durations
+            .as_ref()
+            .is_none_or(serde_json::Value::is_null);
+        let mut responses = vec![billing.as_str(), source.as_str(), configs.as_str()];
+        if fallback {
+            responses.extend([
+                r#"{"cost":20,"remaining_gens":2}"#,
+                r#"{"batch_id":"batch-video","video_ids":["video-1","video-2"]}"#,
+            ]);
+        }
+        let server = MockServer::json_sequence(&responses).await;
+        let result = crate::workflow::visual::generate_cover_art_video_batch(
+            &server.client(),
+            "clip-1",
+            "motion",
+            Some("basic"),
+            Some(5),
+            Some(crate::api::types::CoverArtPromptImage::uploaded("image-1")),
+            None,
+        )
+        .await;
+        assert_eq!(
+            result.is_ok(),
+            fallback,
+            "explicit empty/restricted lists must not be overridden"
+        );
+        let requests = server.captured_all().await;
+        assert_eq!(requests.len(), if fallback { 5 } else { 3 });
+        if fallback {
+            let body: serde_json::Value = serde_json::from_str(&requests[4].body).unwrap();
+            assert_eq!(body["duration"], 5);
+            assert_eq!(body["prompt_start_image"]["id"], "image-1");
+        }
+    }
+}
+
+#[tokio::test]
+async fn prepared_download_polls_processing_and_rate_limit_until_ready() {
+    let server = MockServer::json_sequence(&[
+        r#"{"reason":"rate_limited","ok":false}"#,
+        r#"{"ok":true,"status":"processing"}"#,
+        r#"{"ok":true,"status":"ready","download_url":"https://cdn.example/a.m4a"}"#,
+    ])
+    .await;
+    let url = server
+        .client()
+        .prepared_download_url(
+            "clip-a",
+            super::download::PreparedDownloadFormat::M4a,
+            super::PollingOptions {
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_millis(1),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(url, "https://cdn.example/a.m4a");
+    assert_eq!(server.captured_all().await.len(), 3);
+}
+
+#[tokio::test]
+async fn prepared_download_never_uses_urls_from_failed_responses() {
+    for body in [
+        r#"{"ok":false,"status":"ready","download_url":"https://cdn.example/a.wav"}"#,
+        r#"{"ok":true,"status":"error","message":"conversion failed","download_url":"https://cdn.example/a.wav"}"#,
+        r#"{"status":"ready","download_url":"https://cdn.example/a.wav"}"#,
+    ] {
+        let server = MockServer::json(body).await;
+        let error = server
+            .client()
+            .prepared_download_url(
+                "clip-a",
+                super::download::PreparedDownloadFormat::Wav,
+                super::PollingOptions {
+                    timeout: Duration::from_secs(1),
+                    interval: Duration::from_millis(1),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_ne!(error.error_code(), "prepared_download_unavailable");
+        assert_eq!(server.captured_all().await.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn legacy_wav_empty_object_obeys_conversion_policy() {
+    let polling = super::PollingOptions {
+        timeout: Duration::from_secs(1),
+        interval: Duration::from_millis(1),
+    };
+    let server = MockServer::json("{}").await;
+    let error = server
+        .client()
+        .download_url_with_conversion_policy(
+            "clip-a",
+            super::download::DownloadFormat::Wav,
+            polling,
+            false,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, CliError::Download(message) if message.contains("refused")));
+    assert_eq!(server.captured_all().await.len(), 1);
+    let server = MockServer::json_sequence(&[
+        "{}",
+        "{}",
+        "{}",
+        r#"{"wav_file_url":"https://cdn.example/a.wav"}"#,
+    ])
+    .await;
+    let url = server
+        .client()
+        .download_url_with_conversion_policy(
+            "clip-a",
+            super::download::DownloadFormat::Wav,
+            polling,
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(url, "https://cdn.example/a.wav");
+    let requests = server.captured_all().await;
+    assert_eq!(requests.iter().filter(|r| r.method == "POST").count(), 1);
+    assert_eq!(requests[1].path, "/api/gen/clip-a/convert_wav/");
+}
+
+#[tokio::test]
+async fn playlist_v2_reads_nonempty_and_cleared_bio_description() {
+    for description in ["A nonempty description", ""] {
+        let body = serde_json::json!({"metadata":{"id":"playlist-1","name":"Demo"},"bio":{"description":description}}).to_string();
+        let server = MockServer::json(&body).await;
+        let playlist = server.client().get_playlist("playlist-1").await.unwrap();
+        assert_eq!(playlist.description.as_deref(), Some(description));
+        assert_eq!(playlist.extra["bio"]["description"], description);
+    }
+}
+
+#[tokio::test]
+async fn lyrics_rewrite_normalizes_cowrite_markers_and_limits_unicode_title() {
+    let server =
+        MockServer::json(r#"{"edited_lyrics":"|edit_start|[Chorus]\n[Chorus]\nnew|edit_end|"}"#)
+            .await;
+    let title = "歌".repeat(105);
+    let response = server
+        .client()
+        .rewrite_lyrics(super::lyrics_editor::LyricsRewriteOptions {
+            prompt: "rewrite",
+            prefix: "",
+            edit: "old",
+            suffix: "",
+            title: &title,
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.generated_lyrics, "[Chorus]\nnew");
+    let request = server.captured().await;
+    let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(body["title"], "歌".repeat(100));
+    assert!(body["create_session_token"].is_null());
+    assert!(!request.body.contains("ignored-legacy-token"));
 }

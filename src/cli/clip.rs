@@ -465,7 +465,7 @@ pub struct GetStemsArgs {
     #[arg(long, requires = "download")]
     pub force: bool,
 
-    /// Refuse missing legacy server-side WAV/OPUS conversion
+    /// Refuse missing legacy server-side WAV conversion
     #[arg(long, requires = "download")]
     pub no_convert: bool,
 }

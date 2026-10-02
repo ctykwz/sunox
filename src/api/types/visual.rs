@@ -67,7 +67,7 @@ pub struct CoverArtModelCategory {
     #[serde(default)]
     pub allowed_durations: Vec<u32>,
     #[serde(default)]
-    pub allowed_durations_with_image: Vec<u32>,
+    pub allowed_durations_with_image: Option<Vec<u32>>,
     #[serde(default, flatten)]
     pub extra: BTreeMap<String, Value>,
 }

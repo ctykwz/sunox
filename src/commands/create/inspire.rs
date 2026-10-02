@@ -21,13 +21,18 @@ pub async fn inspire(args: InspireArgs, ctx: &AppContext) -> Result<(), CliError
     };
     let challenge_mode = ChallengeMode::from_flags(args.captcha, args.no_captcha);
     let token = args.token;
+    let token_provider = args.token_provider;
     let negative_tags = args.exclude.unwrap_or_default();
 
     if !ctx.quiet {
         eprintln!("Generating from clip inspiration...");
     }
-    let clips =
-        execute_generation_submission(token, challenge_mode, ctx, move |client| async move {
+    let clips = execute_generation_submission(
+        token,
+        token_provider,
+        challenge_mode,
+        ctx,
+        move |client| async move {
             let req = client
                 .prepare_inspiration_request(InspirationOptions {
                     clip_id: &args.clip_id,
@@ -43,8 +48,9 @@ pub async fn inspire(args: InspireArgs, ctx: &AppContext) -> Result<(), CliError
                 })
                 .await?;
             Ok((client, req))
-        })
-        .await?;
+        },
+    )
+    .await?;
     output_generation(&clips, ctx);
     Ok(())
 }

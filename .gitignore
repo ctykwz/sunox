@@ -30,3 +30,7 @@ songs/
 *.aac
 *.ogg
 *.lrc
+
+# Local account audit evidence (not release source)
+audit_evidence/
+SUPPORTED_API_PROTOCOL_AUDIT_*.md

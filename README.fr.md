@@ -21,7 +21,7 @@ audio et les imports.
 
 - Créer un morceau à partir d'une description, de paroles, de styles, d'une persona ou d'une
   consigne instrumentale.
-- Attendre la fin d'une génération puis télécharger le résultat en MP3, M4A, WAV, Opus ou vidéo.
+- Attendre la fin d'une génération puis télécharger le résultat en MP3, M4A, WAV ou vidéo.
 - Parcourir, rechercher, modifier, publier, supprimer et restaurer des morceaux.
 - Créer une reprise, prolonger, assembler, remasteriser, inverser, découper, fondre, changer la
   vitesse ou générer des pistes séparées.
@@ -115,7 +115,7 @@ sunox download <clip_id_1> <clip_id_2> --output ./songs
 ```
 
 Sans option de format, Sunox récupère le MP3 déjà disponible sur le CDN et y écrit les paroles
-simples et synchronisées lorsqu'elles existent. Utilisez `--format mp3|m4a|wav|opus` uniquement
+simples et synchronisées lorsqu'elles existent. Utilisez `--format mp3|m4a|wav` uniquement
 pour demander une conversion à Suno, ou `--video` pour une vidéo disponible.
 
 ## Commandes courantes

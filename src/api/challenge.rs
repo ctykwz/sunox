@@ -3,9 +3,11 @@ use serde::{Deserialize, Serialize};
 use super::SunoClient;
 use crate::core::CliError;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum ChallengeProvider {
+    #[value(name = "hcaptcha", alias = "1")]
     HCaptcha = 1,
+    #[value(name = "turnstile", alias = "2")]
     Turnstile = 2,
 }
 

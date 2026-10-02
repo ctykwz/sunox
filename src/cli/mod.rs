@@ -175,6 +175,47 @@ mod tests {
     use clap::Parser;
 
     #[test]
+    fn external_token_provider_is_explicit_and_requires_a_token() {
+        for name in ["hcaptcha", "turnstile", "1", "2"] {
+            let cli = Cli::try_parse_from([
+                "sunox",
+                "create",
+                "test",
+                "--token",
+                "opaque",
+                "--token-provider",
+                name,
+            ])
+            .unwrap();
+            let Some(Commands::Create(args)) = cli.command else {
+                panic!("create")
+            };
+            let expected = if matches!(name, "hcaptcha" | "1") {
+                1
+            } else {
+                2
+            };
+            assert_eq!(args.token_provider.unwrap().token_provider(), expected);
+        }
+        assert!(
+            Cli::try_parse_from(["sunox", "create", "test", "--token-provider", "hcaptcha"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "sunox",
+                "create",
+                "test",
+                "--token",
+                "opaque",
+                "--token-provider",
+                "unknown"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
     fn remaster_preserves_an_omitted_variation_for_model_specific_encoding() {
         let cli = Cli::try_parse_from(["sunox", "clip", "remaster", "clip-a"])
             .expect("valid remaster command");

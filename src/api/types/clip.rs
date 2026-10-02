@@ -93,6 +93,8 @@ pub struct ClipMetadata {
     pub is_remix: bool,
     #[serde(default)]
     pub make_instrumental: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_mumble: Option<bool>,
     #[serde(rename = "type")]
     pub clip_type: Option<String>,
     #[serde(default, flatten)]

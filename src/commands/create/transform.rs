@@ -26,15 +26,21 @@ pub async fn cover(args: CoverArgs, ctx: &AppContext) -> Result<(), CliError> {
     }
     let challenge_mode = ChallengeMode::from_flags(args.captcha, args.no_captcha);
     let token = args.token.clone();
-    let clips =
-        execute_generation_submission(token, challenge_mode, ctx, move |client| async move {
+    let token_provider = args.token_provider;
+    let clips = execute_generation_submission(
+        token,
+        token_provider,
+        challenge_mode,
+        ctx,
+        move |client| async move {
             let mut req = client
                 .prepare_cover_request(&args.clip_id, &model, args.tags.as_deref(), None)
                 .await?;
             client.prepare_generation_request(&mut req).await?;
             Ok((client, req))
-        })
-        .await?;
+        },
+    )
+    .await?;
     output_generation(&clips, ctx);
     Ok(())
 }
@@ -63,6 +69,7 @@ pub async fn reuse(args: ReuseArgs, ctx: &AppContext) -> Result<(), CliError> {
     )?;
     let challenge_mode = ChallengeMode::from_flags(args.captcha, args.no_captcha);
     let token = args.token;
+    let token_provider = args.token_provider;
     let clip_id = args.clip_id;
     let enhance_tags = args.enhance_tags;
     let explicit_title = args.title.is_some();
@@ -73,8 +80,12 @@ pub async fn reuse(args: ReuseArgs, ctx: &AppContext) -> Result<(), CliError> {
     if !ctx.quiet {
         eprintln!("Reusing source styles and lyrics with {model}...");
     }
-    let result =
-        execute_generation_submission(token, challenge_mode, ctx, move |client| async move {
+    let result = execute_generation_submission(
+        token,
+        token_provider,
+        challenge_mode,
+        ctx,
+        move |client| async move {
             super::submit::resolve_reuse_source(
                 &mut req,
                 &client,
@@ -101,8 +112,9 @@ pub async fn reuse(args: ReuseArgs, ctx: &AppContext) -> Result<(), CliError> {
                 crate::api::generate::validate_generation_lengths_with_limits(&req, &limits)?;
             }
             Ok((client, req))
-        })
-        .await?;
+        },
+    )
+    .await?;
     output_generation(&result, ctx);
     Ok(())
 }
@@ -132,6 +144,7 @@ async fn paint(
     };
     let challenge_mode = ChallengeMode::from_flags(args.captcha, args.no_captcha);
     let token = args.token;
+    let token_provider = args.token_provider;
     let label = match mode {
         crate::api::paint::PaintMode::Underpaint => "instrumental backing",
         crate::api::paint::PaintMode::Overpaint => "vocals",
@@ -139,8 +152,12 @@ async fn paint(
     if !ctx.quiet {
         eprintln!("Adding {label} with {model}...");
     }
-    let result =
-        execute_generation_submission(token, challenge_mode, ctx, move |client| async move {
+    let result = execute_generation_submission(
+        token,
+        token_provider,
+        challenge_mode,
+        ctx,
+        move |client| async move {
             let mut req = client
                 .prepare_paint_request(crate::api::paint::PaintOptions {
                     clip_id: &args.clip_id,
@@ -154,8 +171,9 @@ async fn paint(
                 .await?;
             client.prepare_generation_request(&mut req).await?;
             Ok((client, req))
-        })
-        .await?;
+        },
+    )
+    .await?;
     output_generation(&result, ctx);
     Ok(())
 }
@@ -425,9 +443,14 @@ pub async fn stems(args: StemsArgs, ctx: &AppContext) -> Result<(), CliError> {
     }
     let challenge_mode = ChallengeMode::from_flags(args.captcha, args.no_captcha);
     let token = args.token.clone();
+    let token_provider = args.token_provider;
     let mode = args.mode;
-    let clips =
-        execute_generation_submission(token, challenge_mode, ctx, move |client| async move {
+    let clips = execute_generation_submission(
+        token,
+        token_provider,
+        challenge_mode,
+        ctx,
+        move |client| async move {
             let mut req = match mode {
                 StemMode::Auto => client.prepare_stems_request(&args.clip_id, None).await?,
                 StemMode::Split => {
@@ -443,8 +466,9 @@ pub async fn stems(args: StemsArgs, ctx: &AppContext) -> Result<(), CliError> {
             };
             client.prepare_generation_request(&mut req).await?;
             Ok((client, req))
-        })
-        .await?;
+        },
+    )
+    .await?;
     output_generation(&clips, ctx);
     Ok(())
 }

@@ -20,7 +20,7 @@ English · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) ·
 
 - Create songs from a description, custom lyrics, style tags, a voice persona, or an instrumental
   brief.
-- Wait for asynchronous generations and download the resulting MP3, M4A, WAV, Opus, or video.
+- Wait for asynchronous generations and download the resulting MP3, M4A, WAV, or video.
 - Browse, search, edit, publish, trash, restore, and download clips.
 - Cover, extend, concatenate, remaster, reverse, crop, fade, change speed, or split stems.
 - Read/download existing stem banks, manage lyrics projects and Custom Models, and create private
@@ -121,9 +121,10 @@ The default download uses Suno's prepared MP3 endpoint. Sunox writes available p
 lyrics into the file's ID3 tags. Before fetching any file, Sunox requires the source clip's
 `is_download_unlocked` field to be exactly `true`; otherwise it submits the current one-shot
 `POST /api/download/authorize` request for that source. MP3, M4A, WAV, and `--video` then prefer
-Suno's prepared `mp3`, `m4a`, `wav`, and `mp4` routes. OPUS remains a legacy compatibility path,
-and legacy WAV or direct-video fallbacks are considered only after the source is unlocked. Use
-`--format mp3|m4a|wav|opus` to select audio output and `--no-convert` to refuse a missing legacy
+Suno's prepared `mp3`, `m4a`, `wav`, and `mp4` routes. Suno has retired OPUS conversion;
+`--format opus` fails before any account request. Legacy WAV or direct-video fallbacks are
+considered only after the source is unlocked. Use
+`--format mp3|m4a|wav` to select audio output and `--no-convert` to refuse a missing legacy
 conversion. Authorization can consume plan download allowance and is never blindly replayed after
 an ambiguous response or redirect. A batch whose clip names resolve to the same destination fails
 before authorization, including with `--force`.
@@ -273,7 +274,7 @@ credit-bearing `gen_stem` job; `clip get-stems` only reads existing result pages
 Premier-only arbitrary Advanced Split instruments are intentionally not offered. Existing-result
 downloads fail closed if any paged stem reference cannot be hydrated. MP3 stem export deliberately
 skips the separate aligned-lyrics POST. Every file in one stem bank reuses a single authorization
-of its parent source clip rather than authorizing each stem. WAV/OPUS export can still use a legacy
+of its parent source clip rather than authorizing each stem. WAV export can still use a legacy
 conversion only after that parent is unlocked and unless `--no-convert` is used. Global
 `--read-only` permits export only when the parent is already unlocked.
 
@@ -427,7 +428,10 @@ The relevant overrides are:
 --captcha          Run browser verification even when the preflight says it is unnecessary
 --no-captcha       Do not run the automatic browser solver
 --token <token>    Submit an externally solved challenge token
+--token-provider hcaptcha|turnstile    Provider that issued the external token
 ```
+
+If Suno enables its server-seeded hCaptcha fallback, a known Turnstile provider failure triggers one hCaptcha attempt. Pairing, transport, authentication, and unknown errors stop the command. The successful provider is sent with the token. For a token obtained through web fallback, specify `--token-provider hcaptcha`; a Turnstile or unavailable preflight requires this option because it cannot identify the external token's actual provider. A confirmed hCaptcha preflight retains the provider-1 default. Each CLI invocation checks the live gate independently.
 
 Set `challenge_browser` to `auto` (default), `existing` (require the Bridge and never launch a
 separate browser process), or `isolated` (always use the temporary browser). A one-command override
@@ -527,7 +531,7 @@ operation checkpoint.
 Pass global `--read-only` to reject account writes before the first write request. Read-only mode
 still allows account reads, but a download is allowed only when its source already reports
 `is_download_unlocked == true`; it never calls `/api/download/authorize`. It also prevents
-timed-lyrics augmentation and missing WAV/OPUS conversion while continuing to return an already
+timed-lyrics augmentation and missing WAV conversion while continuing to return an already
 existing alignment or converted file when available after the source-unlock gate.
 
 ## Limits and safety

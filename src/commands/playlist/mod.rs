@@ -187,7 +187,10 @@ async fn add(args: PlaylistTracksArgs, ctx: &AppContext) -> Result<(), CliError>
             "clip_ids": args.clip_ids,
             "action": "add"
         })),
-        OutputFormat::Table => eprintln!("Added {} clip(s)", args.clip_ids.len()),
+        OutputFormat::Table => eprintln!(
+            "Playlist contains {} requested clip(s)",
+            args.clip_ids.len()
+        ),
     }
     Ok(())
 }

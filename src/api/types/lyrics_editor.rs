@@ -3,19 +3,12 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Serialize)]
-pub struct LyricsRewriteRequest<'a> {
-    pub prompt: &'a str,
-    pub context_lyrics_prefix: &'a str,
-    pub context_lyrics_edit: &'a str,
-    pub context_lyrics_suffix: &'a str,
-    pub create_session_token: &'a str,
-    pub title: &'a str,
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LyricsRewriteResponse {
-    #[serde(deserialize_with = "deserialize_nonempty_generated_lyrics")]
+    #[serde(
+        rename(deserialize = "edited_lyrics"),
+        deserialize_with = "deserialize_nonempty_generated_lyrics"
+    )]
     pub generated_lyrics: String,
     #[serde(default, deserialize_with = "deserialize_optional_nonempty_string")]
     pub lyrics_request_id: Option<String>,
@@ -122,6 +115,28 @@ where
     D: Deserializer<'de>,
 {
     let value = String::deserialize(deserializer)?;
+    let mut value = value
+        .replace("|edit_start|", "")
+        .replace("|edit_end|", "")
+        .replace("|edit_start", "")
+        .replace("|edit_end", "");
+    // The current editor removes a duplicated leading section heading.
+    let trimmed = value.trim_start();
+    if let Some((heading, rest)) = trimmed.split_once('\n') {
+        let heading = heading.trim_end_matches([' ', '\t']);
+        if heading.starts_with('[')
+            && heading.ends_with(']')
+            && !heading[1..heading.len() - 1].contains(']')
+        {
+            let rest = rest.trim_start_matches([' ', '\t', '\n']);
+            if rest
+                .split_once('\n')
+                .is_some_and(|(next, _)| next.trim_end_matches([' ', '\t']) == heading)
+            {
+                value = rest.to_owned();
+            }
+        }
+    }
     if value.is_empty() {
         return Err(serde::de::Error::custom(
             "lyrics rewrite response generated_lyrics must not be empty",
@@ -178,7 +193,7 @@ mod tests {
     #[test]
     fn rewrite_result_matches_current_editor_newline_rules() {
         let response: LyricsRewriteResponse = serde_json::from_value(serde_json::json!({
-            "generated_lyrics": "[Chorus]\nnew"
+            "edited_lyrics": "[Chorus]\nnew"
         }))
         .expect("rewrite response");
         let result = response.into_editor_result("[Verse]\nold", "selected\n", "outro");
